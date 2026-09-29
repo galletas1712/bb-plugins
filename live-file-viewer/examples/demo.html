@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Live preview</title>
+    <style>
+      body {
+        margin: 0;
+        padding: clamp(24px, 8vw, 72px);
+        font: 16px/1.6 system-ui;
+        background: #eef6f0;
+        color: #173e2b;
+      }
+      main {
+        max-width: 560px;
+        margin: auto;
+      }
+      h1 {
+        font-size: clamp(28px, 6vw, 48px);
+        line-height: 1.1;
+      }
+      button {
+        border: 0;
+        border-radius: 9px;
+        padding: 12px 18px;
+        background: #215d3e;
+        color: white;
+        font: inherit;
+        cursor: pointer;
+      }
+      img {
+        width: 64px;
+        height: 64px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="demo.svg" alt="Leaf" />
+      <h1>A little room to think.</h1>
+      <p>
+        Switch to split view and edit this heading. The preview changes before
+        you save.
+      </p>
+      <button id="counter">Try the interaction</button>
+    </main>
+    <script>
+      let count = 0;
+      document.querySelector("#counter").onclick = (e) => {
+        e.target.textContent = `Clicked ${++count} time${count === 1 ? "" : "s"}`;
+      };
+    </script>
+  </body>
+</html>
