@@ -1,0 +1,156 @@
+.lfv-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  background: var(--background);
+  color: var(--foreground);
+}
+.lfv-root:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  padding: 8px;
+}
+.lfv-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.lfv-filename {
+  flex: 1;
+  min-width: 32px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.lfv-status {
+  display: flex;
+  align-items: center;
+  color: var(--muted-foreground);
+  padding: 0 4px;
+}
+.lfv-tool {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+.lfv-tool:hover,
+.lfv-tool[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--foreground);
+}
+.lfv-tool:focus-visible,
+.lfv-divider:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.lfv-tool:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.lfv-modes {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+.lfv-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  background: var(--muted);
+  flex-shrink: 0;
+  overflow-wrap: anywhere;
+}
+.lfv-panes {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.lfv-editor-pane {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.lfv-preview .lfv-editor-pane {
+  display: none;
+}
+.lfv-split > .lfv-editor-pane {
+  flex: 0 0 var(--editor-size);
+}
+.lfv-editor {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.lfv-divider {
+  width: 7px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  touch-action: none;
+  background: var(--border);
+  border-left: 2px solid var(--background);
+  border-right: 2px solid var(--background);
+}
+.lfv-divider:hover {
+  background: var(--ring);
+}
+.lfv-panes > .lfv-preview {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+.lfv-preview iframe {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  background: white;
+}
+.lfv-markdown {
+  padding: 20px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.lfv-svg {
+  display: grid;
+  place-items: center;
+  flex: 1;
+  padding: 24px;
+  overflow: auto;
+  background: repeating-conic-gradient(#8881 0% 25%, transparent 0% 50%) 0
+    0/20px 20px;
+}
+.lfv-svg img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.lfv-panes.lfv-editor > .lfv-preview { display: none; }
