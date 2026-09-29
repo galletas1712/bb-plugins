@@ -1,6 +1,6 @@
 // Shared between server.ts and app.tsx: the Brief the helper thread writes
 // about a PR (plain-English summary, areas, claims checked against the diff,
-// and its own reading of how much the PR looks like unedited AI output).
+// and a model score for how much the PR looks like unedited AI output).
 
 export type ClaimVerdict = "matches" | "partly" | "no-evidence" | "contradicted";
 

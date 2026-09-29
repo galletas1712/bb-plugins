@@ -1,0 +1,9 @@
+{% if not signals %}
+(not computed)
+{%- elif signals.items.length == 0 %}
+none
+{%- else %}
+{%- for s in signals.items %}
+- {{ s.label }} ({{ s.count }}): {{ s.evidence }}
+{%- endfor %}
+{%- endif %}

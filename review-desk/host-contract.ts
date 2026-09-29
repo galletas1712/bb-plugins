@@ -116,6 +116,36 @@ export const codemapSchema = z.object({
 });
 export type Codemap = z.infer<typeof codemapSchema>;
 
+/** One pull request in a GitHub (or inferred) stack, ordered from trunk upward. */
+export const prStackEntrySchema = z.object({
+  position: z.number(),
+  number: z.number(),
+  title: z.string(),
+  state: z.string(),
+  isDraft: z.boolean(),
+  merged: z.boolean(),
+  url: z.string(),
+  additions: z.number(),
+  deletions: z.number(),
+  changedFiles: z.number(),
+  reviewDecision: z.string().nullable(),
+  headRefName: z.string(),
+  headSha: z.string(),
+  baseRefName: z.string(),
+  /** Changed paths in this layer, used to mark files that also change in other layers. */
+  files: z.array(z.string()),
+});
+export type PrStackEntry = z.infer<typeof prStackEntrySchema>;
+
+export const prStackSchema = z.object({
+  /** GitHub stack number; null when the chain was inferred from PR bases. */
+  number: z.number().nullable(),
+  baseRefName: z.string(),
+  source: z.enum(["github", "inferred"]),
+  entries: z.array(prStackEntrySchema),
+});
+export type PrStack = z.infer<typeof prStackSchema>;
+
 export const hostContract = defineRpcContract({
   /** Fetch the PR head and base, and keep a detached worktree at the head. */
   repo_prepare: {
@@ -128,6 +158,11 @@ export const hostContract = defineRpcContract({
       key: z.string(),
     }),
     output: z.object({ worktree: z.string(), headSha: z.string(), baseSha: z.string() }),
+  },
+  /** Drop a PR worktree after the review is removed. */
+  repo_release: {
+    input: z.object({ repoPath: z.string(), worktree: z.string() }),
+    output: z.object({ ok: z.literal(true) }),
   },
   repo_clone: {
     input: z.object({ owner: z.string(), repo: z.string(), dest: z.string() }),
@@ -186,9 +221,28 @@ export const hostContract = defineRpcContract({
     input: z.object({ owner: z.string(), repo: z.string(), number: z.number(), commentId: z.number(), body: z.string() }),
     output: z.object({ ok: z.literal(true) }),
   },
+  /** Mark the PR ready for review, or convert it back to draft. */
+  gh_set_draft: {
+    input: z.object({ owner: z.string(), repo: z.string(), number: z.number(), draft: z.boolean() }),
+    output: z.object({ isDraft: z.boolean() }),
+  },
   gh_resolve: {
     input: z.object({ threadId: z.string(), resolve: z.boolean() }),
     output: z.object({ ok: z.literal(true) }),
+  },
+  /**
+   * The GitHub stack this PR (or stack number) belongs to. Null when the PR is
+   * not stacked. `number` is a PR; `stackNumber` is the repo-scoped stack id
+   * from `gh stack` / github.com. Pass exactly one.
+   */
+  gh_stack: {
+    input: z.object({
+      owner: z.string(),
+      repo: z.string(),
+      number: z.number().nullable(),
+      stackNumber: z.number().nullable(),
+    }),
+    output: z.object({ stack: prStackSchema.nullable() }),
   },
   codemap: {
     input: z.object({

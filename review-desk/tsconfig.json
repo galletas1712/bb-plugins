@@ -22,8 +22,10 @@
   },
   "include": [
     "server.ts",
+    "prompts.ts",
     "host.ts",
     "host-contract.ts",
+    "stack-fetch.ts",
     "app.tsx",
     "components",
     "lib",

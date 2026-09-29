@@ -42,6 +42,37 @@ export interface ParsedPatch {
   removed: PatchLine[];
 }
 
+/** Line numbers that appear in any hunk of a unified diff, including context. */
+export function hunkLineNumbers(patch: string): { old: Set<number>; new: Set<number> } {
+  const old = new Set<number>();
+  const next = new Set<number>();
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+  for (const raw of patch.split("\n")) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+    if (hunk !== null) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
+    if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("diff ") || raw.startsWith("index ")) {
+      if (raw.startsWith("diff ")) inHunk = false;
+      continue;
+    }
+    if (raw.startsWith("\\")) continue;
+    if (raw.startsWith("+")) next.add(newLine++);
+    else if (raw.startsWith("-")) old.add(oldLine++);
+    else {
+      old.add(oldLine++);
+      next.add(newLine++);
+    }
+  }
+  return { old, new: next };
+}
+
 /** Unified diff of one file to added (head numbers) and removed (base numbers) lines. */
 export function parsePatch(patch: string): ParsedPatch {
   const added: PatchLine[] = [];
@@ -137,6 +168,36 @@ const DEFENSIVE: { re: RegExp; note: string; weight: number }[] = [
   { re: /if\s+\w+\s+is\s+not\s+None\s+and\s+\w+\s+is\s+not\s+None/, note: "chained None guards", weight: 1 },
   { re: /\?\?\s*\{\}\s*\)?\s*;?\s*$|\|\|\s*\{\}\s*;?\s*$/, note: "fallback to an empty object", weight: 1 },
 ];
+/** Semicolons in a comment or a description paragraph. */
+function semicolonCount(text: string): number {
+  return (text.match(/;/g) ?? []).length;
+}
+
+/** Dash punctuation: em/en dashes, `--`, and hyphens that are not in identifiers or arrows. */
+function dashCount(text: string): number {
+  let n = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "—" || c === "–") {
+      n++;
+      continue;
+    }
+    if (c !== "-") continue;
+    const prev = text[i - 1] ?? "";
+    const next = text[i + 1] ?? "";
+    if (next === ">" || prev === "<" || next === "=" || prev === "=") continue;
+    if (next === "-") continue;
+    if (prev === "-") {
+      n++;
+      continue;
+    }
+    if (/\d/.test(next) && (prev === "" || /\s/.test(prev))) continue;
+    if (/[A-Za-z0-9]/.test(prev) && /[A-Za-z0-9]/.test(next)) continue;
+    n++;
+  }
+  return n;
+}
+
 /** A comment line that is really code: statement-shaped, few words, no sentence punctuation. */
 function looksLikeCode(c: string): boolean {
   const t = c.trim();
@@ -388,6 +449,31 @@ export function computeSlop(input: SlopInput): SlopReport {
     }
     if (fns >= 10 && documented / fns >= 0.9) ev.push({ path: nonTestCode[0] ?? "", line: null, side: "new", note: `${documented} of ${fns} new functions carry a doc comment, private ones included` });
     push("over-commenting", "Over-commented", "Far more comment than code, or a docstring on every function including private helpers.", 3, 8, ev);
+  }
+
+  // 11. Semicolons and dash punctuation in comments and the PR body.
+  {
+    const ev: Evidence[] = [];
+    let marks = 0;
+    const record = (path: string, line: number | null, text: string) => {
+      const sc = semicolonCount(text);
+      const dh = dashCount(text);
+      if (sc + dh === 0) return;
+      marks += sc + dh;
+      const bits = [sc > 0 ? `${sc};` : "", dh > 0 ? `${dh}—` : ""].filter((b) => b !== "");
+      ev.push({ path, line, side: "new", note: `${bits.join(" ")}  ${text.trim().slice(0, 80)}` });
+    };
+    for (const path of codePaths) {
+      for (const l of parsed.get(path)?.added ?? []) {
+        const c = commentText(path, l.text);
+        if (c !== null) record(path, l.line, c);
+      }
+    }
+    if (input.title.trim() !== "") record("", null, input.title);
+    for (const para of input.body.split(/\n+/)) {
+      if (para.trim() !== "") record("", null, para);
+    }
+    push("prose-punctuation", "Semicolons and dashes", "Semicolons and dash punctuation in added comments and the PR body.", 0.7, 16, ev, marks * 0.7);
   }
 
   signals.sort((a, b) => b.score - a.score);

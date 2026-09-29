@@ -1,0 +1,18 @@
+Job: find AI slop and cleanups in this PR. Reply with exactly one fenced block tagged {{ fence }} containing a JSON array:
+[{ "path": string, "line": number, "endLine"?: number, "kind": "slop" | "cleanup" | "risk" | "question", "severity": "low" | "medium" | "high", "title": string, "body": string, "suggestion"?: string }]
+
+path and line: a changed file and a head line number that appears in the diff (added or context). endLine when the note covers a range.
+kind: slop = generated residue a person would cut (narrating comments, filler docstrings on private helpers, boilerplate, names that read generated); cleanup = dead or duplicated code, leftovers, stubs, inconsistent patterns; risk = weakened or skipped tests, swallowed errors, defensive noise that hides failures, behavior the description does not mention; question = something the reviewer should ask the author.
+title: at most 12 words. body: one to three plain-English sentences saying what and why, no filler. suggestion: replacement code for the lines only when a concrete rewrite is obvious; leave it out otherwise.
+At most 25 notes, most important first. Skip anything a formatter fixes. Read the diff; do not invent lines. Skip lines that already carry a GitHub review thread if the thread says the same thing.
+
+Deterministic signals for orientation (verify before repeating them):
+{% include "_signals.jinja" %}
+
+PR title: {{ pr.title }}
+{% include "_files.jinja" %}
+
+Existing GitHub review threads (path:line by author):
+{%- for t in threads %}
+  {{ t.path }}:{{ t.line }} {{ t.author }}: {{ t.preview }}
+{%- endfor %}

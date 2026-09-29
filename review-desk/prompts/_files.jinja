@@ -1,0 +1,7 @@
+Changed files ({{ fileCount }}):
+{%- for f in files %}
+  {{ f.status }} {{ f.path }} (+{{ f.additions }} -{{ f.deletions }})
+{%- endfor %}
+{%- if filesMore %}
+  ... {{ filesMore }} more
+{%- endif %}

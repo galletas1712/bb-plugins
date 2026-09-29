@@ -1,0 +1,20 @@
+{{ prefix }} — commit {{ sha }} by {{ author }} ({{ date }}): {{ title }}
+{% if body %}{{ body }}
+
+{% endif %}
+Files ({{ fileCount }}):
+{%- for f in files %}
+  {{ f.status }} {{ f.path }} (+{{ f.additions }} -{{ f.deletions }})
+{%- endfor %}
+{%- for p in patches %}
+
+--- {{ p.path }}
+```diff
+{{ p.body }}
+{% if p.more %}... {{ p.more }} more lines
+{% endif %}```
+{%- endfor %}
+{%- if truncated %}
+
+(patch truncated; run: git show {{ fullSha }})
+{%- endif %}

@@ -1,0 +1,7 @@
+{{ prefix }} — {{ qualified }}{% if symbol %} ({{ symbol.kind }}, {{ symbol.status }}, {{ symbol.changedLines }} changed lines, fan-in {{ symbol.fanIn }}){% endif %} in {{ path }} lines {{ start }}-{{ end }} at {{ side }}:
+```
+{{ body }}
+{% if truncated %}
+... truncated after {{ max }} lines; read the file for the rest
+{% endif %}
+```

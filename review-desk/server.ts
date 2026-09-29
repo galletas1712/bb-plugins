@@ -12,8 +12,27 @@ import type Database from "better-sqlite3";
 import { defineRpcContract, type BbPluginApi, type PluginMentionItem, type PluginMentionSearchContext } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { MENTION_PROVIDER_ID, decodeMentionRef, encodeMentionRef, mentionLabel, type MentionRef } from "./mention-ref";
-import { computeSlop, type SlopReport } from "./slop";
+import { computeSlop, hunkLineNumbers, type SlopReport } from "./slop";
 import { BRIEF_FENCE, type Brief, type BriefEvidence } from "./brief-spec";
+import {
+  renderAnalystIntro,
+  renderBrief,
+  renderChatSelection,
+  renderHelperIntro,
+  renderMentionCommit,
+  renderMentionCrange,
+  renderMentionFile,
+  renderMentionPr,
+  renderMentionRange,
+  renderMentionSymbol,
+  renderMentionThread,
+  renderNotes,
+  type CodemapPrompt,
+  type FilePrompt,
+  type PrPrompt,
+  type SignalsPrompt,
+  type StackPrompt,
+} from "./prompts";
 import {
   changedFileSchema,
   codemapSchema,
@@ -21,10 +40,13 @@ import {
   ghReviewSchema,
   ghThreadSchema,
   hostContract,
+  prStackEntrySchema,
+  prStackSchema,
   type ChangedFile,
   type Codemap,
   type GhPr,
   type GhThread,
+  type PrStack,
 } from "./host-contract";
 
 // ---------------------------------------------------------------------------
@@ -77,9 +99,16 @@ const reviewSummarySchema = z.object({
   number: z.number(),
   title: z.string(),
   state: z.string(),
+  isDraft: z.boolean(),
   headSha: z.string(),
   pendingCount: z.number(),
   updatedAt: z.number(),
+  stack: z.object({
+    number: z.number().nullable(),
+    position: z.number(),
+    size: z.number(),
+    key: z.string(),
+  }).nullable(),
 });
 export type ReviewSummary = z.infer<typeof reviewSummarySchema>;
 
@@ -100,6 +129,8 @@ const pendingSchema = z.object({
   side: z.enum(["LEFT", "RIGHT"]),
   body: z.string(),
   createdAt: z.number(),
+  /** The path or line is gone from the current reviewable diff. */
+  stale: z.boolean(),
 });
 export type PendingComment = z.infer<typeof pendingSchema>;
 
@@ -147,6 +178,8 @@ const briefStateSchema = z.object({
   /** The stored brief was written for an older head. */
   stale: z.boolean(),
   updatedAt: z.number().nullable(),
+  helperModel: z.string(),
+  helperModels: z.array(z.object({ model: z.string(), displayName: z.string(), isDefault: z.boolean() })),
 });
 export type BriefState = z.infer<typeof briefStateSchema>;
 
@@ -176,6 +209,17 @@ const noteSchema = z.object({
 export type Note = z.infer<typeof noteSchema>;
 export type NoteKind = z.infer<typeof noteKindSchema>;
 
+const stackEntryViewSchema = prStackEntrySchema.extend({
+  reviewId: z.string().nullable(),
+  pendingCount: z.number(),
+  viewedCount: z.number(),
+});
+const stackViewSchema = prStackSchema.extend({
+  currentPosition: z.number(),
+  entries: z.array(stackEntryViewSchema),
+});
+export type StackView = z.infer<typeof stackViewSchema>;
+
 const okSchema = z.object({ ok: z.literal(true) });
 const reviewIdSchema = z.object({ reviewId: z.string() });
 
@@ -198,6 +242,7 @@ export const rpcContract = defineRpcContract({
       seen: z.object({ prevHead: z.string().nullable(), seenHead: z.string().nullable() }),
       /** Project the analyst threads are created in (the composer needs one). */
       chatProjectId: z.string(),
+      stack: stackViewSchema.nullable(),
     }),
   },
   reviews_sync: { input: reviewIdSchema, output: z.object({ review: reviewSchema, headChanged: z.boolean() }) },
@@ -229,10 +274,14 @@ export const rpcContract = defineRpcContract({
   },
   pending_update: { input: z.object({ id: z.string(), body: z.string().trim().min(1).max(20_000) }), output: z.object({ pending: pendingSchema }) },
   pending_delete: { input: z.object({ id: z.string() }), output: okSchema },
+  /** Drop pending comments that no longer sit on the current diff. */
+  pending_clear: { input: z.object({ reviewId: z.string(), staleOnly: z.literal(true) }), output: z.object({ removed: z.number() }) },
   review_submit: {
     input: z.object({ reviewId: z.string(), event: z.enum(["COMMENT", "APPROVE", "REQUEST_CHANGES"]), body: z.string().max(20_000) }),
-    output: z.object({ url: z.string().nullable(), posted: z.number() }),
+    output: z.object({ url: z.string().nullable(), posted: z.number(), dropped: z.number() }),
   },
+  /** Mark the PR ready for review on GitHub, or convert it back to draft. */
+  review_set_draft: { input: z.object({ reviewId: z.string(), draft: z.boolean() }), output: z.object({ review: reviewSchema }) },
   thread_reply: { input: z.object({ reviewId: z.string(), commentId: z.number(), body: z.string().trim().min(1).max(20_000) }), output: okSchema },
   thread_resolve: { input: z.object({ reviewId: z.string(), threadId: z.string(), resolve: z.boolean() }), output: okSchema },
   /** Send a chat message to the analyst for a provider, spawning it on first use. */
@@ -283,6 +332,7 @@ export const rpcContract = defineRpcContract({
   notes_from_signal: { input: z.object({ reviewId: z.string(), signalId: z.string(), show: z.boolean() }), output: z.object({ count: z.number() }) },
   /** Ask the helper to find slop and cleanups; notes arrive over realtime. */
   notes_find: { input: reviewIdSchema, output: okSchema },
+  helper_set_model: { input: z.object({ model: z.string().trim().min(1) }), output: z.object({ model: z.string() }) },
   note_add: {
     input: z.object({ reviewId: z.string(), path: z.string(), line: z.number().int().min(1), startLine: z.number().int().min(1).nullable().optional(), side: z.enum(["LEFT", "RIGHT"]), body: z.string().trim().min(1).max(20_000), kind: noteKindSchema.optional() }),
     output: z.object({ note: noteSchema }),
@@ -291,7 +341,7 @@ export const rpcContract = defineRpcContract({
   note_delete: { input: z.object({ id: z.string() }), output: okSchema },
   /** Turn a note into a pending GitHub comment; the note is kept as promoted. */
   note_promote: { input: z.object({ id: z.string() }), output: z.object({ pending: pendingSchema }) },
-  notes_clear: { input: z.object({ reviewId: z.string(), source: z.enum(["signal", "helper", "me"]).optional(), dismissedOnly: z.boolean().optional() }), output: z.object({ removed: z.number() }) },
+  notes_clear: { input: z.object({ reviewId: z.string(), source: z.enum(["signal", "helper", "me"]).optional(), dismissedOnly: z.boolean().optional(), staleOnly: z.boolean().optional() }), output: z.object({ removed: z.number() }) },
   /** Record that the review is open at its current head; returns the head it was last opened at before this one. */
   review_seen: { input: reviewIdSchema, output: z.object({ prevHead: z.string().nullable(), seenHead: z.string().nullable() }) },
   /**
@@ -428,6 +478,21 @@ const MIGRATIONS = [
    )`,
   `CREATE INDEX IF NOT EXISTS notes_review ON notes (review_id)`,
   `CREATE TABLE IF NOT EXISTS review_seen (review_id TEXT PRIMARY KEY, seen_head_sha TEXT NOT NULL, prev_head_sha TEXT, seen_at INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS stack_cache (
+     owner TEXT NOT NULL,
+     repo TEXT NOT NULL,
+     number INTEGER NOT NULL,
+     json TEXT NOT NULL,
+     fetched_at INTEGER NOT NULL,
+     PRIMARY KEY (owner, repo, number)
+   )`,
+    `CREATE TABLE IF NOT EXISTS dismissed (
+     owner TEXT NOT NULL,
+     repo TEXT NOT NULL,
+     number INTEGER NOT NULL,
+     PRIMARY KEY (owner, repo, number)
+   )`,
+  `ALTER TABLE helpers ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
 ];
 
 interface ReviewRow {
@@ -440,7 +505,7 @@ interface PendingRow { id: string; review_id: string; path: string; line: number
 interface SeatRow { review_id: string; provider_id: string; thread_id: string; environment_id: string | null; created_at: number }
 interface CodemapRow { review_id: string; head_sha: string; status: string; json: string | null; error: string | null; updated_at: number }
 interface CacheRow { review_id: string; json: string; fetched_at: number }
-interface HelperRow { review_id: string; thread_id: string; provider_id: string; environment_id: string | null; job: string | null; created_at: number }
+interface HelperRow { review_id: string; thread_id: string; provider_id: string; environment_id: string | null; job: string | null; created_at: number; model: string }
 interface NoteRow {
   id: string; review_id: string; head_sha: string; path: string; line: number; start_line: number | null; side: string; kind: string; severity: string; title: string; body: string;
   suggestion: string | null; source: string; signal_id: string | null; state: string; anchor_hash: string | null; created_at: number; updated_at: number;
@@ -468,6 +533,11 @@ function createStore(db: Database.Database) {
     ),
     setEnvironment: db.prepare<[string, string]>(`UPDATE reviews SET environment_id = ? WHERE id = ?`),
     touch: db.prepare<[number, string]>(`UPDATE reviews SET updated_at = ? WHERE id = ?`),
+    setSyncedAt: db.prepare<[number, string]>(`UPDATE reviews SET synced_at = ? WHERE id = ?`),
+    setDraft: db.prepare<[number, number, string]>(`UPDATE reviews SET is_draft = ?, updated_at = ? WHERE id = ?`),
+    setClosed: db.prepare<[string, number, string, string, number, number, string]>(
+      `UPDATE reviews SET state = ?, is_draft = ?, title = ?, gh_updated_at = ?, synced_at = ?, updated_at = ? WHERE id = ?`,
+    ),
     deleteReview: db.prepare<[string]>(`DELETE FROM reviews WHERE id = ?`),
     filesCache: db.prepare<[string], { head_sha: string; json: string }>(`SELECT head_sha, json FROM files_cache WHERE review_id = ?`),
     setFilesCache: db.prepare<[string, string, string]>(`INSERT INTO files_cache (review_id, head_sha, json) VALUES (?, ?, ?) ON CONFLICT(review_id) DO UPDATE SET head_sha = excluded.head_sha, json = excluded.json`),
@@ -496,8 +566,8 @@ function createStore(db: Database.Database) {
     deleteSeat: db.prepare<[string, string]>(`DELETE FROM seats WHERE review_id = ? AND provider_id = ?`),
     helper: db.prepare<[string], HelperRow>(`SELECT * FROM helpers WHERE review_id = ?`),
     helperByThread: db.prepare<[string], HelperRow>(`SELECT * FROM helpers WHERE thread_id = ?`),
-    upsertHelper: db.prepare<[string, string, string, string | null, number]>(
-      `INSERT INTO helpers (review_id, thread_id, provider_id, environment_id, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(review_id) DO UPDATE SET thread_id = excluded.thread_id, provider_id = excluded.provider_id, environment_id = excluded.environment_id`,
+    upsertHelper: db.prepare<[string, string, string, string | null, number, string]>(
+      `INSERT INTO helpers (review_id, thread_id, provider_id, environment_id, created_at, model) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(review_id) DO UPDATE SET thread_id = excluded.thread_id, provider_id = excluded.provider_id, environment_id = excluded.environment_id, model = excluded.model`,
     ),
     setHelperJob: db.prepare<[string | null, string]>(`UPDATE helpers SET job = ? WHERE review_id = ?`),
     deleteHelper: db.prepare<[string]>(`DELETE FROM helpers WHERE review_id = ?`),
@@ -523,11 +593,30 @@ function createStore(db: Database.Database) {
     deleteSignalNotes: db.prepare<[string, string]>(`DELETE FROM notes WHERE review_id = ? AND signal_id = ? AND state IN ('open', 'stale')`),
     deleteNotesBySource: db.prepare<[string, string]>(`DELETE FROM notes WHERE review_id = ? AND source = ? AND state <> 'promoted'`),
     deleteDismissedNotes: db.prepare<[string]>(`DELETE FROM notes WHERE review_id = ? AND state = 'dismissed'`),
+    deleteStaleNotes: db.prepare<[string]>(`DELETE FROM notes WHERE review_id = ? AND state = 'stale'`),
     deleteAllNotes: db.prepare<[string]>(`DELETE FROM notes WHERE review_id = ? AND state <> 'promoted'`),
     seen: db.prepare<[string], { review_id: string; seen_head_sha: string; prev_head_sha: string | null; seen_at: number }>(`SELECT * FROM review_seen WHERE review_id = ?`),
     upsertSeen: db.prepare<[string, string, string | null, number]>(
       `INSERT INTO review_seen (review_id, seen_head_sha, prev_head_sha, seen_at) VALUES (?, ?, ?, ?) ON CONFLICT(review_id) DO UPDATE SET seen_head_sha = excluded.seen_head_sha, prev_head_sha = excluded.prev_head_sha, seen_at = excluded.seen_at`,
     ),
+    stackCache: db.prepare<[string, string, number], { json: string; fetched_at: number }>(`SELECT json, fetched_at FROM stack_cache WHERE owner = ? AND repo = ? AND number = ?`),
+    upsertStackCache: db.prepare<[string, string, number, string, number]>(
+      `INSERT INTO stack_cache (owner, repo, number, json, fetched_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner, repo, number) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at`,
+    ),
+    deleteStackCache: db.prepare<[string, string, number]>(`DELETE FROM stack_cache WHERE owner = ? AND repo = ? AND number = ?`),
+    dismissed: db.prepare<[string, string, number], { number: number }>(`SELECT number FROM dismissed WHERE owner = ? AND repo = ? AND number = ?`),
+    dismiss: db.prepare<[string, string, number]>(`INSERT OR IGNORE INTO dismissed (owner, repo, number) VALUES (?, ?, ?)`),
+    undismiss: db.prepare<[string, string, number]>(`DELETE FROM dismissed WHERE owner = ? AND repo = ? AND number = ?`),
+    deleteViewedByReview: db.prepare<[string]>(`DELETE FROM viewed WHERE review_id = ?`),
+    deleteFilesCache: db.prepare<[string]>(`DELETE FROM files_cache WHERE review_id = ?`),
+    deleteThreadsCache: db.prepare<[string]>(`DELETE FROM threads_cache WHERE review_id = ?`),
+    deleteConversationCache: db.prepare<[string]>(`DELETE FROM conversation_cache WHERE review_id = ?`),
+    deleteNotesForReview: db.prepare<[string]>(`DELETE FROM notes WHERE review_id = ?`),
+    deleteBrief: db.prepare<[string]>(`DELETE FROM briefs WHERE review_id = ?`),
+    deleteSeen: db.prepare<[string]>(`DELETE FROM review_seen WHERE review_id = ?`),
+    deleteCodemap: db.prepare<[string]>(`DELETE FROM codemaps WHERE review_id = ?`),
+    deleteIllustrators: db.prepare<[string]>(`DELETE FROM illustrators WHERE review_id = ?`),
+    deleteDiagrams: db.prepare<[string]>(`DELETE FROM diagrams WHERE review_id = ?`),
     codemap: db.prepare<[string], CodemapRow>(`SELECT * FROM codemaps WHERE review_id = ?`),
     setCodemap: db.prepare<[string, string, string, string | null, string | null, number]>(
       `INSERT INTO codemaps (review_id, head_sha, status, json, error, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(review_id) DO UPDATE SET head_sha = excluded.head_sha, status = excluded.status, json = excluded.json, error = excluded.error, updated_at = excluded.updated_at`,
@@ -543,6 +632,28 @@ type Store = ReturnType<typeof createStore>;
 
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+function prIsOpen(state: string): boolean {
+  return state.toUpperCase() === "OPEN";
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 }
 
 function parseJson<T>(json: string | null, fallback: T): T {
@@ -589,7 +700,7 @@ function toReview(row: ReviewRow): Review {
   };
 }
 
-function toPending(row: PendingRow): PendingComment {
+function toPending(row: PendingRow, stale = false): PendingComment {
   return {
     id: row.id,
     reviewId: row.review_id,
@@ -599,7 +710,19 @@ function toPending(row: PendingRow): PendingComment {
     side: row.side === "LEFT" ? "LEFT" : "RIGHT",
     body: row.body,
     createdAt: row.created_at,
+    stale,
   };
+}
+
+function fileForPath(files: ChangedFile[], path: string): ChangedFile | undefined {
+  return files.find((file) => file.path === path) ?? files.find((file) => file.oldPath === path);
+}
+
+function pendingHitsDiff(hunks: { old: Set<number>; new: Set<number> }, side: string, line: number, startLine: number | null): boolean {
+  const lines = side === "LEFT" ? hunks.old : hunks.new;
+  if (!lines.has(line)) return false;
+  if (startLine !== null && !lines.has(startLine)) return false;
+  return true;
 }
 
 function toSeat(row: SeatRow): Seat {
@@ -636,6 +759,16 @@ function anchorHash(text: string): string {
   return (h >>> 0).toString(16);
 }
 
+/** owner/repo#N, a GitHub PR URL, or owner/repo/stack/N (a gh stack number). */
+function parseOpenRef(ref: string): { kind: "pr"; owner: string; repo: string; number: number } | { kind: "stack"; owner: string; repo: string; stackNumber: number } | null {
+  const stackUrl = ref.match(/github\.com\/([^/\s]+)\/([^/\s#]+)\/stacks?\/(\d+)/i);
+  if (stackUrl) return { kind: "stack", owner: stackUrl[1], repo: stackUrl[2].replace(/\.git$/, ""), stackNumber: Number(stackUrl[3]) };
+  const stackShort = ref.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/stacks?\/(\d+)$/);
+  if (stackShort) return { kind: "stack", owner: stackShort[1], repo: stackShort[2].replace(/\.git$/, ""), stackNumber: Number(stackShort[3]) };
+  const pr = parsePrRef(ref);
+  return pr === null ? null : { kind: "pr", ...pr };
+}
+
 /** owner/repo#N, owner/repo/pull/N, or a full GitHub URL. */
 function parsePrRef(ref: string): { owner: string; repo: string; number: number } | null {
   const url = ref.match(/github\.com\/([^/\s]+)\/([^/\s#]+)\/pull\/(\d+)/i);
@@ -643,6 +776,10 @@ function parsePrRef(ref: string): { owner: string; repo: string; number: number 
   const short = ref.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:#|\/pull\/|\s+)(\d+)$/);
   if (short) return { owner: short[1], repo: short[2].replace(/\.git$/, ""), number: Number(short[3]) };
   return null;
+}
+
+function stackKey(stack: PrStack, owner: string, repo: string): string {
+  return stack.number !== null ? `gh:${owner}/${repo}#${stack.number}` : `inf:${owner}/${repo}#${stack.entries[0]?.number ?? 0}`;
 }
 
 function remoteMatches(remote: string | null, owner: string, repo: string): boolean {
@@ -665,9 +802,36 @@ export default async function plugin(bb: BbPluginApi) {
     defaultProvider: { type: "string", label: "Default AI provider id for the PR chat", default: "claude-code" },
     hideSeatThreads: { type: "boolean", label: "Hide analyst threads from the sidebar", default: true },
     autoBrief: { type: "boolean", label: "Write the plain-English brief when a review is first opened at a new head", default: true },
-    helperModel: { type: "string", label: "Model for the helper thread (brief, notes); empty uses the project's default", default: "" },
+    helperProvider: { type: "string", label: "Provider for the helper thread (brief, slop score, notes)", default: "pi" },
+    helperModel: { type: "string", label: "Model for the helper thread (brief, slop score, notes)", default: "nvidia-inference/nvidia/zai-org/glm-5.3" },
   });
-  const { defaultProvider, hideSeatThreads, autoBrief, helperModel } = await settings.get();
+  const { defaultProvider, hideSeatThreads, autoBrief, helperProvider: helperProviderSetting, helperModel: helperModelSetting } = await settings.get();
+  const DEFAULT_HELPER_PROVIDER = "pi";
+  const DEFAULT_HELPER_MODEL = "nvidia-inference/nvidia/zai-org/glm-5.3";
+  const PREVIOUS_HELPER_MODEL = "claude-haiku-4-5-20251001";
+  let helperProviderNow = helperProviderSetting.trim() || DEFAULT_HELPER_PROVIDER;
+  let helperModelNow = helperModelSetting.trim() || DEFAULT_HELPER_MODEL;
+  let helperModelsNow: { model: string; displayName: string; isDefault: boolean }[] = [];
+  if (helperModelSetting.trim() === "" || helperModelSetting === PREVIOUS_HELPER_MODEL) {
+    helperProviderNow = DEFAULT_HELPER_PROVIDER;
+    helperModelNow = DEFAULT_HELPER_MODEL;
+    void settings.experimental_set({ helperProvider: DEFAULT_HELPER_PROVIDER, helperModel: DEFAULT_HELPER_MODEL });
+  }
+  async function configuredHelper(): Promise<{ providerId: string; model: string }> {
+    const { helperProvider, helperModel } = await settings.get();
+    helperProviderNow = helperProvider.trim() || DEFAULT_HELPER_PROVIDER;
+    helperModelNow = helperModel.trim() || DEFAULT_HELPER_MODEL;
+    return { providerId: helperProviderNow, model: helperModelNow };
+  }
+  async function refreshHelperModels(): Promise<void> {
+    try {
+      const result = await bb.sdk.providers.models({ providerId: helperProviderNow });
+      helperModelsNow = result.models.map((m) => ({ model: m.model, displayName: m.displayName, isDefault: m.isDefault }));
+    } catch {
+      helperModelsNow = [];
+    }
+  }
+  await refreshHelperModels();
 
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
@@ -684,6 +848,243 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   const hostOptions = (row: ReviewRow) => ({ hostId: row.host_id });
+
+  async function dropHelper(reviewId: string): Promise<void> {
+    const helper = q.helper.get(reviewId);
+    if (helper === undefined) return;
+    try {
+      await bb.sdk.threads.archive({ threadId: helper.thread_id });
+      await bb.sdk.threads.stop({ threadId: helper.thread_id });
+    } catch (cause) {
+      bb.log.warn(`drop helper: ${errorMessage(cause)}`);
+    }
+    q.deleteHelper.run(reviewId);
+  }
+
+  /** Take a review out of Review Desk. Does not close the pull request on GitHub. */
+  async function dropReview(row: ReviewRow, opts?: { dismiss?: boolean; reason?: string }): Promise<void> {
+    for (const seat of q.seats.all(row.id)) await chatReset(row.id, seat.provider_id);
+    await dropHelper(row.id);
+    q.clearPending.run(row.id);
+    q.deleteViewedByReview.run(row.id);
+    q.deleteFilesCache.run(row.id);
+    q.deleteThreadsCache.run(row.id);
+    q.deleteConversationCache.run(row.id);
+    q.deleteNotesForReview.run(row.id);
+    q.deleteBrief.run(row.id);
+    q.deleteSeen.run(row.id);
+    q.deleteCodemap.run(row.id);
+    q.deleteIllustrators.run(row.id);
+    q.deleteDiagrams.run(row.id);
+    if (opts?.dismiss === true) q.dismiss.run(row.owner, row.repo, row.number);
+    q.deleteReview.run(row.id);
+    publish(row.id, opts?.reason ?? "removed");
+    void host.call("repo_release", { repoPath: row.repo_path, worktree: row.worktree }, hostOptions(row)).catch((cause: unknown) => {
+      bb.log.warn(`release worktree for ${row.owner}/${row.repo}#${row.number}: ${errorMessage(cause)}`);
+    });
+  }
+
+  function stackCacheRow(owner: string, repo: string, number: number): { json: string; fetched_at: number } | undefined {
+    return q.stackCache.get(owner, repo, number);
+  }
+
+  function cachedPrStack(owner: string, repo: string, number: number): PrStack | null {
+    const cache = stackCacheRow(owner, repo, number);
+    if (cache === undefined) return null;
+    const stack = parseJson<PrStack | null>(cache.json, null);
+    return stack !== null && stack.entries.length >= 2 ? stack : null;
+  }
+
+  function storeStack(owner: string, repo: string, number: number, stack: PrStack | null): void {
+    const prev = cachedPrStack(owner, repo, number);
+    const now = Date.now();
+    const json = stack === null || stack.entries.length < 2 ? "null" : JSON.stringify(stack);
+    const prevJson = stackCacheRow(owner, repo, number)?.json;
+    const same = prevJson === json;
+    if (stack === null || stack.entries.length < 2) {
+      if (!same) {
+        for (const n of prev?.entries.map((e) => e.number) ?? []) {
+          if (n !== number) q.deleteStackCache.run(owner, repo, n);
+        }
+      }
+      q.upsertStackCache.run(owner, repo, number, "null", now);
+      if (!same) {
+        const local = q.reviewByKey.get(owner, repo, number);
+        if (local !== undefined) publish(local.id, "stack");
+      }
+      return;
+    }
+    const next = new Set(stack.entries.map((e) => e.number));
+    if (!same) {
+      for (const entry of prev?.entries ?? []) {
+        if (!next.has(entry.number)) q.deleteStackCache.run(owner, repo, entry.number);
+      }
+    }
+    for (const entry of stack.entries) q.upsertStackCache.run(owner, repo, entry.number, json, now);
+    if (same) return;
+    for (const entry of stack.entries) {
+      const local = q.reviewByKey.get(owner, repo, entry.number);
+      if (local !== undefined) publish(local.id, "stack");
+    }
+  }
+
+  function patchStackDraft(owner: string, repo: string, number: number, isDraft: boolean): void {
+    const stack = cachedPrStack(owner, repo, number);
+    if (stack === null) return;
+    if (stack.entries.every((entry) => entry.number !== number || entry.isDraft === isDraft)) return;
+    storeStack(owner, repo, number, {
+      ...stack,
+      entries: stack.entries.map((entry) => (entry.number === number ? { ...entry, isDraft } : entry)),
+    });
+  }
+
+  const stackRefresh = new Map<string, Promise<void>>();
+  const reviewSync = new Map<string, Promise<{ review: Review; headChanged: boolean }>>();
+  const SYNC_EVERY_MS = 15_000;
+  const STACK_FRESH_MS = 15_000;
+
+  function stackFetchedAt(owner: string, repo: string, number: number): number | null {
+    return stackCacheRow(owner, repo, number)?.fetched_at ?? null;
+  }
+
+  function stackFresh(owner: string, repo: string, number: number): boolean {
+    const at = stackFetchedAt(owner, repo, number);
+    return at !== null && Date.now() - at < STACK_FRESH_MS;
+  }
+
+  function stackInflightKey(row: ReviewRow): string {
+    const stack = cachedPrStack(row.owner, row.repo, row.number);
+    if (stack?.number != null) return `${row.owner}/${row.repo}/s/${stack.number}`;
+    if (stack !== null && stack.entries[0] !== undefined) return `${row.owner}/${row.repo}/i/${stack.entries[0].number}`;
+    return `${row.owner}/${row.repo}#${row.number}`;
+  }
+
+  async function refreshStack(row: ReviewRow, force = false): Promise<void> {
+    if (!force && stackFresh(row.owner, row.repo, row.number)) {
+      void openMissingStackLayers(row.owner, row.repo, row.number);
+      return;
+    }
+    const key = stackInflightKey(row);
+    const inflight = stackRefresh.get(key);
+    if (inflight !== undefined) return inflight;
+    const work = (async () => {
+      try {
+        const result = await host.call("gh_stack", { owner: row.owner, repo: row.repo, number: row.number, stackNumber: null }, hostOptions(row));
+        storeStack(row.owner, row.repo, row.number, result.stack);
+        void openMissingStackLayers(row.owner, row.repo, row.number);
+      } catch (cause) {
+        bb.log.warn(`stack for ${row.owner}/${row.repo}#${row.number}: ${errorMessage(cause)}`);
+      } finally {
+        stackRefresh.delete(key);
+      }
+    })();
+    stackRefresh.set(key, work);
+    return work;
+  }
+
+  async function ensureStack(row: ReviewRow): Promise<void> {
+    if (stackCacheRow(row.owner, row.repo, row.number) === undefined) {
+      await refreshStack(row, true);
+      return;
+    }
+    void refreshStack(row);
+  }
+
+  function discoverStacks(rows: ReviewRow[]): void {
+    for (const row of rows) {
+      if (!prIsOpen(row.state) && stackCacheRow(row.owner, row.repo, row.number) !== undefined) continue;
+      void refreshStack(row);
+    }
+  }
+
+  function stackViewFor(row: ReviewRow): StackView | null {
+    const stack = cachedPrStack(row.owner, row.repo, row.number);
+    if (stack === null) return null;
+    const current = stack.entries.find((e) => e.number === row.number);
+    return {
+      ...stack,
+      currentPosition: current?.position ?? 1,
+      entries: stack.entries.map((entry) => {
+        const local = q.reviewByKey.get(row.owner, row.repo, entry.number);
+        return {
+          ...entry,
+          isDraft: local !== undefined ? local.is_draft === 1 : entry.isDraft,
+          reviewId: local?.id ?? null,
+          pendingCount: local === undefined ? 0 : q.pending.all(local.id).length,
+          viewedCount: local === undefined ? 0 : q.viewed.all(local.id).length,
+        };
+      }),
+    };
+  }
+
+  function stackSummaryFor(row: ReviewRow): ReviewSummary["stack"] {
+    const stack = cachedPrStack(row.owner, row.repo, row.number);
+    if (stack === null) return null;
+    const current = stack.entries.find((e) => e.number === row.number);
+    return { number: stack.number, position: current?.position ?? 1, size: stack.entries.length, key: stackKey(stack, row.owner, row.repo) };
+  }
+
+  function prPrompt(row: ReviewRow): PrPrompt {
+    return { owner: row.owner, repo: row.repo, number: row.number, title: row.title, headSha: row.head_sha, baseSha: row.base_sha, baseRef: row.base_ref };
+  }
+
+  function stackPrompt(row: ReviewRow): StackPrompt | null {
+    const stack = cachedPrStack(row.owner, row.repo, row.number);
+    if (stack === null) return null;
+    const current = stack.entries.find((e) => e.number === row.number);
+    return {
+      label: stack.number !== null ? `GitHub stack #${stack.number}` : "a stack inferred from PR bases",
+      position: current?.position ?? "?",
+      size: stack.entries.length,
+      baseRefName: stack.baseRefName,
+      entries: stack.entries.map((e) => ({
+        position: e.position,
+        number: e.number,
+        state: e.state,
+        merged: e.merged,
+        isDraft: e.isDraft,
+        title: e.title,
+        additions: e.additions,
+        deletions: e.deletions,
+        current: e.number === row.number,
+      })),
+    };
+  }
+
+  function filesPrompt(files: ChangedFile[], cap = 150): { files: FilePrompt[]; fileCount: number; filesMore: number } {
+    return {
+      files: files.slice(0, cap).map((f) => ({ status: f.status.padEnd(8), path: f.path, additions: f.additions, deletions: f.deletions })),
+      fileCount: files.length,
+      filesMore: Math.max(0, files.length - cap),
+    };
+  }
+
+  function signalsPrompt(report: SlopReport | null): SignalsPrompt | null {
+    if (report === null) return null;
+    return {
+      items: report.signals.map((s) => ({
+        label: s.label,
+        count: s.count,
+        evidence: s.evidence.slice(0, 3).map((e) => (e.line === null ? e.note : `${e.path}:${e.line} ${e.note}`)).join("; "),
+      })),
+    };
+  }
+
+  function codemapPrompt(row: ReviewRow): CodemapPrompt | null {
+    const state = codemapState(row);
+    if (state.status !== "ready" || state.codemap === null) return null;
+    const c = state.codemap;
+    return {
+      readingOrder: c.readingOrder.map((m) => ({ module: m.module, pathCount: m.paths.length, reason: m.reason })),
+      hotspots: c.hotspots.slice(0, 10).map((h) => ({ path: h.path, qualified: h.qualified, changedLines: h.changedLines, fanIn: h.fanIn })),
+      symbols: [...changedSymbols(row)].sort((a, b) => b.changedLines - a.changedLines).slice(0, 60).map((s) => ({
+        status: s.status.padEnd(8),
+        kind: s.kind.padEnd(9),
+        qualified: s.qualified,
+        loc: s.status === "removed" ? `${s.path}:${s.oldStart}-${s.oldEnd} (base)` : `${s.path}:${s.start}-${s.end}`,
+      })),
+    };
+  }
 
   async function primaryHostId(): Promise<string> {
     const hosts = await bb.sdk.hosts.list();
@@ -736,49 +1137,148 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
-  async function openReview(ref: string): Promise<Review> {
-    const parsed = parsePrRef(ref);
-    if (parsed === null) throw new Error("Give a PR URL, owner/repo#123, or owner/repo/pull/123");
-    const existing = q.reviewByKey.get(parsed.owner, parsed.repo, parsed.number);
+  const stackOpen = new Map<string, Promise<void>>();
+
+  /** Open a review row (worktree, files, threads) for every layer that is not local yet. */
+  function openMissingStackLayers(owner: string, repo: string, number: number): Promise<void> {
+    const stack = cachedPrStack(owner, repo, number);
+    if (stack === null) return Promise.resolve();
+    const key = stackKey(stack, owner, repo);
+    const inflight = stackOpen.get(key);
+    if (inflight !== undefined) return inflight;
+    const missing = stack.entries.filter((entry) => {
+      if (entry.merged || !prIsOpen(entry.state)) return false;
+      if (q.dismissed.get(owner, repo, entry.number) !== undefined) return false;
+      return q.reviewByKey.get(owner, repo, entry.number) === undefined;
+    });
+    if (missing.length === 0) return Promise.resolve();
+    const work = (async () => {
+      try {
+        await mapLimit(missing, 3, async (entry) => {
+          try {
+            await openPr(owner, repo, entry.number, { skipStack: true });
+          } catch (cause) {
+            bb.log.warn(`stack layer ${owner}/${repo}#${entry.number}: ${errorMessage(cause)}`);
+          }
+        });
+        for (const entry of stack.entries) {
+          const local = q.reviewByKey.get(owner, repo, entry.number);
+          if (local !== undefined) publish(local.id, "stack");
+        }
+      } finally {
+        stackOpen.delete(key);
+      }
+    })();
+    stackOpen.set(key, work);
+    return work;
+  }
+
+  async function openPr(owner: string, repo: string, number: number, opts?: { skipStack?: boolean }): Promise<Review> {
+    q.undismiss.run(owner, repo, number);
+    const existing = q.reviewByKey.get(owner, repo, number);
     if (existing !== undefined) {
+      if (opts?.skipStack) return toReview(requireReview(existing.id));
       await syncReview(existing.id);
       return toReview(requireReview(existing.id));
     }
-    const located = await locateRepo(parsed.owner, parsed.repo);
-    const pr = await host.call("gh_pr", parsed, { hostId: located.hostId });
-    const key = `${parsed.owner}__${parsed.repo}__${parsed.number}`;
+    const located = await locateRepo(owner, repo);
+    const pr = await host.call("gh_pr", { owner, repo, number }, { hostId: located.hostId });
+    const key = `${owner}__${repo}__${number}`;
     const prepared = await host.call(
       "repo_prepare",
-      { repoPath: located.repoPath, number: parsed.number, headSha: pr.headRefOid, baseRefName: pr.baseRefName, worktreesDir: "", key },
+      { repoPath: located.repoPath, number, headSha: pr.headRefOid, baseRefName: pr.baseRefName, worktreesDir: "", key },
       { hostId: located.hostId },
     );
     const id = newId();
     const now = Date.now();
-    q.insertReview.run(id, parsed.owner, parsed.repo, parsed.number, pr.title, pr.url, prepared.worktree, located.hostId, located.repoPath, located.projectId, now, now, now);
+    q.insertReview.run(id, owner, repo, number, pr.title, pr.url, prepared.worktree, located.hostId, located.repoPath, located.projectId, now, now, now);
     applyPr(requireReview(id), pr, prepared);
     const row = requireReview(id);
     await refreshFiles(row);
     void refreshThreads(row).catch((cause: unknown) => bb.log.warn(`threads for ${id}: ${errorMessage(cause)}`));
+    if (!opts?.skipStack) await refreshStack(row);
     publish(id, "opened");
     return toReview(row);
   }
 
-  async function syncReview(reviewId: string): Promise<{ review: Review; headChanged: boolean }> {
+  async function openReview(ref: string): Promise<Review> {
+    const parsed = parseOpenRef(ref);
+    if (parsed === null) throw new Error("Give a PR URL, owner/repo#123, owner/repo/pull/123, or owner/repo/stack/N");
+    if (parsed.kind === "stack") {
+      const located = await locateRepo(parsed.owner, parsed.repo);
+      const result = await host.call(
+        "gh_stack",
+        { owner: parsed.owner, repo: parsed.repo, number: null, stackNumber: parsed.stackNumber },
+        { hostId: located.hostId },
+      );
+      if (result.stack === null || result.stack.entries.length === 0) {
+        throw new Error(`no GitHub stack #${parsed.stackNumber} in ${parsed.owner}/${parsed.repo}`);
+      }
+      storeStack(parsed.owner, parsed.repo, result.stack.entries[0].number, result.stack);
+      const pick = result.stack.entries.find((e) => e.state === "OPEN" && !e.merged) ?? result.stack.entries[0];
+      return openPr(parsed.owner, parsed.repo, pick.number);
+    }
+    return openPr(parsed.owner, parsed.repo, parsed.number);
+  }
+
+  async function syncReview(reviewId: string, force = false): Promise<{ review: Review; headChanged: boolean }> {
+    const inflight = reviewSync.get(reviewId);
+    if (inflight !== undefined) return inflight;
+    const work = (async () => {
+      try {
+        return await syncReviewOnce(reviewId, force);
+      } finally {
+        reviewSync.delete(reviewId);
+      }
+    })();
+    reviewSync.set(reviewId, work);
+    return work;
+  }
+
+  async function syncReviewOnce(reviewId: string, force: boolean): Promise<{ review: Review; headChanged: boolean }> {
     const row = requireReview(reviewId);
+    if (!force && Date.now() - row.synced_at < SYNC_EVERY_MS && stackFresh(row.owner, row.repo, row.number)) {
+      return { review: toReview(row), headChanged: false };
+    }
     const pr = await host.call("gh_pr", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row));
+    const wasOpen = prIsOpen(row.state);
+    if (!prIsOpen(pr.state)) {
+      const now = Date.now();
+      if (pr.state !== row.state || pr.isDraft !== (row.is_draft === 1) || pr.title !== row.title || pr.updatedAt !== row.gh_updated_at) {
+        q.setClosed.run(pr.state, pr.isDraft ? 1 : 0, pr.title, pr.updatedAt, now, now, row.id);
+      } else {
+        q.setSyncedAt.run(now, row.id);
+      }
+      if (wasOpen) {
+        publish(row.id, "closed");
+        await refreshStack(row);
+      }
+      return { review: toReview(requireReview(reviewId)), headChanged: false };
+    }
     const headChanged = pr.headRefOid !== row.head_sha;
+    const baseMoved = pr.baseRefName !== row.base_ref;
+    const touched = force || headChanged || baseMoved || pr.updatedAt !== row.gh_updated_at || pr.title !== row.title || pr.body !== row.body || pr.state !== row.state || pr.isDraft !== (row.is_draft === 1) || (pr.reviewDecision ?? null) !== row.review_decision;
+    if (!touched) {
+      q.setSyncedAt.run(Date.now(), row.id);
+      await refreshStack(row);
+      return { review: toReview(requireReview(reviewId)), headChanged: false };
+    }
     const key = `${row.owner}__${row.repo}__${row.number}`;
-    const prepared = await host.call(
-      "repo_prepare",
-      { repoPath: row.repo_path, number: row.number, headSha: pr.headRefOid, baseRefName: pr.baseRefName, worktreesDir: "", key },
-      hostOptions(row),
-    );
+    const prepared = headChanged || baseMoved || row.worktree === ""
+      ? await host.call(
+          "repo_prepare",
+          { repoPath: row.repo_path, number: row.number, headSha: pr.headRefOid, baseRefName: pr.baseRefName, worktreesDir: "", key },
+          hostOptions(row),
+        )
+      : { worktree: row.worktree, headSha: pr.headRefOid, baseSha: row.base_sha };
     applyPr(row, pr, prepared);
     const fresh = requireReview(reviewId);
     if (headChanged || cachedFiles(fresh) === null) await refreshFiles(fresh);
     await refreshThreads(fresh).catch((cause: unknown) => bb.log.warn(`threads for ${reviewId}: ${errorMessage(cause)}`));
     if (headChanged) await reanchorNotes(fresh).catch((cause: unknown) => bb.log.warn(`notes for ${reviewId}: ${errorMessage(cause)}`));
-    publish(reviewId, "synced");
+    await refreshConversation(fresh).catch((cause: unknown) => bb.log.warn(`conversation for ${reviewId}: ${errorMessage(cause)}`));
+    await refreshStack(fresh, true);
+    publish(reviewId, wasOpen ? "synced" : "reopened");
     return { review: toReview(fresh), headChanged };
   }
 
@@ -823,6 +1323,12 @@ export default async function plugin(bb: BbPluginApi) {
     return result.threads;
   }
 
+  async function refreshConversation(row: ReviewRow): Promise<void> {
+    const result = await host.call("gh_conversation", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row));
+    q.setConversationCache.run(row.id, JSON.stringify(result), Date.now());
+    publish(row.id, "conversation");
+  }
+
   function cachedThreads(row: ReviewRow): GhThread[] {
     const cache = q.threadsCache.get(row.id);
     return cache === undefined ? [] : parseJson<GhThread[]>(cache.json, []);
@@ -830,12 +1336,41 @@ export default async function plugin(bb: BbPluginApi) {
 
   // -- read model ------------------------------------------------------------
 
+  /** Mark pending comments whose path or line is gone from the current diff. */
+  async function pendingFor(row: ReviewRow, files: ChangedFile[]): Promise<PendingComment[]> {
+    const rows = q.pending.all(row.id);
+    if (rows.length === 0) return [];
+    const hunksByPath = new Map<string, { old: Set<number>; new: Set<number> } | null>();
+    const out: PendingComment[] = [];
+    for (const pending of rows) {
+      const file = fileForPath(files, pending.path);
+      let stale = file === undefined || file.binary;
+      if (!stale && file !== undefined) {
+        let hunks = hunksByPath.get(file.path);
+        if (hunks === undefined) {
+          const result = await host.call(
+            "git_patch",
+            { worktree: row.worktree, baseSha: row.base_sha, headSha: row.head_sha, path: file.path, oldPath: file.oldPath },
+            hostOptions(row),
+          ).catch(() => ({ patch: "" }));
+          hunks = result.patch.trim() === "" ? null : hunkLineNumbers(result.patch);
+          hunksByPath.set(file.path, hunks);
+        }
+        stale = hunks === null || !pendingHitsDiff(hunks, pending.side, pending.line, pending.start_line);
+      }
+      out.push(toPending(pending, stale));
+    }
+    return out;
+  }
+
   async function reviewDetail(reviewId: string) {
     const row = requireReview(reviewId);
+    void syncReview(reviewId);
+    await ensureStack(row);
     const files = await filesFor(row);
     const viewed = new Set(q.viewed.all(row.id).map((v) => v.path));
     const threads = cachedThreads(row);
-    const pending = q.pending.all(row.id).map(toPending);
+    const pending = await pendingFor(row, files);
     const perPath = new Map<string, { threads: number; unresolved: number; pending: number }>();
     const bump = (p: string, field: "threads" | "unresolved" | "pending") => {
       const entry = perPath.get(p) ?? { threads: 0, unresolved: 0, pending: 0 };
@@ -846,7 +1381,7 @@ export default async function plugin(bb: BbPluginApi) {
       bump(t.path, "threads");
       if (!t.isResolved) bump(t.path, "unresolved");
     }
-    for (const p of pending) bump(p.path, "pending");
+    for (const p of pending) bump(fileForPath(files, p.path)?.path ?? p.path, "pending");
     return {
       review: toReview(row),
       files: files.map((f) => {
@@ -861,6 +1396,7 @@ export default async function plugin(bb: BbPluginApi) {
       notesError: notesErrors.get(row.id) ?? null,
       seen: seenState(row),
       chatProjectId: await chatProjectId(row),
+      stack: stackViewFor(row),
     };
   }
   const notesErrors = new Map<string, string>();
@@ -928,17 +1464,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function seatIntro(row: ReviewRow): string {
-    return [
-      `You are the analyst for pull request #${row.number} of ${row.owner}/${row.repo}: "${row.title}". The reviewer will chat with you about the PR here.`,
-      `Your working directory is a detached worktree at the PR head ${row.head_sha}. The merge base with ${row.base_ref} is ${row.base_sha}.`,
-      `The full diff is: git diff ${row.base_sha} ${row.head_sha}. One file: git diff ${row.base_sha} ${row.head_sha} -- <path>. Base version of a file: git show ${row.base_sha}:<path>.`,
-      "You are read-only: never modify files, never commit, never push. Read files and run read-only commands to verify claims before making them.",
-      "The reviewer attaches code as pills: @-mentions of a line range, a changed file, a changed symbol, a GitHub review thread, or the PR description. Each pill's content arrives with the message as a context block titled \"Context for @<pill>\"; in range excerpts, > marks the selected lines. Treat those blocks as the code the reviewer is pointing at.",
-      "Answer for the reviewer: specific, concise, citing paths and line numbers. When asked to draft a GitHub comment, write ready-to-post Markdown with no preamble.",
-      "",
-      "PR description:",
-      row.body.trim() === "" ? "(none)" : row.body.trim().slice(0, 6000),
-    ].join("\n");
+    return renderAnalystIntro({
+      pr: prPrompt(row),
+      stack: stackPrompt(row),
+      description: row.body.trim() === "" ? "(none)" : row.body.trim().slice(0, 6000),
+    });
   }
 
   async function excerpt(row: ReviewRow, selection: SelectionRef): Promise<string> {
@@ -967,13 +1497,14 @@ export default async function plugin(bb: BbPluginApi) {
     if (selection === null) return text;
     const start = Math.min(selection.startLine, selection.endLine);
     const end = Math.max(selection.startLine, selection.endLine);
-    return [
-      `Selected ${selection.path} lines ${start}-${end} (${selection.side === "old" ? "base" : "head"} side):`,
-      "```",
-      await excerpt(row, selection),
-      "```",
+    return renderChatSelection({
+      path: selection.path,
+      start,
+      end,
+      side: selection.side === "old" ? "base" : "head",
+      excerpt: await excerpt(row, selection),
       text,
-    ].join("\n");
+    });
   }
 
   type SpawnArgs = Parameters<typeof bb.sdk.threads.spawn>[0];
@@ -1236,22 +1767,31 @@ export default async function plugin(bb: BbPluginApi) {
       case "range": {
         const startLine = Math.min(ref.startLine, ref.endLine);
         const endLine = Math.max(ref.startLine, ref.endLine);
-        return [
-          `${prefix} — ${ref.path} lines ${startLine}-${endLine} (${ref.side === "old" ? `base ${short(row.base_sha)}` : `head ${short(row.head_sha)}`}). Lines marked > are the ones the reviewer selected; the rest is surrounding context.`,
-          "```",
-          await excerpt(row, { path: ref.path, startLine, endLine, side: ref.side }),
-          "```",
-        ].join("\n");
+        return renderMentionRange({
+          prefix,
+          path: ref.path,
+          startLine,
+          endLine,
+          side: ref.side === "old" ? `base ${short(row.base_sha)}` : `head ${short(row.head_sha)}`,
+          excerpt: await excerpt(row, { path: ref.path, startLine, endLine, side: ref.side }),
+        });
       }
       case "file": {
         const file = (await filesFor(row)).find((f) => f.path === ref.path) ?? null;
         const result = await host.call("git_patch", { worktree: row.worktree, baseSha: row.base_sha, headSha: row.head_sha, path: ref.path, oldPath: file?.oldPath ?? null }, hostOptions(row));
         const lines = result.patch.split("\n");
         const MAX = 400;
-        const body = lines.length > MAX
+        const patch = lines.length > MAX
           ? [...lines.slice(0, MAX), `... ${lines.length - MAX} more diff lines. Ask about a range with path:start-end, or run: git diff ${row.base_sha} ${row.head_sha} -- ${ref.path}`].join("\n")
           : result.patch;
-        return [`${prefix} — diff of ${ref.path}${file ? ` (${file.status}, +${file.additions} -${file.deletions})` : ""} from ${short(row.base_sha)} to ${short(row.head_sha)}:`, "```diff", body, "```"].join("\n");
+        return renderMentionFile({
+          prefix,
+          path: ref.path,
+          file: file === null ? null : { status: file.status, additions: file.additions, deletions: file.deletions },
+          base: short(row.base_sha),
+          head: short(row.head_sha),
+          patch,
+        });
       }
       case "symbol": {
         const file = (await filesFor(row)).find((f) => f.path === ref.path);
@@ -1267,57 +1807,81 @@ export default async function plugin(bb: BbPluginApi) {
         const slice = lines.slice(start - 1, Math.min(end, start - 1 + MAX));
         const width = String(end).length;
         const sym = changedSymbols(row).find((s) => s.path === ref.path && s.qualified === ref.qualified);
-        return [
-          `${prefix} — ${ref.qualified}${sym ? ` (${sym.kind}, ${sym.status}, ${sym.changedLines} changed lines, fan-in ${sym.fanIn})` : ""} in ${ref.path} lines ${start}-${end} at ${ref.side === "old" ? `base ${short(row.base_sha)}` : `head ${short(row.head_sha)}`}:`,
-          "```",
-          slice.map((line, i) => `${String(start + i).padStart(width)}| ${line}`).join("\n"),
-          ...(end - start + 1 > MAX ? [`... truncated after ${MAX} lines; read the file for the rest`] : []),
-          "```",
-        ].join("\n");
+        return renderMentionSymbol({
+          prefix,
+          qualified: ref.qualified,
+          symbol: sym === undefined ? null : { kind: sym.kind, status: sym.status, changedLines: sym.changedLines, fanIn: sym.fanIn },
+          path: ref.path,
+          start,
+          end,
+          side: ref.side === "old" ? `base ${short(row.base_sha)}` : `head ${short(row.head_sha)}`,
+          body: slice.map((line, i) => `${String(start + i).padStart(width)}| ${line}`).join("\n"),
+          truncated: end - start + 1 > MAX,
+          max: MAX,
+        });
       }
       case "thread": {
         const thread = cachedThreads(row).find((t) => t.id === ref.threadId);
         if (thread === undefined) throw new Error("that review thread is not cached; press Sync and try again");
         const line = thread.line ?? thread.originalLine;
-        const parts = [`${prefix} — GitHub review thread on ${thread.path}${line === null ? "" : `:${line}`} (${thread.isResolved ? "resolved" : "open"}${thread.isOutdated ? ", outdated" : ""}, ${thread.side === "LEFT" ? "base" : "head"} side):`];
-        for (const c of thread.comments) parts.push(`--- @${c.author} (${c.createdAt}):`, c.body.trim());
-        if (line !== null) {
-          parts.push("", "Code at that line:", "```", await excerpt(row, { path: thread.path, startLine: line, endLine: line, side: thread.side === "LEFT" ? "old" : "new" }), "```");
-        }
-        return parts.join("\n");
+        return renderMentionThread({
+          prefix,
+          path: thread.path,
+          line,
+          status: thread.isResolved ? "resolved" : "open",
+          outdated: thread.isOutdated,
+          side: thread.side === "LEFT" ? "base" : "head",
+          comments: thread.comments.map((c) => ({ author: c.author, createdAt: c.createdAt, body: c.body.trim() })),
+          excerpt: line === null ? null : await excerpt(row, { path: thread.path, startLine: line, endLine: line, side: thread.side === "LEFT" ? "old" : "new" }),
+        });
       }
       case "pr":
-        return [`${prefix}: ${row.title}`, `by ${row.author ?? "unknown"} · ${row.base_ref} ← ${row.head_ref} · ${row.state}`, "", row.body.trim() === "" ? "(no description)" : row.body.trim().slice(0, 12_000)].join("\n");
+        return renderMentionPr({
+          prefix,
+          title: row.title,
+          author: row.author ?? "unknown",
+          baseRef: row.base_ref,
+          headRef: row.head_ref,
+          state: row.state,
+          body: row.body.trim() === "" ? "(no description)" : row.body.trim().slice(0, 12_000),
+        });
       case "commit": {
         const range = await commitRange(row, ref.sha, undefined, false);
-        const parts = [
-          `${prefix} — commit ${short(range.info.sha)} by ${range.info.author} (${range.info.date}): ${range.info.title}`,
-          range.info.body === "" ? "" : range.info.body,
-          "",
-          `Files (${range.files.length}):`,
-          ...range.files.map((f) => `  ${f.status.padEnd(8)} ${f.path} (+${f.additions} -${f.deletions})`),
-        ];
+        const patches: { path: string; body: string; more: number }[] = [];
         let budget = 400;
         for (const f of range.files) {
           if (budget <= 0 || f.binary) break;
           const patch = await host.call("git_patch", { worktree: row.worktree, baseSha: range.base, headSha: range.head, path: f.path, oldPath: f.oldPath }, hostOptions(row));
           const lines = patch.patch.split("\n");
           const take = lines.slice(0, budget);
-          parts.push("", `--- ${f.path}`, "```diff", take.join("\n"), ...(lines.length > take.length ? [`... ${lines.length - take.length} more lines`] : []), "```");
+          patches.push({ path: f.path, body: take.join("\n"), more: Math.max(0, lines.length - take.length) });
           budget -= take.length;
         }
-        if (budget <= 0) parts.push("", `(patch truncated; run: git show ${range.info.sha})`);
-        return parts.filter((p, i) => i !== 1 || p !== "").join("\n");
+        return renderMentionCommit({
+          prefix,
+          sha: short(range.info.sha),
+          fullSha: range.info.sha,
+          author: range.info.author,
+          date: range.info.date,
+          title: range.info.title,
+          body: range.info.body,
+          files: range.files.map((f) => ({ status: f.status.padEnd(8), path: f.path, additions: f.additions, deletions: f.deletions })),
+          fileCount: range.files.length,
+          patches,
+          truncated: budget <= 0,
+        });
       }
       case "crange": {
         const startLine = Math.min(ref.startLine, ref.endLine);
         const endLine = Math.max(ref.startLine, ref.endLine);
-        return [
-          `${prefix} — ${ref.path} lines ${startLine}-${endLine} as of commit ${short(ref.sha)}. Lines marked > are the ones the reviewer selected in that commit's diff; the file may differ at the PR head.`,
-          "```",
-          await excerptAt(row, ref.sha, ref.path, startLine, endLine),
-          "```",
-        ].join("\n");
+        return renderMentionCrange({
+          prefix,
+          path: ref.path,
+          startLine,
+          endLine,
+          sha: short(ref.sha),
+          excerpt: await excerptAt(row, ref.sha, ref.path, startLine, endLine),
+        });
       }
     }
   }
@@ -1336,21 +1900,22 @@ export default async function plugin(bb: BbPluginApi) {
   // chat seats so the conversation stays the reviewer's.
 
   function helperIntro(row: ReviewRow): string {
-    return [
-      `You are the helper for pull request #${row.number} of ${row.owner}/${row.repo}: "${row.title}". You get one job per message. Each job names the fenced block tag it wants; answer with exactly one fenced block of that tag containing JSON, and nothing else before or after it.`,
-      `Your working directory is a detached worktree at the PR head ${row.head_sha}; the merge base with ${row.base_ref} is ${row.base_sha}. Full diff: git diff ${row.base_sha} ${row.head_sha}. One file: git diff ${row.base_sha} ${row.head_sha} -- <path>. Base version: git show ${row.base_sha}:<path>.`,
-      "You are read-only: never modify files, never commit, never push. Read the code before writing; every line number you cite must exist in the diff.",
-    ].join("\n");
+    return renderHelperIntro({ pr: prPrompt(row) });
   }
 
   async function helperSend(row: ReviewRow, job: string, text: string): Promise<void> {
+    const { providerId, model } = await configuredHelper();
     const existing = q.helper.get(row.id);
-    if (existing !== undefined) {
+    if (existing !== undefined && ((existing.model ?? "") !== model || existing.provider_id !== providerId)) {
+      await dropHelper(row.id);
+    }
+    const live = q.helper.get(row.id);
+    if (live !== undefined) {
       try {
-        const thread = await bb.sdk.threads.get({ threadId: existing.thread_id });
+        const thread = await bb.sdk.threads.get({ threadId: live.thread_id });
         if (thread.archivedAt === null && thread.deletedAt === null) {
           q.setHelperJob.run(job, row.id);
-          await bb.sdk.threads.send({ threadId: existing.thread_id, mode: "auto", input: [{ type: "text", text, mentions: [] }] });
+          await bb.sdk.threads.send({ threadId: live.thread_id, mode: "auto", input: [{ type: "text", text, mentions: [] }] });
           return;
         }
       } catch {
@@ -1358,12 +1923,11 @@ export default async function plugin(bb: BbPluginApi) {
       }
       q.deleteHelper.run(row.id);
     }
-    const providerId = existing?.provider_id ?? defaultProvider;
     const providers = await bb.sdk.providers.list();
     const provider = providers.find((p) => p.id === providerId);
     if (provider === undefined) throw new Error(`unknown provider ${providerId}`);
     const modes = provider.capabilities.permissionModes;
-    const permissionMode = modes.includes("auto") ? "auto" : modes.includes("accept-edits") ? "accept-edits" : undefined;
+    const permissionMode = modes.includes("auto") ? "auto" : modes.includes("accept-edits") ? "accept-edits" : modes[0];
     const knownEnvironment = row.environment_id ?? q.seats.all(row.id).find((s) => s.environment_id !== null)?.environment_id ?? null;
     const now = Date.now();
     const thread = await bb.sdk.threads.spawn({
@@ -1373,19 +1937,19 @@ export default async function plugin(bb: BbPluginApi) {
         : { type: "host", hostId: row.host_id, workspace: { type: "unmanaged", path: row.worktree } },
       providerId,
       ...(permissionMode ? { permissionMode } : {}),
-      ...(helperModel.trim() !== "" ? { model: helperModel.trim() } : {}),
+      model,
       title: `Review Desk ${row.owner}/${row.repo}#${row.number}: helper`,
       visibility: hideSeatThreads ? "hidden" : "visible",
       input: [{ type: "text", text: helperIntro(row), mentions: [], visibility: "agent-only" }, { type: "text", text, mentions: [] }],
     });
-    q.upsertHelper.run(row.id, thread.id, providerId, knownEnvironment, now);
+    q.upsertHelper.run(row.id, thread.id, providerId, knownEnvironment, now, model);
     q.setHelperJob.run(job, row.id);
     if (knownEnvironment === null) {
       void (async () => {
         const environmentId = thread.environmentId ?? (await waitForEnvironment(thread.id));
         if (environmentId !== null) {
           q.setEnvironment.run(environmentId, row.id);
-          q.upsertHelper.run(row.id, thread.id, providerId, environmentId, now);
+          q.upsertHelper.run(row.id, thread.id, providerId, environmentId, now, model);
         }
       })();
     }
@@ -1401,7 +1965,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   // -- brief: slop signals + plain-English summary ---------------------------
 
-  const signalRuns = new Set<string>();
+  const signalRuns = new Map<string, Promise<void>>();
 
   function briefState(row: ReviewRow): BriefState {
     const b = q.brief.get(row.id);
@@ -1418,6 +1982,8 @@ export default async function plugin(bb: BbPluginApi) {
       briefError: b?.brief_error ?? null,
       stale: b?.brief_status === "ready" && b.brief_head_sha !== row.head_sha,
       updatedAt: b?.updated_at ?? null,
+      helperModel: helperModelNow,
+      helperModels: helperModelsNow,
     };
   }
 
@@ -1435,12 +2001,12 @@ export default async function plugin(bb: BbPluginApi) {
     return out;
   }
 
-  function startSignals(row: ReviewRow): void {
-    if (signalRuns.has(row.id)) return;
-    signalRuns.add(row.id);
+  function startSignals(row: ReviewRow): Promise<void> {
+    const inflight = signalRuns.get(row.id);
+    if (inflight !== undefined) return inflight;
     q.ensureBrief.run(row.id, row.head_sha, Date.now());
     publish(row.id, "brief");
-    void (async () => {
+    const work = (async () => {
       try {
         const files = (await filesFor(row)).filter((f) => !f.binary && f.additions + f.deletions > 0);
         const patches = new Map<string, string>();
@@ -1459,59 +2025,23 @@ export default async function plugin(bb: BbPluginApi) {
         publish(row.id, "brief");
       }
     })();
-  }
-
-  function signalsSummary(report: SlopReport | null): string {
-    if (report === null) return "(not computed)";
-    if (report.signals.length === 0) return "none";
-    return report.signals.map((s) => `- ${s.label} (${s.count}): ${s.evidence.slice(0, 3).map((e) => (e.line === null ? e.note : `${e.path}:${e.line} ${e.note}`)).join("; ")}`).join("\n");
-  }
-
-  function codemapDigest(row: ReviewRow): string {
-    const state = codemapState(row);
-    if (state.status !== "ready" || state.codemap === null) return "(codemap not built yet)";
-    const c = state.codemap;
-    return [
-      "Reading order:",
-      ...c.readingOrder.map((m, i) => `  ${i + 1}. ${m.module} (${m.paths.length} files): ${m.reason}`),
-      "Hotspots:",
-      ...c.hotspots.slice(0, 10).map((h) => `  ${h.path}#${h.qualified} (${h.changedLines} changed lines, fan-in ${h.fanIn})`),
-      "Changed symbols (top 60 by changed lines):",
-      ...[...changedSymbols(row)].sort((a, b) => b.changedLines - a.changedLines).slice(0, 60).map((s) => `  ${s.status.padEnd(8)} ${s.kind.padEnd(9)} ${s.qualified}  ${s.path}:${s.status === "removed" ? `${s.oldStart}-${s.oldEnd} (base)` : `${s.start}-${s.end}`}`),
-    ].join("\n");
+    signalRuns.set(row.id, work);
+    return work;
   }
 
   async function briefPrompt(row: ReviewRow): Promise<string> {
     const files = await filesFor(row);
-    const state = briefState(row);
-    const report = state.signals as unknown as SlopReport | null;
-    return [
-      `Job: write the brief for this PR. Reply with exactly one fenced block tagged ${BRIEF_FENCE} containing this JSON:`,
-      "{",
-      '  "summary": string,',
-      '  "areas": [{ "module": string, "what": string, "path": string }],',
-      '  "claims": [{ "claim": string, "verdict": "matches" | "partly" | "no-evidence" | "contradicted", "evidence": [{ "path": string, "line": number }], "note": string }],',
-      '  "ai": { "score": number, "reasons": [{ "reason": string, "evidence": [{ "path": string, "line": number }] }] }',
-      "}",
-      "",
-      "summary: plain English for a reader who knows this codebase but has not read the diff. Say what the code does now that it did not do before, and what changes for callers or operators. 5 to 10 sentences, each under 20 words, active voice, everyday words. Name code by its identifiers. No marketing words (robust, seamless, comprehensive, leverage, enhance). Describe the diff, not the description.",
-      "areas: one entry per module touched, at most 8, what changed there in one sentence, path = the file that matters most.",
-      "claims: every concrete claim the PR description makes, at most 12. Check each against the diff and the code. verdict: matches, partly, no-evidence (the diff has nothing for it), or contradicted. evidence: head line numbers in changed files. note: one sentence when the verdict is not matches, else empty.",
-      "ai.score: how much this PR reads like unedited AI output, 0 = clearly written and edited by a person, 100 = raw generation. Judge the comments, naming, defensive noise, tests, and description shape from the code itself. Give exactly 3 reasons with evidence lines. The deterministic signals below are for orientation; verify before agreeing with them.",
-      "",
-      `Deterministic signals (score ${report?.score ?? "n/a"}):`,
-      signalsSummary(report),
-      "",
-      `PR title: ${row.title}`,
-      "PR description:",
-      row.body.trim() === "" ? "(none)" : row.body.trim().slice(0, 8000),
-      "",
-      `Changed files (${files.length}):`,
-      ...files.slice(0, 150).map((f) => `  ${f.status.padEnd(8)} ${f.path} (+${f.additions} -${f.deletions})`),
-      ...(files.length > 150 ? [`  ... ${files.length - 150} more`] : []),
-      "",
-      codemapDigest(row),
-    ].join("\n");
+    const report = briefState(row).signals as unknown as SlopReport | null;
+    return renderBrief({
+      fence: BRIEF_FENCE,
+      score: report?.score ?? "n/a",
+      pr: prPrompt(row),
+      description: row.body.trim() === "" ? "(none)" : row.body.trim().slice(0, 8000),
+      stack: stackPrompt(row),
+      signals: signalsPrompt(report),
+      ...filesPrompt(files),
+      codemap: codemapPrompt(row),
+    });
   }
 
   const rawBriefSchema = z.object({
@@ -1675,26 +2205,18 @@ export default async function plugin(bb: BbPluginApi) {
   async function notesPrompt(row: ReviewRow): Promise<string> {
     const files = await filesFor(row);
     const report = briefState(row).signals as unknown as SlopReport | null;
-    return [
-      `Job: find AI slop and cleanups in this PR. Reply with exactly one fenced block tagged ${NOTES_FENCE} containing a JSON array:`,
-      '[{ "path": string, "line": number, "endLine"?: number, "kind": "slop" | "cleanup" | "risk" | "question", "severity": "low" | "medium" | "high", "title": string, "body": string, "suggestion"?: string }]',
-      "",
-      "path and line: a changed file and a head line number that appears in the diff (added or context). endLine when the note covers a range.",
-      "kind: slop = generated residue a person would cut (narrating comments, filler docstrings on private helpers, boilerplate, names that read generated); cleanup = dead or duplicated code, leftovers, stubs, inconsistent patterns; risk = weakened or skipped tests, swallowed errors, defensive noise that hides failures, behavior the description does not mention; question = something the reviewer should ask the author.",
-      "title: at most 12 words. body: one to three plain-English sentences saying what and why, no filler. suggestion: replacement code for the lines only when a concrete rewrite is obvious; leave it out otherwise.",
-      "At most 25 notes, most important first. Skip anything a formatter fixes. Read the diff; do not invent lines. Skip lines that already carry a GitHub review thread if the thread says the same thing.",
-      "",
-      `Deterministic signals for orientation (verify before repeating them):`,
-      signalsSummary(report),
-      "",
-      `PR title: ${row.title}`,
-      `Changed files (${files.length}):`,
-      ...files.slice(0, 150).map((f) => `  ${f.status.padEnd(8)} ${f.path} (+${f.additions} -${f.deletions})`),
-      ...(files.length > 150 ? [`  ... ${files.length - 150} more`] : []),
-      "",
-      "Existing GitHub review threads (path:line by author):",
-      ...cachedThreads(row).filter((t) => !t.isResolved).slice(0, 80).map((t) => `  ${t.path}:${t.line ?? t.originalLine ?? "?"} ${t.comments[0]?.author ?? ""}: ${(t.comments[0]?.body ?? "").split("\n")[0].slice(0, 90)}`),
-    ].join("\n");
+    return renderNotes({
+      fence: NOTES_FENCE,
+      pr: { title: row.title },
+      signals: signalsPrompt(report),
+      ...filesPrompt(files),
+      threads: cachedThreads(row).filter((t) => !t.isResolved).slice(0, 80).map((t) => ({
+        path: t.path,
+        line: t.line ?? t.originalLine ?? "?",
+        author: t.comments[0]?.author ?? "",
+        preview: (t.comments[0]?.body ?? "").split("\n")[0].slice(0, 90),
+      })),
+    });
   }
 
   const rawNotesSchema = z.array(z.object({
@@ -1759,20 +2281,29 @@ export default async function plugin(bb: BbPluginApi) {
     return parts.join("\n\n").trim();
   }
 
-  /** Signals for the head, computing when missing or on refresh; the brief starts once per review when autoBrief is on. Rewrites go through brief_write. */
+  /** Signals compute on first call for a head. The helper brief runs once when autoBrief is on, or on an explicit refresh (signals + brief together). GitHub sync does not rewrite it. */
   function briefGet(row: ReviewRow, refresh: boolean): BriefState {
+    if (refresh) {
+      void startSignals(row).then(() => writeBrief(row));
+      return briefState(row);
+    }
     const state = briefState(row);
-    if (refresh || state.signalsStatus === "missing") startSignals(row);
-    if (autoBrief && state.briefStatus === "missing") void writeBrief(row);
+    if (state.signalsStatus === "missing") void startSignals(row);
+    if (autoBrief && state.briefStatus === "missing") void startSignals(row).then(() => writeBrief(row));
     return briefState(row);
   }
 
   // -- GitHub write paths ----------------------------------------------------
 
-  async function submitReview(reviewId: string, event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES", body: string): Promise<{ url: string | null; posted: number }> {
+  async function submitReview(reviewId: string, event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES", body: string): Promise<{ url: string | null; posted: number; dropped: number }> {
     const row = requireReview(reviewId);
-    const pending = q.pending.all(row.id);
-    if (pending.length === 0 && body.trim() === "") throw new Error("nothing to submit: add comments or a review body");
+    const pending = await pendingFor(row, await filesFor(row));
+    const live = pending.filter((p) => !p.stale);
+    if (live.length === 0 && body.trim() === "") {
+      throw new Error(pending.length > 0
+        ? "pending comments no longer sit on the current diff. Remove them, or add a review body."
+        : "nothing to submit: add comments or a review body");
+    }
     const result = await host.call(
       "gh_submit_review",
       {
@@ -1782,14 +2313,14 @@ export default async function plugin(bb: BbPluginApi) {
         commitId: row.head_sha,
         event,
         body,
-        comments: pending.map((p) => ({ path: p.path, line: p.line, side: p.side === "LEFT" ? "LEFT" : "RIGHT", startLine: p.start_line, body: p.body })),
+        comments: live.map((p) => ({ path: p.path, line: p.line, side: p.side, startLine: p.startLine, body: p.body })),
       },
       hostOptions(row),
     );
     q.clearPending.run(row.id);
     await refreshThreads(row).catch(() => undefined);
     publish(row.id, "pending");
-    return { url: result.url, posted: pending.length };
+    return { url: result.url, posted: live.length, dropped: pending.length - live.length };
   }
 
   // -- Roundtable bridge over loopback --------------------------------------
@@ -1808,26 +2339,30 @@ export default async function plugin(bb: BbPluginApi) {
   // -- RPC -------------------------------------------------------------------
 
   bb.rpc.register(rpcContract, {
-    reviews_list: () => ({
-      reviews: q.reviews.all().map((row) => ({
-        id: row.id,
-        owner: row.owner,
-        repo: row.repo,
-        number: row.number,
-        title: row.title,
-        state: row.state,
-        headSha: row.head_sha,
-        pendingCount: q.pending.all(row.id).length,
-        updatedAt: row.updated_at,
-      })),
-    }),
+    reviews_list: () => {
+      const rows = q.reviews.all().filter((row) => prIsOpen(row.state));
+      discoverStacks(rows);
+      return {
+        reviews: rows.map((row) => ({
+          id: row.id,
+          owner: row.owner,
+          repo: row.repo,
+          number: row.number,
+          title: row.title,
+          state: row.state,
+          isDraft: row.is_draft === 1,
+          headSha: row.head_sha,
+          pendingCount: q.pending.all(row.id).length,
+          updatedAt: row.updated_at,
+          stack: stackSummaryFor(row),
+        })),
+      };
+    },
     reviews_open: async ({ ref }) => ({ review: await openReview(ref) }),
     reviews_get: ({ reviewId }) => reviewDetail(reviewId),
-    reviews_sync: ({ reviewId }) => syncReview(reviewId),
+    reviews_sync: ({ reviewId }) => syncReview(reviewId, true),
     reviews_remove: async ({ reviewId }) => {
-      for (const seat of q.seats.all(reviewId)) await chatReset(reviewId, seat.provider_id);
-      q.deleteReview.run(reviewId);
-      publish(reviewId, "removed");
+      await dropReview(requireReview(reviewId), { dismiss: true, reason: "removed" });
       return { ok: true as const };
     },
     review_patch: async ({ reviewId, path }) => {
@@ -1883,7 +2418,23 @@ export default async function plugin(bb: BbPluginApi) {
       if (row !== undefined) publish(row.review_id, "pending");
       return { ok: true as const };
     },
+    pending_clear: async ({ reviewId }) => {
+      const row = requireReview(reviewId);
+      const stale = (await pendingFor(row, await filesFor(row))).filter((p) => p.stale);
+      for (const pending of stale) q.deletePending.run(pending.id);
+      if (stale.length > 0) publish(row.id, "pending");
+      return { removed: stale.length };
+    },
     review_submit: ({ reviewId, event, body }) => submitReview(reviewId, event, body),
+    review_set_draft: async ({ reviewId, draft }) => {
+      const row = requireReview(reviewId);
+      if (row.state !== "OPEN") throw new Error("only an open pull request can be marked ready or converted to draft");
+      const result = await host.call("gh_set_draft", { owner: row.owner, repo: row.repo, number: row.number, draft }, hostOptions(row));
+      q.setDraft.run(result.isDraft ? 1 : 0, Date.now(), row.id);
+      patchStackDraft(row.owner, row.repo, row.number, result.isDraft);
+      publish(row.id, "draft");
+      return { review: toReview(requireReview(row.id)) };
+    },
     thread_reply: async ({ reviewId, commentId, body }) => {
       const row = requireReview(reviewId);
       await host.call("gh_reply", { owner: row.owner, repo: row.repo, number: row.number, commentId, body }, hostOptions(row));
@@ -1927,9 +2478,14 @@ export default async function plugin(bb: BbPluginApi) {
     brief_get: ({ reviewId, refresh }) => briefGet(requireReview(reviewId), refresh === true),
     brief_write: async ({ reviewId }) => {
       const row = requireReview(reviewId);
-      if (briefState(row).signalsStatus === "missing") startSignals(row);
+      await startSignals(row);
       await writeBrief(row);
       return briefState(row);
+    },
+    helper_set_model: async ({ model }) => {
+      await settings.experimental_set({ helperModel: model });
+      helperModelNow = model;
+      return { model };
     },
     notes_from_signal: async ({ reviewId, signalId, show }) => ({ count: await notesFromSignal(requireReview(reviewId), signalId, show) }),
     notes_find: async ({ reviewId }) => {
@@ -1982,10 +2538,11 @@ export default async function plugin(bb: BbPluginApi) {
       const row = requireReview(reviewId);
       return host.call("git_show", { worktree: row.worktree, sha, path }, hostOptions(row));
     },
-    notes_clear: ({ reviewId, source, dismissedOnly }) => {
+    notes_clear: ({ reviewId, source, dismissedOnly, staleOnly }) => {
       requireReview(reviewId);
       const before = q.notes.all(reviewId).length;
       if (dismissedOnly) q.deleteDismissedNotes.run(reviewId);
+      else if (staleOnly) q.deleteStaleNotes.run(reviewId);
       else if (source !== undefined) q.deleteNotesBySource.run(reviewId, source);
       else q.deleteAllNotes.run(reviewId);
       publish(reviewId, "notes");
@@ -2030,10 +2587,11 @@ export default async function plugin(bb: BbPluginApi) {
     name: "review-desk",
     summary: "Open GitHub pull requests in Review Desk and chat with the PR analyst",
     commands: [
-      { name: "open", summary: "Open or refresh a PR review", usage: "bb review-desk open <url | owner/repo#N>" },
+      { name: "open", summary: "Open or refresh a PR review", usage: "bb review-desk open <url | owner/repo#N | owner/repo/stack/N>" },
       { name: "list", summary: "List reviews", usage: "bb review-desk list [--json]" },
       { name: "ask", summary: "Send a message to the PR analyst", usage: "bb review-desk ask <reviewId> <text...> [--provider <id>]" },
       { name: "codemap", summary: "Build or print the codemap", usage: "bb review-desk codemap <reviewId> [--json]" },
+      { name: "stack", summary: "Print the GitHub stack for a review", usage: "bb review-desk stack <reviewId> [--json]" },
     ],
     async run(argv) {
       const json = argv.includes("--json");
@@ -2052,7 +2610,7 @@ export default async function plugin(bb: BbPluginApi) {
             return ok(review, `Opened ${review.owner}/${review.repo}#${review.number} "${review.title}" as ${review.id} (${review.changedFiles} files, worktree ${review.worktree})`);
           }
           case "list": {
-            const rows = q.reviews.all();
+            const rows = q.reviews.all().filter((r) => prIsOpen(r.state));
             return ok(rows.map(toReview), rows.length === 0 ? "No reviews." : rows.map((r) => `${r.id}  ${r.owner}/${r.repo}#${r.number}  ${r.title}  [${r.state}]`).join("\n"));
           }
           case "ask": {
@@ -2078,11 +2636,41 @@ export default async function plugin(bb: BbPluginApi) {
             ].join("\n");
             return ok(c, text);
           }
+          case "stack": {
+            const row = requireReview(rest[0] ?? "");
+            await refreshStack(row, true);
+            const stack = stackViewFor(requireReview(row.id));
+            if (stack === null) return ok(null, `${row.owner}/${row.repo}#${row.number} is not in a stack.`);
+            const label = stack.number !== null ? `GitHub stack #${stack.number}` : "inferred stack";
+            const text = [
+              `${label} on ${stack.baseRefName} (${stack.source}, ${stack.entries.length} PRs). Current layer ${stack.currentPosition}/${stack.entries.length}.`,
+              ...stack.entries.map((e) => `  ${e.position}. #${e.number} ${e.state}${e.merged ? " merged" : ""}  ${e.title}  +${e.additions}/-${e.deletions}${e.number === row.number ? "  ←" : ""}`),
+            ].join("\n");
+            return ok(stack, text);
+          }
           default:
-            return { exitCode: 1, stderr: "usage: bb review-desk open|list|ask|codemap" };
+            return { exitCode: 1, stderr: "usage: bb review-desk open|list|ask|codemap|stack" };
         }
       } catch (cause) {
         return { exitCode: 1, stderr: errorMessage(cause) };
+      }
+    },
+  });
+
+  bb.background.service("sync-open-reviews", {
+    async start(signal) {
+      while (!signal.aborted) {
+        const started = Date.now();
+        await Promise.all(
+          q.reviews.all().map(async (row) => {
+            try {
+              await syncReview(row.id);
+            } catch (cause) {
+              bb.log.warn(`sync ${row.owner}/${row.repo}#${row.number}: ${errorMessage(cause)}`);
+            }
+          }),
+        );
+        await sleep(Math.max(0, SYNC_EVERY_MS - (Date.now() - started)), signal);
       }
     },
   });
