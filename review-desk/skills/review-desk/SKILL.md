@@ -1,26 +1,22 @@
 ---
 name: review-desk
-description: Chat with a reviewer about a GitHub pull request from inside Review Desk. Use when your thread was created by the Review Desk plugin or the first message says you are the analyst for a pull request.
+description: Open or inspect GitHub pull requests and PR stacks in Review Desk with the bb review-desk CLI.
 ---
 
-# Review Desk analyst
+# Review Desk
 
-You are a read-only analyst for one pull request, in a chat with the person reviewing it. Your working directory is a detached worktree at the PR head. Never modify files, never commit, never push. Read files and run `git diff`, `git show`, `git log`, `git grep`, and read-only build or test commands to check claims before making them.
+Review Desk displays GitHub pull-request diffs, descriptions, conversations and inline threads. It keeps comments pending until the reviewer submits them to GitHub. Private notes stay in Review Desk until added to the pending review.
 
-The first message gives the base and head shas. The PR diff is `git diff <base> <head>`, one file with `git diff <base> <head> -- <path>`, the base version of a file with `git show <base>:<path>`.
+Use these commands when the user asks to open or inspect a review:
 
-If the first message says this PR is a layer in a stack, the reviewable diff is this layer only. Other layers are context and may be open as their own reviews. Do not treat the whole stack as one patch unless asked. GitHub comments belong on this PR.
+```
+bb review-desk open <url | owner/repo#N | owner/repo/stack/N>
+bb review-desk list [--json]
+bb review-desk stack <reviewId> [--json]
+```
 
-## How requests arrive
+The repository host needs an authenticated `gh` CLI. Opening a PR creates a detached worktree for its diff. Stack metadata lists every layer; other layers open when selected. Comments and review submission belong to the selected PR.
 
-- A plain question about the PR.
-- A question with code pills. The reviewer attaches a line range (`mod.rs:40-70`), a changed file (`mod.rs`), a changed symbol (`SelectionCore::schedule_selection`), a GitHub review thread (`@alice on mod.rs:66`), or the `PR description` as @-mentions. Each pill's content arrives with the message as a block titled `Context for @<pill>`: for a range, an excerpt where `>` marks the selected lines; for a file, its diff; for a symbol, its source at the head (or at the base, if removed); for a thread, the comments and the code at that line. Treat those blocks as the code the reviewer is pointing at and answer about it in the context of the whole change.
-- A file pill with "Summarize these changes and why they matter for this PR": explain what changed in that file and why it matters, in under 150 words.
+The UI supports replying to and resolving GitHub review threads, writing pending inline comments, and submitting a comment, approval or request for changes. Removing a review from Review Desk does not close it on GitHub.
 
-## How to answer
-
-- Write for the reviewer: specific to the code, concrete, no restating of the question or the excerpt. Cite paths and line numbers.
-- Keep it short unless asked for depth. Prefer a direct answer, then the evidence.
-- When asked to draft a GitHub comment, write it as ready-to-post Markdown with no preamble, so the reviewer can attach it to the lines as is.
-- When asked for risks or a review of a range, number the points and give a concrete fix for each.
-- If you are unsure, say what you checked and what you could not verify.
+Markdown files offer rendered block comparisons alongside source diffs. Repository files remain read-only. Resolved and earlier-version threads start collapsed. The UI can edit PR descriptions, published comments, review summaries, and inline replies when permitted by GitHub.

@@ -42,6 +42,9 @@ export const ghPrSchema = z.object({
   createdAt: z.string(),
 });
 export type GhPr = z.infer<typeof ghPrSchema>;
+const ghPrStatusSchema = ghPrSchema.omit({ commits: true, labels: true, assignees: true, reviewers: true, checks: true });
+export type GhPrStatus = z.infer<typeof ghPrStatusSchema>;
+const ghPrDetailsSchema = ghPrSchema.pick({ commits: true, labels: true, assignees: true, reviewers: true, checks: true }).extend({ commits: ghPrSchema.shape.commits.nullable() });
 
 export const ghCommentSchema = z.object({
   id: z.string(),
@@ -50,6 +53,7 @@ export const ghCommentSchema = z.object({
   body: z.string(),
   createdAt: z.string(),
   url: z.string().nullable(),
+  canEdit: z.boolean().default(false),
 });
 export type GhComment = z.infer<typeof ghCommentSchema>;
 
@@ -61,6 +65,9 @@ export const ghThreadSchema = z.object({
   line: z.number().nullable(),
   originalLine: z.number().nullable(),
   startLine: z.number().nullable(),
+  originalStartLine: z.number().nullable().default(null),
+  startSide: z.enum(["LEFT", "RIGHT"]).nullable().default(null),
+  subjectType: z.enum(["LINE", "FILE"]).default("LINE"),
   side: z.enum(["LEFT", "RIGHT"]),
   comments: z.array(ghCommentSchema),
 });
@@ -68,53 +75,46 @@ export type GhThread = z.infer<typeof ghThreadSchema>;
 
 export const ghIssueCommentSchema = z.object({
   id: z.number(),
+  nodeId: z.string().nullable().default(null),
+  canEdit: z.boolean().default(false),
   author: z.string(),
   body: z.string(),
   createdAt: z.string(),
   url: z.string(),
 });
+export type GhIssueComment = z.infer<typeof ghIssueCommentSchema>;
 export const ghReviewSchema = z.object({
   id: z.number(),
+  nodeId: z.string().nullable().default(null),
+  canEdit: z.boolean().default(false),
   author: z.string(),
   state: z.string(),
   body: z.string(),
   submittedAt: z.string().nullable(),
   url: z.string(),
 });
+export type GhReview = z.infer<typeof ghReviewSchema>;
 
-export const codemapSymbolSchema = z.object({
-  kind: z.string(),
-  name: z.string(),
-  qualified: z.string(),
-  status: z.enum(["added", "removed", "modified", "unchanged"]),
-  start: z.number(),
-  end: z.number(),
-  oldStart: z.number().nullable(),
-  oldEnd: z.number().nullable(),
-  changedLines: z.number(),
-  fanIn: z.number(),
-  refs: z.array(z.string()),
+export const ghEditTargetSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("description") }),
+  z.object({ kind: z.enum(["comment", "review", "inline"]), id: z.string().min(1) }),
+]);
+export type GhEditTarget = z.infer<typeof ghEditTargetSchema>;
+export const ghBodyEditSchema = z.object({
+  target: ghEditTargetSchema,
+  body: z.string().max(65_536),
+  expectedBody: z.string(),
 });
-export type CodemapSymbol = z.infer<typeof codemapSymbolSchema>;
 
-export const codemapSchema = z.object({
-  headSha: z.string(),
-  engine: z.enum(["tree-sitter", "regex"]),
-  files: z.array(
-    z.object({
-      path: z.string(),
-      lang: z.string().nullable(),
-      module: z.string(),
-      changedLines: z.number(),
-      symbols: z.array(codemapSymbolSchema),
-    }),
-  ),
-  edges: z.array(z.object({ from: z.string(), to: z.string() })),
-  readingOrder: z.array(z.object({ module: z.string(), paths: z.array(z.string()), reason: z.string() })),
-  hotspots: z.array(z.object({ path: z.string(), qualified: z.string(), score: z.number(), changedLines: z.number(), fanIn: z.number() })),
-  stats: z.object({ files: z.number(), symbols: z.number(), added: z.number(), removed: z.number(), modified: z.number(), parseFailures: z.number() }),
+export const ghEventSchema = z.object({
+  id: z.string(),
+  event: z.string(),
+  actor: z.string().nullable(),
+  createdAt: z.string().nullable(),
+  url: z.string().nullable(),
+  details: z.string(),
 });
-export type Codemap = z.infer<typeof codemapSchema>;
+export type GhEvent = z.infer<typeof ghEventSchema>;
 
 /** One pull request in a GitHub (or inferred) stack, ordered from trunk upward. */
 export const prStackEntrySchema = z.object({
@@ -189,13 +189,29 @@ export const hostContract = defineRpcContract({
     input: z.object({ owner: z.string(), repo: z.string(), number: z.number() }),
     output: ghPrSchema,
   },
+  gh_pr_status: {
+    input: z.object({ owner: z.string(), repo: z.string(), number: z.number() }),
+    output: ghPrStatusSchema,
+  },
+  gh_pr_details: {
+    input: z.object({ owner: z.string(), repo: z.string(), number: z.number(), includeCommits: z.boolean() }),
+    output: ghPrDetailsSchema,
+  },
   gh_threads: {
     input: z.object({ owner: z.string(), repo: z.string(), number: z.number() }),
     output: z.object({ threads: z.array(ghThreadSchema) }),
   },
   gh_conversation: {
     input: z.object({ owner: z.string(), repo: z.string(), number: z.number() }),
-    output: z.object({ comments: z.array(ghIssueCommentSchema), reviews: z.array(ghReviewSchema) }),
+    output: z.object({ comments: z.array(ghIssueCommentSchema), reviews: z.array(ghReviewSchema), events: z.array(ghEventSchema) }),
+  },
+  gh_description: {
+    input: z.object({ owner: z.string(), repo: z.string(), number: z.number() }),
+    output: z.object({ body: z.string(), canEdit: z.boolean() }),
+  },
+  gh_edit_body: {
+    input: ghBodyEditSchema.extend({ owner: z.string(), repo: z.string(), number: z.number() }),
+    output: z.object({ body: z.string() }),
   },
   gh_submit_review: {
     input: z.object({
@@ -244,15 +260,6 @@ export const hostContract = defineRpcContract({
     }),
     output: z.object({ stack: prStackSchema.nullable() }),
   },
-  codemap: {
-    input: z.object({
-      worktree: z.string(),
-      baseSha: z.string(),
-      headSha: z.string(),
-      files: z.array(changedFileSchema),
-      wasmDir: z.string().nullable(),
-    }),
-    output: codemapSchema,
-  },
+
 });
 export type HostContract = typeof hostContract;

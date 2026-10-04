@@ -1,5 +1,0 @@
-This PR is layer {{ stack.position }} of {{ stack.size }} in {{ stack.label }} (trunk {{ stack.baseRefName }}). The reviewable diff is this layer only.
-The rest of the stack, from the trunk up:
-{% for e in stack.entries %}
-  {{ e.position }}. #{{ e.number }} {{ e.state }}{% if e.merged %} merged{% elif e.isDraft %} draft{% endif %}  {{ e.title }}  (+{{ e.additions }} -{{ e.deletions }}){% if e.current %}  ← current{% endif %}
-{% endfor %}

@@ -18,17 +18,13 @@
       ]
     },
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true
   },
   "include": [
-    "server.ts",
-    "prompts.ts",
-    "host.ts",
-    "host-contract.ts",
-    "stack-fetch.ts",
-    "app.tsx",
+    "*.ts",
+    "*.tsx",
     "components",
-    "lib",
-    "hooks"
+    "lib"
   ]
 }

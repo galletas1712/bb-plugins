@@ -37,7 +37,10 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
               headRefOid
               baseRefName
               merged
-              files(first: 100) { nodes { path } }
+              files(first: 100) {
+                pageInfo { hasNextPage endCursor }
+                nodes { path }
+              }
             }
           }
         }
@@ -80,6 +83,11 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   }
 }`;
 
+interface Connection<T> {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: T[];
+}
+
 interface GqlPr {
   number: number;
   title?: string | null;
@@ -95,7 +103,7 @@ interface GqlPr {
   baseRefName?: string | null;
   merged?: boolean | null;
   mergedAt?: string | null;
-  files?: { nodes?: { path?: string | null }[] | null } | null;
+  files?: Connection<{ path?: string | null }> | null;
 }
 
 interface GqlStackData {
@@ -105,10 +113,7 @@ interface GqlStackData {
         number: number;
         size?: number;
         baseRefName?: string;
-        entries?: {
-          pageInfo: { hasNextPage: boolean; endCursor: string | null };
-          nodes: { position: number; pullRequest: GqlPr | null }[];
-        };
+        entries?: Connection<{ position: number; pullRequest: GqlPr | null }>;
       } | null;
     } | null;
   } | null;
@@ -166,7 +171,7 @@ async function ghApi(run: GhRun, path: string, extra: string[] = []): Promise<{ 
   return withVersion;
 }
 
-async function ghGraphql(run: GhRun, query: string, vars: Record<string, string | number | null>): Promise<{ data: GqlStackData | null; errors: string[]; raw: string }> {
+async function ghGraphql<T>(run: GhRun, query: string, vars: Record<string, string | number | null>): Promise<{ data: T | null; errors: string[] }> {
   const args = ["api", "graphql", "-f", `query=${query}`];
   for (const [key, value] of Object.entries(vars)) {
     if (value === null) continue;
@@ -174,12 +179,44 @@ async function ghGraphql(run: GhRun, query: string, vars: Record<string, string 
   }
   const result = await run("gh", args, { allowFailure: true });
   const raw = result.stdout.trim() || result.stderr;
-  if (raw === "") return { data: null, errors: [result.stderr || "empty GraphQL response"], raw };
+  if (raw === "") return { data: null, errors: [result.stderr || "empty GraphQL response"] };
   try {
-    const parsed = parseJson<{ data?: GqlStackData; errors?: { message?: string }[] }>(result.stdout || "{}");
-    return { data: parsed.data ?? null, errors: (parsed.errors ?? []).map((e) => e.message ?? ""), raw };
+    const parsed = parseJson<{ data?: T; errors?: { message?: string }[] }>(result.stdout || "{}");
+    const errors = (parsed.errors ?? []).map((e) => e.message ?? "Unknown GraphQL error");
+    if (result.code !== 0 && errors.length === 0) errors.push(result.stderr || raw);
+    return { data: parsed.data ?? null, errors };
   } catch {
-    return { data: null, errors: [raw.slice(0, 400)], raw };
+    return { data: null, errors: [raw.slice(0, 400)] };
+  }
+}
+
+function nextCursor(pageInfo: Connection<unknown>["pageInfo"], seen: Set<string>): string | null {
+  if (!pageInfo.hasNextPage) return null;
+  const cursor = pageInfo.endCursor;
+  if (!cursor || seen.has(cursor)) throw new Error("GitHub returned an invalid pagination cursor while fetching a stack");
+  seen.add(cursor);
+  return cursor;
+}
+
+async function remainingFiles(run: GhRun, owner: string, repo: string, number: number, first: Connection<{ path?: string | null }>): Promise<string[]> {
+  const files = new Set<string>();
+  const seen = new Set<string>();
+  let page = first;
+  while (true) {
+    for (const file of page.nodes) if (file.path) files.add(file.path);
+    const after = nextCursor(page.pageInfo, seen);
+    if (after === null) return [...files];
+    const { data, errors } = await ghGraphql<{ repository?: { pullRequest?: { files?: typeof first } } }>(run, `
+      query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+        repository(owner: $owner, name: $repo) {
+          pullRequest(number: $number) {
+            files(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { path } }
+          }
+        }
+      }`, { owner, repo, number, after });
+    const next = data?.repository?.pullRequest?.files;
+    if (errors.length || !next) throw new Error(`Could not fetch all files for PR #${number}: ${errors.join("; ") || "missing file page"}`);
+    page = next;
   }
 }
 
@@ -208,26 +245,35 @@ function entryFromGql(node: { position: number; pullRequest: GqlPr | null }): Pr
 
 async function graphqlStackWith(run: GhRun, query: string, owner: string, repo: string, number: number): Promise<PrStack | null | "unsupported" | "retry"> {
   const nodes: { position: number; pullRequest: GqlPr | null }[] = [];
+  const cursors = new Set<string>();
   let after: string | null = null;
   let meta: { number: number; baseRefName: string } | null = null;
-  for (let page = 0; page < 5; page++) {
-    const { data, errors, raw } = await ghGraphql(run, query, { owner, repo, number, after });
-    if (errors.some((e) => isUnsupported(e)) || isUnsupported(raw)) return "unsupported";
-    if (errors.length > 0 && data?.repository?.pullRequest?.stack === undefined) {
-      if (errors.some((e) => /files|merged/i.test(e))) return "retry";
-      return null;
+  while (true) {
+    const { data, errors } = await ghGraphql<GqlStackData>(run, query, { owner, repo, number, after });
+    if (errors.length > 0) {
+      if (after === null && errors.some(isUnsupported)) return "unsupported";
+      if (after === null && errors.some((e) => /files|merged/i.test(e))) return "retry";
+      throw new Error(`Could not fetch the complete PR stack: ${errors.join("; ")}`);
     }
     const pr = data?.repository?.pullRequest;
-    if (pr === undefined || pr === null || pr.stack === null || pr.stack === undefined) return null;
+    if (!pr?.stack) {
+      if (after !== null) throw new Error("The PR stack disappeared during pagination; reload to retry");
+      return null;
+    }
     meta = { number: pr.stack.number, baseRefName: pr.stack.baseRefName ?? "" };
     const conn = pr.stack.entries;
-    if (conn === undefined) break;
+    if (conn === undefined) throw new Error("GitHub omitted the PR stack entries");
     nodes.push(...conn.nodes);
-    if (!conn.pageInfo.hasNextPage || conn.pageInfo.endCursor === null) break;
-    after = conn.pageInfo.endCursor;
+    after = nextCursor(conn.pageInfo, cursors);
+    if (after === null) break;
   }
   if (meta === null) return null;
-  const entries = nodes.map(entryFromGql).filter((e): e is PrStackEntry => e !== null).sort((a, b) => a.position - b.position);
+  const resolved = await mapLimit(nodes, 6, async (node) => {
+    const entry = entryFromGql(node);
+    if (entry && node.pullRequest?.files) entry.files = await remainingFiles(run, owner, repo, entry.number, node.pullRequest.files);
+    return entry;
+  });
+  const entries = [...new Map(resolved.filter((e): e is PrStackEntry => e !== null).map((entry) => [entry.number, entry])).values()].sort((a, b) => a.position - b.position);
   if (entries.length < 2) return null;
   return { number: meta.number, baseRefName: meta.baseRefName || entries[0]?.baseRefName || "", source: "github", entries };
 }
@@ -260,29 +306,26 @@ function restToPartial(pr: RestStackPr, position: number, stackBase: string): Pr
 }
 
 async function restStackByQuery(run: GhRun, owner: string, repo: string, pullRequest: number): Promise<RestStack | null | "unsupported"> {
-  const result = await ghApi(run, `repos/${owner}/${repo}/stacks?pull_request=${pullRequest}`);
+  const result = await ghApi(run, `repos/${owner}/${repo}/stacks?pull_request=${pullRequest}&per_page=100`, ["--paginate", "--slurp"]);
   const text = `${result.stdout}${result.stderr}`;
-  if (result.code !== 0) return isUnsupported(text) || /404|Not Found|422/.test(text) ? "unsupported" : null;
-  try {
-    const list = parseJson<RestStack[]>(result.stdout);
-    return list[0] ?? null;
-  } catch {
-    return null;
+  if (result.code !== 0) {
+    if (isUnsupported(text) || /404|Not Found|422/.test(text)) return "unsupported";
+    throw new Error(`Could not fetch the PR stack: ${text}`);
   }
+  const list = parseJson<RestStack[][]>(result.stdout).flat();
+  return list[0] ?? null;
 }
 
 async function restStackByNumber(run: GhRun, owner: string, repo: string, stackNumber: number): Promise<RestStack | null | "unsupported"> {
-  const result = await ghApi(run, `repos/${owner}/${repo}/stacks/${stackNumber}`);
+  const result = await ghApi(run, `repos/${owner}/${repo}/stacks/${stackNumber}`, ["--paginate", "--slurp"]);
   const text = `${result.stdout}${result.stderr}`;
   if (result.code !== 0) {
     if (isUnsupported(text)) return "unsupported";
-    return null;
+    throw new Error(`Could not fetch stack #${stackNumber}: ${text}`);
   }
-  try {
-    return parseJson<RestStack>(result.stdout);
-  } catch {
-    return null;
-  }
+  const pages = parseJson<RestStack[]>(result.stdout);
+  if (!pages[0]) return null;
+  return { ...pages[0], pull_requests: [...new Map(pages.flatMap((page) => page.pull_requests ?? []).map((pr) => [pr.number, pr])).values()] };
 }
 
 async function prView(run: GhRun, owner: string, repo: string, number: number): Promise<PrView | null> {
@@ -301,14 +344,10 @@ async function prView(run: GhRun, owner: string, repo: string, number: number): 
 }
 
 async function prFiles(run: GhRun, owner: string, repo: string, number: number): Promise<string[]> {
-  const result = await ghApi(run, `repos/${owner}/${repo}/pulls/${number}/files?per_page=100`);
-  if (result.code !== 0) return [];
-  try {
-    const files = parseJson<{ filename?: string }[]>(result.stdout);
-    return files.map((f) => f.filename).filter((p): p is string => typeof p === "string" && p !== "");
-  } catch {
-    return [];
-  }
+  const result = await ghApi(run, `repos/${owner}/${repo}/pulls/${number}/files?per_page=100`, ["--paginate", "--slurp"]);
+  if (result.code !== 0) throw new Error(`Could not fetch files for PR #${number}: ${result.stderr || result.stdout}`);
+  const files = parseJson<{ filename?: string }[][]>(result.stdout).flat();
+  return [...new Set(files.map((f) => f.filename).filter((p): p is string => typeof p === "string" && p !== ""))];
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -337,7 +376,7 @@ function mergeView(entry: PrStackEntry, view: PrView | null, files: string[]): P
     additions: view?.additions ?? entry.additions,
     deletions: view?.deletions ?? entry.deletions,
     changedFiles: view?.changedFiles ?? entry.changedFiles,
-    reviewDecision: view?.reviewDecision ?? entry.reviewDecision,
+    reviewDecision: view !== null ? view.reviewDecision : entry.reviewDecision,
     headRefName: view?.headRefName || entry.headRefName,
     headSha: view?.headRefOid || entry.headSha,
     baseRefName: view?.baseRefName || entry.baseRefName,
@@ -345,15 +384,17 @@ function mergeView(entry: PrStackEntry, view: PrView | null, files: string[]): P
   };
 }
 
-async function enrich(run: GhRun, owner: string, repo: string, entries: PrStackEntry[]): Promise<PrStackEntry[]> {
-  const need = entries.some((e) => e.title.startsWith("#") || e.files.length === 0 || e.headSha === "" || e.url === "");
-  if (!need && entries.every((e) => e.files.length > 0)) return entries;
+async function enrich(run: GhRun, owner: string, repo: string, entries: PrStackEntry[], { fetchReviewDecision = false }: { fetchReviewDecision?: boolean } = {}): Promise<PrStackEntry[]> {
   return mapLimit(entries, 6, async (entry) => {
-    const [view, files] = await Promise.all([
-      entry.title.startsWith("#") || entry.headSha === "" || entry.url === "" || entry.additions === 0 && entry.changedFiles === 0 ? prView(run, owner, repo, entry.number) : Promise.resolve(null),
-      entry.files.length === 0 ? prFiles(run, owner, repo, entry.number) : Promise.resolve(entry.files),
-    ]);
-    return mergeView(entry, view, files);
+    // REST stack entries omit reviewDecision, even when their other metadata is complete.
+    const needsView = fetchReviewDecision || entry.title.startsWith("#") || entry.headSha === "" || entry.url === "" || entry.additions === 0 && entry.changedFiles === 0;
+    const view = needsView ? await prView(run, owner, repo, entry.number) : null;
+    if (needsView && view === null) throw new Error(`Could not fetch PR #${entry.number} in the stack`);
+    const metadata = mergeView(entry, view, entry.files);
+    const files = metadata.files.length < metadata.changedFiles ? await prFiles(run, owner, repo, entry.number) : metadata.files;
+    const merged = { ...metadata, files };
+    if (merged.files.length < merged.changedFiles) throw new Error(`GitHub returned only ${merged.files.length} of ${merged.changedFiles} files for PR #${entry.number}`);
+    return merged;
   });
 }
 
@@ -365,37 +406,33 @@ function fromRest(stack: RestStack): PrStack | null {
   return { number: stack.number, baseRefName, source: "github", entries };
 }
 
-async function prByHead(run: GhRun, owner: string, repo: string, head: string): Promise<PrView | null> {
-  const result = await run(
-    "gh",
-    ["pr", "list", "--repo", `${owner}/${repo}`, "--head", head, "--state", "all", "--limit", "10", "--json", "number,title,state,isDraft,url,additions,deletions,changedFiles,reviewDecision,headRefName,headRefOid,baseRefName,mergedAt"],
-    { allowFailure: true },
-  );
-  if (result.code !== 0) return null;
-  try {
-    const list = parseJson<PrView[]>(result.stdout);
-    const open = list.find((p) => p.state.toUpperCase() === "OPEN");
-    return open ?? list[0] ?? null;
-  } catch {
-    return null;
+async function relatedPr(run: GhRun, owner: string, repo: string, ref: string, field: "headRefName" | "baseRefName"): Promise<PrView | null> {
+  const query = `
+    query($owner: String!, $repo: String!, $ref: String!, $after: String) {
+      repository(owner: $owner, name: $repo) {
+        pullRequests(first: 100, after: $after, ${field}: $ref,
+          ${field === "baseRefName" ? "states: [OPEN]," : ""}
+          orderBy: { field: CREATED_AT, direction: DESC }) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            number title state isDraft url additions deletions changedFiles reviewDecision
+            headRefName headRefOid baseRefName mergedAt
+          }
+        }
+      }
+    }`;
+  const list: PrView[] = [];
+  const cursors = new Set<string>();
+  let after: string | null = null;
+  while (true) {
+    const { data, errors } = await ghGraphql<{ repository?: { pullRequests?: Connection<PrView> } }>(run, query, { owner, repo, ref, after });
+    const connection = data?.repository?.pullRequests;
+    if (errors.length || !connection) throw new Error(`Could not discover PRs for ${ref}: ${errors.join("; ") || "missing PR page"}`);
+    list.push(...connection.nodes);
+    after = nextCursor(connection.pageInfo, cursors);
+    if (after === null) break;
   }
-}
-
-async function prByBase(run: GhRun, owner: string, repo: string, base: string): Promise<PrView | null> {
-  const open = await run(
-    "gh",
-    ["pr", "list", "--repo", `${owner}/${repo}`, "--base", base, "--state", "open", "--limit", "10", "--json", "number,title,state,isDraft,url,additions,deletions,changedFiles,reviewDecision,headRefName,headRefOid,baseRefName,mergedAt"],
-    { allowFailure: true },
-  );
-  if (open.code === 0) {
-    try {
-      const list = parseJson<PrView[]>(open.stdout);
-      if (list[0] !== undefined) return list[0];
-    } catch {
-      // fall through
-    }
-  }
-  return null;
+  return list.find((pr) => pr.state.toUpperCase() === "OPEN") ?? list[0] ?? null;
 }
 
 function viewToEntry(view: PrView, position: number): PrStackEntry {
@@ -436,16 +473,16 @@ async function inferStack(run: GhRun, owner: string, repo: string, seed: number)
   const down: PrView[] = [seedView];
   let current = seedView;
   const seen = new Set<number>([seedView.number]);
-  while (current.baseRefName !== trunk && down.length < 40) {
-    const parent = await prByHead(run, owner, repo, current.baseRefName);
+  while (current.baseRefName !== trunk) {
+    const parent = await relatedPr(run, owner, repo, current.baseRefName, "headRefName");
     if (parent === null || seen.has(parent.number)) break;
     seen.add(parent.number);
     down.unshift(parent);
     current = parent;
   }
   current = seedView;
-  while (down.length < 40) {
-    const child = await prByBase(run, owner, repo, current.headRefName);
+  while (true) {
+    const child = await relatedPr(run, owner, repo, current.headRefName, "baseRefName");
     if (child === null || seen.has(child.number)) break;
     seen.add(child.number);
     down.push(child);
@@ -472,7 +509,7 @@ export async function fetchPullRequestStack(
     if (rest === "unsupported" || rest === null) return null;
     const stack = fromRest(rest);
     if (stack === null) return null;
-    stack.entries = await enrich(run, owner, repo, stack.entries);
+    stack.entries = await enrich(run, owner, repo, stack.entries, { fetchReviewDecision: true });
     return stack;
   }
   if (number === null) return null;
@@ -480,7 +517,7 @@ export async function fetchPullRequestStack(
   const gql = await graphqlStack(run, owner, repo, number);
   if (gql !== "unsupported") {
     if (gql === null) return null;
-    if (gql.entries.some((e) => e.files.length === 0)) gql.entries = await enrich(run, owner, repo, gql.entries);
+    gql.entries = await enrich(run, owner, repo, gql.entries);
     return gql;
   }
 
@@ -489,7 +526,7 @@ export async function fetchPullRequestStack(
     if (rest === null) return null;
     const stack = fromRest(rest);
     if (stack === null) return null;
-    stack.entries = await enrich(run, owner, repo, stack.entries);
+    stack.entries = await enrich(run, owner, repo, stack.entries, { fetchReviewDecision: true });
     return stack;
   }
 
