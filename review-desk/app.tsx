@@ -574,6 +574,23 @@ function ThreadCard({ thread, actions }: { thread: GhThread; actions: Pick<AnnoA
   );
 }
 
+function OutdatedThreads({ threads, actions, onJump }: { threads: GhThread[]; actions: Pick<AnnoActions, "reply" | "resolve" | "editComment" | "refreshThreads">; onJump?: JumpFn }) {
+  if (threads.length === 0) return null;
+  return <details className="min-w-0 text-sm">
+    <summary className="cursor-pointer select-none text-xs text-muted-foreground hover:text-foreground">Outdated threads ({threads.length})</summary>
+    <div className="mt-3 space-y-3">
+      {threads.map((thread) => {
+        const location = thread.path + (thread.originalLine === null ? "" : ":" + thread.originalLine);
+        return <div key={thread.id}>
+          {onJump ? <button type="button" className="break-all text-left font-mono text-xs text-muted-foreground hover:underline" onClick={() => onJump(thread.path, null, thread.side === "LEFT" ? "old" : "new")}>{location}</button>
+            : <p className="break-all font-mono text-xs text-muted-foreground">{location}</p>}
+          <ThreadCard thread={thread} actions={actions} />
+        </div>;
+      })}
+    </div>
+  </details>;
+}
+
 function PendingCard({ pending, actions }: { pending: PendingComment; actions: AnnoActions }) {
   const [editing, setEditing] = useState<string | null>(null);
   return (
@@ -691,9 +708,10 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
     return () => { cancelled = true; };
   }, [file.binary, file.path, file.oldPath, review.id, review.baseSha, rpc, base, head]);
   const fileDiff = useMemo(() => patch === null ? null : pickFileDiff(patch, file.path, file.oldPath), [patch, file.path, file.oldPath]);
+  const outdatedThreads = threads.filter((thread) => thread.isOutdated);
   const annotations = useMemo(() => {
     const comments: CommentAnchor<Anno>[] = [
-      ...threads.map((thread): CommentAnchor<Anno> => ({ side: thread.side, line: thread.line, detached: thread.isOutdated || thread.subjectType === "FILE", metadata: { kind: "thread", thread } })),
+      ...threads.filter((thread) => !thread.isOutdated).map((thread): CommentAnchor<Anno> => ({ side: thread.side, line: thread.line, detached: thread.subjectType === "FILE", metadata: { kind: "thread", thread } })),
       ...pending.map((pending): CommentAnchor<Anno> => ({ side: pending.side, line: pending.line, detached: pending.stale, metadata: { kind: "pending", pending } })),
       ...notes.map((note): CommentAnchor<Anno> => ({ side: note.side, line: note.line, detached: note.state === "stale", metadata: { kind: "note", note } })),
     ];
@@ -736,11 +754,12 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
       <Button type="button" size="sm" onClick={() => onOpenComposer(file.path, selected)}>{inCommit ? "Comment at head" : "Comment"}</Button>
       <button type="button" className="ml-auto p-1 text-muted-foreground" onClick={() => onSelect(null)} aria-label="Clear selection"><Icon name="X" className="size-4" /></button>
     </div> : null}
-    {annotations.detached.length > 0 ? <div className="space-y-3 border-b border-border p-3">
+    {annotations.detached.length > 0 || outdatedThreads.length > 0 ? <div className="space-y-3 border-b border-border p-3">
       {annotations.detached.map((anno, index) => <div key={annotationKey(anno, index)}>
         <p className="text-xs text-muted-foreground">{annotationLocation(anno)}</p>
         <Annotation anno={anno} actions={actions} />
       </div>)}
+      <OutdatedThreads threads={outdatedThreads} actions={actions} />
     </div> : null}
     {file.binary ? <p className="p-3 text-sm text-muted-foreground">Binary file.</p>
       : markdown && mode === "rendered" ? contentError !== null ? <p role="alert" className="p-3 text-sm text-destructive">{contentError}</p>
@@ -859,16 +878,17 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
   };
   if (error !== null) return <p role="alert" className="text-sm text-destructive">{error} <button type="button" className="underline" onClick={() => load(true)}>Retry</button></p>;
   if (conversation === null) return <EmptyState>Loading conversation…</EmptyState>;
+  const outdatedThreads = threads.filter((thread) => thread.isOutdated);
   type Item = { key: string; when: string; author: string; body: string; state?: string; url: string; thread?: GhThread; event?: string; target?: { kind: "review" | "comment"; id: string }; canEdit?: boolean };
   const items: Item[] = [
     ...conversation.reviews.map((r) => ({ key: "review-" + r.id, author: r.author, when: r.submittedAt ?? "", body: r.body, state: r.state, url: r.url, canEdit: r.canEdit, target: r.nodeId ? { kind: "review" as const, id: r.nodeId } : undefined })),
     ...conversation.comments.map((c) => ({ key: "comment-" + c.id, author: c.author, when: c.createdAt, body: c.body, url: c.url, canEdit: c.canEdit, target: c.nodeId ? { kind: "comment" as const, id: c.nodeId } : undefined })),
-    ...threads.map((thread) => ({ key: "thread-" + thread.id, author: "", when: thread.comments[0]?.createdAt ?? "", body: "", url: "", thread })),
+    ...threads.filter((thread) => !thread.isOutdated).map((thread) => ({ key: "thread-" + thread.id, author: "", when: thread.comments[0]?.createdAt ?? "", body: "", url: "", thread })),
     ...(conversation.events ?? []).map((event) => ({ key: "event-" + event.id, author: event.actor ?? "", when: event.createdAt ?? "", body: event.details, url: event.url ?? "", event: event.event })),
   ];
   items.sort((a, b) => (Date.parse(a.when) || 0) - (Date.parse(b.when) || 0));
   return <div className="space-y-5">
-    {items.length === 0 ? <EmptyState>No conversation yet.</EmptyState> : null}
+    {items.length === 0 && outdatedThreads.length === 0 ? <EmptyState>No conversation yet.</EmptyState> : null}
     {items.map((item) => item.thread ? <div key={item.key}>
       <button type="button" className="break-all text-left font-mono text-xs text-muted-foreground hover:underline" onClick={() => onJump(item.thread!.path, item.thread!.isOutdated ? null : item.thread!.line, item.thread!.side === "LEFT" ? "old" : "new")}>{item.thread.path}{item.thread.line !== null ? ":" + item.thread.line : ""}</button>
       <ThreadCard thread={item.thread} actions={actions} />
@@ -888,6 +908,7 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
         toast.success("Comment updated"); return result;
       }} />
     </article>)}
+    <OutdatedThreads threads={outdatedThreads} actions={actions} onJump={onJump} />
   </div>;
 }
 

@@ -19,4 +19,4 @@ The repository host needs an authenticated `gh` CLI. Opening a PR creates a deta
 
 The UI supports replying to and resolving GitHub review threads, writing pending inline comments, and submitting a comment, approval or request for changes. Removing a review from Review Desk does not close it on GitHub.
 
-Markdown files offer rendered block comparisons alongside source diffs. Repository files remain read-only. Resolved and earlier-version threads start collapsed. The UI can edit PR descriptions, published comments, review summaries, and inline replies when permitted by GitHub.
+Markdown files offer rendered block comparisons alongside source diffs. Repository files remain read-only. Outdated threads share a collapsed dropdown in each file diff and in Conversation, with each thread expanded manually. Resolved threads start collapsed. The UI can edit PR descriptions, published comments, review summaries, and inline replies when permitted by GitHub.

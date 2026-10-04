@@ -5,7 +5,7 @@ Review GitHub pull requests inside bb with their original description, conversat
 - Open a PR URL, `owner/repo#123`, or `owner/repo/stack/N`.
 - Read the full conversation: issue comments, reviews, inline threads and replies, and timeline events. GitHub collections are paginated, including commits, checks, labels, assignees, and review requests.
 - Browse changed files in unified or side-by-side diff mode. Use the file tree or, when it is hidden, the file dropdown. Current comments appear on their old/new diff lines. File comments, outdated threads, and comments outside the displayed hunks remain visible above the file. Threads on files no longer in the PR remain in Conversation.
-- Resolved and earlier-version threads start collapsed. Markdown offers Source and Rendered diffs, with added and removed blocks and links to their source lines. Repository files remain read-only.
+- Outdated threads sit inside one collapsed dropdown in each file diff and in Conversation. Open the dropdown, then expand individual threads as needed. Resolved threads start collapsed. Markdown offers Source and Rendered diffs, with added and removed blocks and links to their source lines. Repository files remain read-only.
 - Edit PR descriptions, published comments, review summaries, and inline replies when your GitHub account has permission. Save checks the latest text and keeps your draft if the request fails.
 - Reply to or resolve GitHub threads. Select lines to draft a comment, then submit the pending comments together as a review. Approval can be submitted without a message; requesting changes requires a review body.
 - Keep a comment private as a note, or add it to your pending review later. Stale comments remain visible and can be deleted.
