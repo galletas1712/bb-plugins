@@ -45,6 +45,17 @@ export default async function plugin(bb: BbPluginApi) {
     search: (input) => recall.search(input),
     read: ({ id }) => read(id),
     save: (input) => saveRecord(bb, library, input),
+    edit: (input) => {
+      const previous = library.read(input.id);
+      const record = library.save(
+        saveSchema.parse(input),
+        previous.projectId,
+        [],
+        previous.source,
+      );
+      bb.realtime.publish("changed", {});
+      return record;
+    },
     sync: ({ embed }) => recall.sync(embed),
   });
 

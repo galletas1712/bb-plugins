@@ -30,6 +30,17 @@ export const rpcContract = defineRpcContract({
     }),
   },
   save: { input: saveSchema, output: recordSchema },
+  edit: {
+    input: z
+      .object({
+        id: idSchema,
+        expectedVersion: saveSchema.shape.expectedVersion,
+        title: saveSchema.shape.title,
+        body: saveSchema.shape.body,
+      })
+      .strict(),
+    output: recordSchema,
+  },
   sync: {
     input: z.object({ embed: z.boolean().default(false) }),
     output: z.object({ indexed: z.number(), embedded: z.boolean() }),

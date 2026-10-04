@@ -34,7 +34,10 @@ conditions, and sources.
 
 Native tools expose `knowledge_recall`, `knowledge_read`, and `knowledge_save`.
 Agents can also use the equivalent CLI. Open **Knowledge** to browse, search, and
-read records or save one through the form.
+read records, edit a record with its pencil icon, or save one through the form.
+Edits stay in the Knowledge view and retain the source, project, artifacts, and
+previous versions, even when the source session no longer exists. Concurrent
+changes are rejected rather than overwritten.
 
 ```sh
 bb knowledge search "worker reconnect" --json

@@ -26,47 +26,56 @@ const fieldClass =
   "w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 const selectClass =
   "h-9 rounded-md border border-input bg-background px-2 text-sm";
-function CaptureForm({
+function RecordForm({
   threadId,
+  record,
   onSaved,
   onCancel,
 }: {
   threadId: string;
-  onSaved: (id: string) => void;
+  record?: KnowledgeRecord;
+  onSaved: (record: KnowledgeRecord) => void;
   onCancel: () => void;
 }) {
   const rpc = useRpc<typeof rpcContract>();
-  const [title, setTitle] = useState("");
+  const [title, setTitle] = useState(record?.title ?? "");
   const [source, setSource] = useState(threadId);
-  const [body, setBody] = useState("");
+  const [body, setBody] = useState(record?.body ?? "");
   const [artifacts, setArtifacts] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Retain an id across retries after a lost response.
-  const id = useRef(`record-${crypto.randomUUID()}`);
+  const id = useRef(record?.id ?? `record-${crypto.randomUUID()}`);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const record = await rpc.call("save", {
-        id: id.current,
-        expectedVersion: 0,
-        title,
-        body,
-        threadId: source,
-        global: false,
-        artifacts: artifacts
-          .split("\n")
-          .map((p) => p.trim())
-          .filter(Boolean)
-          .map((path) => ({
-            path,
-            name: path.split(/[\\/]/).pop()!,
-            source: "workspace" as const,
-          })),
-      });
-      onSaved(record.id);
+      const saved = record
+        ? await rpc.call("edit", {
+            id: record.id,
+            expectedVersion: record.version,
+            title,
+            body,
+          })
+        : await rpc.call("save", {
+            id: id.current,
+            expectedVersion: 0,
+            title,
+            body,
+            threadId: source,
+            global: false,
+            artifacts: artifacts
+              .split("\n")
+              .map((p) => p.trim())
+              .filter(Boolean)
+              .map((path) => ({
+                path,
+                name: path.split(/[\\/]/).pop()!,
+                source: "workspace" as const,
+              })),
+          });
+      onSaved(saved);
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -78,19 +87,23 @@ function CaptureForm({
       onSubmit={submit}
       className="space-y-4 rounded-lg border border-border p-4"
     >
-      <h2 className="text-base font-medium">Save a reusable result</h2>
+      <h2 className="text-base font-medium">
+        {record ? "Edit knowledge" : "Save a reusable result"}
+      </h2>
       <p className="text-sm text-muted-foreground">
         Keep the context, evidence, and limitations another task will need.
       </p>
-      <label className="block text-sm">
-        Source thread
-        <Input
-          required
-          value={source}
-          onChange={(e) => setSource(e.target.value)}
-          placeholder="thr_…"
-        />
-      </label>
+      {!record && (
+        <label className="block text-sm">
+          Source thread
+          <Input
+            required
+            value={source}
+            onChange={(e) => setSource(e.target.value)}
+            placeholder="thr_…"
+          />
+        </label>
+      )}
       <label className="block text-sm">
         Title
         <Input
@@ -112,24 +125,31 @@ function CaptureForm({
           onChange={(e) => setBody(e.target.value)}
         />
       </label>
-      <label className="block text-sm">
-        Evidence files
-        <textarea
-          rows={2}
-          className={fieldClass}
-          value={artifacts}
-          onChange={(e) => setArtifacts(e.target.value)}
-          placeholder="One file path per line, inside the source workspace"
-        />
-      </label>
+      {!record && (
+        <label className="block text-sm">
+          Evidence files
+          <textarea
+            rows={2}
+            className={fieldClass}
+            value={artifacts}
+            onChange={(e) => setArtifacts(e.target.value)}
+            placeholder="One file path per line, inside the source workspace"
+          />
+        </label>
+      )}
       {error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
         </p>
       )}
       <div className="flex gap-2">
-        <Button disabled={busy} type="submit">
-          {busy ? "Saving evidence…" : "Save result"}
+        <Button
+          disabled={
+            busy || (!!record && title === record.title && body === record.body)
+          }
+          type="submit"
+        >
+          {busy ? "Saving…" : record ? "Save changes" : "Save result"}
         </Button>
         <Button
           type="button"
@@ -166,6 +186,7 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
     hostId: string | null;
   } | null>(null);
   const [capture, setCapture] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const request = useRef(0);
@@ -212,6 +233,7 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
     let active = true;
     setDetail(null);
     setCapture(false);
+    setEditing(false);
     if (route === "record" && target)
       rpc.call("read", { id: target }).then((value) => {
         if (active) setDetail(value);
@@ -252,12 +274,24 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
           </p>
         )}
         {capture ? (
-          <CaptureForm
+          <RecordForm
             threadId={context.threadId ?? ""}
             onCancel={() => setCapture(false)}
-            onSaved={(id) => {
+            onSaved={({ id }) => {
               setCapture(false);
               navigate.toPluginPanel("library", { subPath: `record/${id}` });
+              void refresh();
+            }}
+          />
+        ) : detail && editing ? (
+          <RecordForm
+            key={detail.record.id}
+            threadId=""
+            record={detail.record}
+            onCancel={() => setEditing(false)}
+            onSaved={(record) => {
+              setDetail({ ...detail, record });
+              setEditing(false);
               void refresh();
             }}
           />
@@ -267,7 +301,29 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
               Version {detail.record.version} ·{" "}
               {new Date(detail.record.updatedAt).toLocaleDateString()}
             </div>
-            <h2 className="text-lg font-medium">{detail.record.title}</h2>
+            <div className="flex items-start justify-between gap-3">
+              <h2 className="text-lg font-medium">{detail.record.title}</h2>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Edit knowledge"
+                onClick={() => setEditing(true)}
+              >
+                <svg
+                  aria-hidden="true"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="m16 3 5 5M4 15 16 3a3.5 3.5 0 0 1 5 5L9 20l-6 1z" />
+                </svg>
+              </Button>
+            </div>
             <Markdown content={detail.record.body} />
             <div className="flex flex-wrap gap-2">
               <Button
@@ -277,17 +333,6 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
               >
                 Source thread
               </Button>
-              {detail.hostId && (
-                <FileLink
-                  target={{
-                    kind: "host",
-                    hostId: detail.hostId,
-                    path: detail.reportPath,
-                  }}
-                >
-                  Open report
-                </FileLink>
-              )}
             </div>
             {!!detail.record.artifacts.length && (
               <ul className="space-y-2 text-sm">
