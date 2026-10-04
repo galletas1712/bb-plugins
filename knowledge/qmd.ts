@@ -92,10 +92,10 @@ export class Recall {
     });
   }
 
-  search(input: SearchInput) {
+  async search(input: SearchInput) {
+    // Browsing needs no QMD work and must not wait for searches or embeddings.
+    if (!input.query.trim()) return this.library.search(input);
     return this.exclusive(async () => {
-      // An empty query is a library listing, not a relevance search.
-      if (!input.query.trim()) return this.library.search(input);
       await this.refresh(false, input.engine === "hybrid");
       const output = await this.run([
         input.engine === "hybrid" ? "query" : "search",

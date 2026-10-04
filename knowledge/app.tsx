@@ -219,9 +219,8 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
     }
   }, [rpc, query, project, offset, engine, report]);
   useEffect(() => {
-    const timer = setTimeout(() => void refresh(), 250);
+    void refresh();
     return () => {
-      clearTimeout(timer);
       request.current++;
     };
   }, [refresh, connection]);

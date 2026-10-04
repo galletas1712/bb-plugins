@@ -81,7 +81,8 @@ reproduce or interpret experiments. Durable external copies can be referenced.
 ## Search and maintenance
 
 QMD indexes the latest record text in the rebuildable `search/` Markdown projection,
-using isolated config and cache under `.qmd/`. Indexes refresh before search when
+using isolated config and cache under `.qmd/`. Opening the library lists records
+directly without indexing or waiting for QMD jobs. Indexes refresh before search when
 records change. Hybrid search also refreshes embeddings as needed and may download
 local models. Keyword search needs no model downloads. Calls serialize, time out
 after three minutes, and cancel on disposal. Failures are surfaced without a
