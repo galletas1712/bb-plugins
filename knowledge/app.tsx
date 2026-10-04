@@ -10,7 +10,6 @@ import {
   Markdown,
   experimental_FileLink as FileLink,
   useBbNavigate,
-  useBbContext,
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
@@ -26,55 +25,31 @@ const fieldClass =
   "w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 const selectClass =
   "h-9 rounded-md border border-input bg-background px-2 text-sm";
-function RecordForm({
-  threadId,
+function RecordEditor({
   record,
   onSaved,
   onCancel,
 }: {
-  threadId: string;
-  record?: KnowledgeRecord;
+  record: KnowledgeRecord;
   onSaved: (record: KnowledgeRecord) => void;
   onCancel: () => void;
 }) {
   const rpc = useRpc<typeof rpcContract>();
-  const [title, setTitle] = useState(record?.title ?? "");
-  const [source, setSource] = useState(threadId);
-  const [body, setBody] = useState(record?.body ?? "");
-  const [artifacts, setArtifacts] = useState("");
+  const [title, setTitle] = useState(record.title);
+  const [body, setBody] = useState(record.body);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Retain an id across retries after a lost response.
-  const id = useRef(record?.id ?? `record-${crypto.randomUUID()}`);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const saved = record
-        ? await rpc.call("edit", {
-            id: record.id,
-            expectedVersion: record.version,
-            title,
-            body,
-          })
-        : await rpc.call("save", {
-            id: id.current,
-            expectedVersion: 0,
-            title,
-            body,
-            threadId: source,
-            global: false,
-            artifacts: artifacts
-              .split("\n")
-              .map((p) => p.trim())
-              .filter(Boolean)
-              .map((path) => ({
-                path,
-                name: path.split(/[\\/]/).pop()!,
-                source: "workspace" as const,
-              })),
-          });
+      const saved = await rpc.call("edit", {
+        id: record.id,
+        expectedVersion: record.version,
+        title,
+        body,
+      });
       onSaved(saved);
     } catch (cause) {
       setError(String(cause));
@@ -87,23 +62,10 @@ function RecordForm({
       onSubmit={submit}
       className="space-y-4 rounded-lg border border-border p-4"
     >
-      <h2 className="text-base font-medium">
-        {record ? "Edit knowledge" : "Save a reusable result"}
-      </h2>
+      <h2 className="text-base font-medium">Edit knowledge</h2>
       <p className="text-sm text-muted-foreground">
         Keep the context, evidence, and limitations another task will need.
       </p>
-      {!record && (
-        <label className="block text-sm">
-          Source thread
-          <Input
-            required
-            value={source}
-            onChange={(e) => setSource(e.target.value)}
-            placeholder="thr_…"
-          />
-        </label>
-      )}
       <label className="block text-sm">
         Title
         <Input
@@ -125,18 +87,6 @@ function RecordForm({
           onChange={(e) => setBody(e.target.value)}
         />
       </label>
-      {!record && (
-        <label className="block text-sm">
-          Evidence files
-          <textarea
-            rows={2}
-            className={fieldClass}
-            value={artifacts}
-            onChange={(e) => setArtifacts(e.target.value)}
-            placeholder="One file path per line, inside the source workspace"
-          />
-        </label>
-      )}
       {error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
@@ -144,12 +94,10 @@ function RecordForm({
       )}
       <div className="flex gap-2">
         <Button
-          disabled={
-            busy || (!!record && title === record.title && body === record.body)
-          }
+          disabled={busy || (title === record.title && body === record.body)}
           type="submit"
         >
-          {busy ? "Saving…" : record ? "Save changes" : "Save result"}
+          {busy ? "Saving…" : "Save changes"}
         </Button>
         <Button
           type="button"
@@ -167,7 +115,6 @@ function RecordForm({
 function KnowledgePage({ subPath }: PluginNavPanelProps) {
   const rpc = useRpc<typeof rpcContract>();
   const sdk = useSdk();
-  const context = useBbContext();
   const navigate = useBbNavigate();
   const connection = useRealtimeConnectionState();
   const [query, setQuery] = useState("");
@@ -185,7 +132,6 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
     reportPath: string;
     hostId: string | null;
   } | null>(null);
-  const [capture, setCapture] = useState(false);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -231,7 +177,6 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
   useEffect(() => {
     let active = true;
     setDetail(null);
-    setCapture(false);
     setEditing(false);
     if (route === "record" && target)
       rpc.call("read", { id: target }).then((value) => {
@@ -251,13 +196,11 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
               Useful results, independent of the session that produced them.
             </p>
           </div>
-          <Button onClick={() => setCapture(true)}>Save result</Button>
         </div>
-        {(detail || capture) && (
+        {detail && (
           <Button
             variant="ghost"
             onClick={() => {
-              setCapture(false);
               navigate.toPluginPanel("library");
             }}
           >
@@ -272,20 +215,9 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
             {error}
           </p>
         )}
-        {capture ? (
-          <RecordForm
-            threadId={context.threadId ?? ""}
-            onCancel={() => setCapture(false)}
-            onSaved={({ id }) => {
-              setCapture(false);
-              navigate.toPluginPanel("library", { subPath: `record/${id}` });
-              void refresh();
-            }}
-          />
-        ) : detail && editing ? (
-          <RecordForm
+        {detail && editing ? (
+          <RecordEditor
             key={detail.record.id}
-            threadId=""
             record={detail.record}
             onCancel={() => setEditing(false)}
             onSaved={(record) => {
@@ -442,7 +374,7 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
               <p className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
                 {query
                   ? "No matching results. Try other terms or hybrid search."
-                  : "Save useful context or evidence to begin. Routine tasks do not need a record."}
+                  : "Ask an agent to save useful context or evidence."}
               </p>
             )}
             <div className="flex items-center gap-3 text-sm">

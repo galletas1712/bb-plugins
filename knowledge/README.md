@@ -34,7 +34,8 @@ conditions, and sources.
 
 Native tools expose `knowledge_recall`, `knowledge_read`, and `knowledge_save`.
 Agents can also use the equivalent CLI. Open **Knowledge** to browse, search, and
-read records, edit a record with its pencil icon, or save one through the form.
+read records and edit their text with the pencil icon. New records are saved
+through agents.
 Edits stay in the Knowledge view and retain the source, project, artifacts, and
 previous versions, even when the source session no longer exists. Concurrent
 changes are rejected rather than overwritten.
@@ -51,7 +52,7 @@ create, or the record's current version to update. `threadId` defaults to the
 calling agent's BB thread. `sourceSequence` defaults to its latest event at save
 time. Explicit values can cite another thread or an earlier point in its history.
 The citation boundary does not imply every event was read. Outside a BB thread,
-provide `threadId`. The UI form asks for a source thread.
+provide `threadId`.
 
 For `--input-stdin`, `capture.json` must contain a single line of JSON. `global`
 and `artifacts` are optional. The personal `AGENTS.md` directs agents to load the
