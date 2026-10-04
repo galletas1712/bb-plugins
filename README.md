@@ -4,6 +4,7 @@ Plugins for [bb](https://bb.dev), the agentic IDE.
 
 | Plugin | What it does |
 | --- | --- |
+| [`knowledge/`](knowledge/) | Durable project context and evidence with QMD search and versioned updates. |
 | [`live-file-viewer/`](live-file-viewer/) | Live Markdown, HTML, and SVG previews with icon controls for editing, split view, saving, and fullscreen. |
 | [`roundtable/`](roundtable/) | A group chat where several agents (different providers) share one transcript, get tagged in with `@handle`, and go back and forth for a set number of turns on an idea or an implementation. |
 | [`retitle/`](retitle/) | Keeps thread titles current. After each user message, Claude Sonnet rereads the conversation and renames the thread when its topic drifts, naming the module the work is about. |
@@ -20,6 +21,7 @@ bb plugin install ./roundtable
 bb plugin install ./review-desk
 bb plugin install ./live-file-viewer
 bb plugin install ./retitle
+bb plugin install ./knowledge
 ```
 
 Iterate with `bb plugin reload <id>`; type-check a plugin with `npx tsc -p .` inside its directory.
