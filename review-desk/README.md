@@ -11,6 +11,7 @@ Review GitHub pull requests inside bb with their original description, conversat
 - Keep a comment private as a note, or add it to your pending review later. Stale comments remain visible and can be deleted.
 - Open individual commits or shift-click a second commit for a range. Commit diffs link back to the PR head for commenting.
 - Navigate a PR stack in the left sidebar on wide layouts or a compact dropdown on narrow layouts. `[` / `]` moves between layers; other layers open when selected.
+- Approved PRs show a green checkmark in Recent, stack layers, and stack navigation.
 
 Changes, Conversation, and Commits use a single main workspace, one view at a time. Submit review opens a dialog with pending comments and review controls, with checks and metadata in expandable sections. Open reviews refresh from GitHub in the background. Fetch errors are shown with a retry action.
 

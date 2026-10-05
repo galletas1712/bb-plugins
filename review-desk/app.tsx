@@ -405,6 +405,11 @@ function PrMark({ state, isDraft, merged, className }: { state: string; isDraft?
   );
 }
 
+function ApprovalMark({ reviewDecision }: { reviewDecision: string | null }) {
+  if (reviewDecision !== "APPROVED") return null;
+  return <span role="img" aria-label="Approved" title="Approved" className="inline-flex shrink-0 text-emerald-600 dark:text-emerald-400"><Icon name="Check" className="size-3.5" /></span>;
+}
+
 function CountBadge({ count, title }: { count: number; title: string }) {
   if (count <= 0) return null;
   return <span className="rounded-full bg-foreground/10 px-1.5 text-[10px] tabular-nums" title={title}>{count}</span>;
@@ -1088,7 +1093,7 @@ function StackSelector({ review, stack, compact, opening, onOpen }: {
           const entry = stack.entries.find((item) => item.number === Number(event.target.value));
           if (entry && entry.number !== review.number) onOpen(entry);
         }}>
-        {stack.entries.map((entry) => <option key={entry.number} value={entry.number} aria-label={`${entry.reviewDecision === "APPROVED" ? "Approved, " : ""}#${entry.number} ${entry.title}`}>{entry.reviewDecision === "APPROVED" ? "✓ " : ""}#{entry.number} {entry.title}</option>)}
+        {stack.entries.map((entry) => <option key={entry.number} value={entry.number} aria-label={`${entry.reviewDecision === "APPROVED" ? "Approved, " : ""}#${entry.number} ${entry.title}`}>{entry.reviewDecision === "APPROVED" ? "✅ " : ""}#{entry.number} {entry.title}</option>)}
       </select>
     </label>
     {opening !== null ? <Icon name="Loading" className="size-3.5 shrink-0 animate-spin" aria-label="Opening pull request" /> : <span className="shrink-0 tabular-nums text-muted-foreground">{stack.currentPosition}/{stack.entries.length}</span>}
@@ -1111,7 +1116,7 @@ function StackSelector({ review, stack, compact, opening, onOpen }: {
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1.5">
                 <span className="font-mono text-muted-foreground">#{entry.number}</span>
-                {entry.reviewDecision === "APPROVED" ? <span role="img" aria-label="Approved" title="Approved" className="text-emerald-600 dark:text-emerald-400"><Icon name="Check" className="size-3.5" /></span> : null}
+                <ApprovalMark reviewDecision={entry.reviewDecision} />
               </span>
               <span className="mt-0.5 line-clamp-2 break-words leading-relaxed">{entry.title}</span>
             </span>
@@ -1770,6 +1775,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                             <span className="block truncate text-sm font-medium">{r.title}</span>
                             <span className="flex items-center gap-2 truncate text-xs text-muted-foreground">
                               <span className="truncate">{r.owner}/{r.repo} #{r.number}</span>
+                              <ApprovalMark reviewDecision={r.reviewDecision} />
                               <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
                             </span>
                           </span>
@@ -1811,6 +1817,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                               <span className="w-12 shrink-0 font-mono text-xs">#{r.number}</span>
                               <span className="min-w-0 flex-1 truncate text-xs">{r.title}</span>
                               <PrMark state={r.state} isDraft={r.isDraft} />
+                              <ApprovalMark reviewDecision={r.reviewDecision} />
                               <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
                             </button>
                             <RemoveReviewButton label={`Remove #${r.number}`} onClick={() => void drop([r.id])} />
