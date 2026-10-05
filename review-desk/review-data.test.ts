@@ -20,7 +20,7 @@ test("diff content beginning with ++ or -- remains a valid comment anchor", () =
 });
 
 const pageInfo = (endCursor: string | null = null) => ({ hasNextPage: endCursor !== null, endCursor });
-const comment = (n: number) => ({ id: `C${n}`, databaseId: String(n), viewerCanUpdate: n === 101, author: n === 101 ? null : { login: "reviewer" }, body: `<!-- raw -->\nComment ${n}\n<details>Details</details>`, createdAt: "2026-09-29T00:00:00Z", url: `https://github.com/o/r/pull/1#discussion_r${n}` });
+const comment = (n: number) => ({ id: `C${n}`, databaseId: String(n), viewerCanUpdate: n === 1 || n === 101, viewerDidAuthor: n === 101, replyTo: n === 1 ? null : { id: "C1" }, author: n === 101 ? null : { login: "reviewer" }, body: `<!-- raw -->\nComment ${n}\n<details>Details</details>`, createdAt: "2026-09-29T00:00:00Z", url: `https://github.com/o/r/pull/1#discussion_r${n}` });
 const thread = (id: string) => ({
   id, isResolved: false, isOutdated: false, path: "src/file.ts", line: 30, originalLine: 20,
   startLine: 28, originalStartLine: 18, diffSide: "LEFT", startDiffSide: "LEFT", subjectType: "LINE",
@@ -51,7 +51,9 @@ test("review threads paginate both threads and replies and preserve GitHub coord
   assert.equal(threads[0].comments[100].body, comment(101).body);
   assert.equal(threads[0].comments[100].author, "ghost");
   assert.equal(threads[0].comments[100].databaseId, 101);
+  assert.equal(threads[0].comments[100].replyToId, "C1");
   assert.equal(threads[0].comments[100].canEdit, true);
+  assert.equal(threads[0].comments[0].canEdit, false);
   assert.equal(threads[0].side, "LEFT");
   assert.equal(threads[0].startSide, "LEFT");
   assert.equal(threads[0].line, 30);
@@ -73,7 +75,7 @@ test("conversation includes all REST pages and leaves published review text unto
   const issueComment = { id: 1, node_id: "IC1", user: { login: "author" }, body: raw, created_at: "2026-09-29T00:00:00Z", html_url: "https://github.com/o/r/pull/1#issuecomment-1" };
   const review = { id: 2, node_id: "R2", user: { login: "reviewer" }, body: raw, state: "COMMENTED", submitted_at: "2026-09-29T00:00:00Z", html_url: "https://github.com/o/r/pull/1#pullrequestreview-2" };
   const run = async (_cmd: string, args: string[]) => {
-    if (args.includes("graphql")) return { stdout: JSON.stringify({ data: { nodes: [{ id: "IC1", viewerCanUpdate: true }, { id: "R2", viewerCanUpdate: false }] } }) };
+    if (args.includes("graphql")) return { stdout: JSON.stringify({ data: { nodes: [{ id: "IC1", viewerCanUpdate: true, viewerDidAuthor: true }, { id: "R2", viewerCanUpdate: false, viewerDidAuthor: true }] } }) };
     assert.ok(args.includes("--paginate"));
     assert.ok(args.includes("--slurp"));
     if (args.at(-1)?.includes("/timeline?")) {

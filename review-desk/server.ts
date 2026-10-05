@@ -982,14 +982,14 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function refreshThreads(row: ReviewRow): Promise<GhThread[]> {
     const result = await host.call("gh_threads", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row));
-    q.setThreadsCache.run(row.id, JSON.stringify({ version: 1, threads: result.threads }), Date.now());
+    q.setThreadsCache.run(row.id, JSON.stringify({ version: 2, threads: result.threads }), Date.now());
     publish(row.id, "threads");
     return result.threads;
   }
 
   async function refreshConversation(row: ReviewRow): Promise<void> {
     const result = await host.call("gh_conversation", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row));
-    q.setConversationCache.run(row.id, JSON.stringify(result), Date.now());
+    q.setConversationCache.run(row.id, JSON.stringify({ ...result, version: 2 }), Date.now());
     publish(row.id, "conversation");
   }
 
@@ -997,7 +997,7 @@ export default async function plugin(bb: BbPluginApi) {
     const cache = q.threadsCache.get(row.id);
     if (cache === undefined) return null;
     const stored = parseJson<{ version?: number; threads?: GhThread[] } | null>(cache.json, null);
-    return stored?.version === 1 && Array.isArray(stored.threads) ? stored.threads : null;
+    return stored?.version === 2 && Array.isArray(stored.threads) ? stored.threads : null;
   }
 
   // -- read model ------------------------------------------------------------
@@ -1229,13 +1229,13 @@ export default async function plugin(bb: BbPluginApi) {
       const row = requireReview(reviewId);
       const cache = q.conversationCache.get(row.id);
       if (cache !== undefined && !refresh) {
-        const stored = parseJson<{ comments: z.infer<typeof ghIssueCommentSchema>[]; reviews: z.infer<typeof ghReviewSchema>[]; events?: z.infer<typeof ghEventSchema>[] } | null>(cache.json, null);
-        if (stored?.events !== undefined && [...stored.comments, ...stored.reviews].every((comment) => typeof comment.canEdit === "boolean" && typeof comment.nodeId === "string")) {
+        const stored = parseJson<{ comments: z.infer<typeof ghIssueCommentSchema>[]; reviews: z.infer<typeof ghReviewSchema>[]; events?: z.infer<typeof ghEventSchema>[]; version?: number } | null>(cache.json, null);
+        if (stored?.version === 2 && stored.events !== undefined && [...stored.comments, ...stored.reviews].every((comment) => typeof comment.canEdit === "boolean" && typeof comment.nodeId === "string")) {
           return { ...stored, events: stored.events, fetchedAt: cache.fetched_at };
         }
       }
       const result = await host.call("gh_conversation", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row));
-      q.setConversationCache.run(row.id, JSON.stringify(result), Date.now());
+      q.setConversationCache.run(row.id, JSON.stringify({ ...result, version: 2 }), Date.now());
       return { ...result, fetchedAt: Date.now() };
     },
     review_threads_refresh: async ({ reviewId }) => ({ threads: await refreshThreads(requireReview(reviewId)) }),
@@ -1254,7 +1254,7 @@ export default async function plugin(bb: BbPluginApi) {
       } else if (input.target.kind === "inline") {
         const id = input.target.id;
         const threads = (cachedThreads(row) ?? []).map((thread) => ({ ...thread, comments: thread.comments.map((comment) => comment.id === id ? { ...comment, body: result.body } : comment) }));
-        q.setThreadsCache.run(row.id, JSON.stringify({ version: 1, threads }), Date.now());
+        q.setThreadsCache.run(row.id, JSON.stringify({ version: 2, threads }), Date.now());
         publish(row.id, "threads");
       } else {
         const cached = q.conversationCache.get(row.id);
@@ -1262,7 +1262,7 @@ export default async function plugin(bb: BbPluginApi) {
         const id = input.target.id;
         conversation.comments = conversation.comments.map((comment) => comment.nodeId === id ? { ...comment, body: result.body } : comment);
         conversation.reviews = conversation.reviews.map((review) => review.nodeId === id ? { ...review, body: result.body } : review);
-        q.setConversationCache.run(row.id, JSON.stringify(conversation), Date.now());
+        q.setConversationCache.run(row.id, JSON.stringify({ ...conversation, version: 2 }), Date.now());
         publish(row.id, "conversation");
       }
       return result;

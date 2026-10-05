@@ -48,6 +48,7 @@ const ghPrDetailsSchema = ghPrSchema.pick({ commits: true, labels: true, assigne
 
 export const ghCommentSchema = z.object({
   id: z.string(),
+  replyToId: z.string().nullable().default(null),
   databaseId: z.number().nullable(),
   author: z.string(),
   body: z.string(),

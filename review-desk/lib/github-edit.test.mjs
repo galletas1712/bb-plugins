@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { commentPermissions, editBody, readDescription } from "./github-edit.ts";
 
 const pr = { owner: "Owner", repo: "Repo", number: 7 };
-const node = (type, body = "Original", viewerCanUpdate = true) => ({ id: "node-id", __typename: type, body, viewerCanUpdate, scope: { number: 7, repository: { nameWithOwner: "owner/repo" } } });
+const node = (type, body = "Original", viewerCanUpdate = true) => ({ id: "node-id", __typename: type, body, viewerCanUpdate, viewerDidAuthor: true, scope: { number: 7, repository: { nameWithOwner: "owner/repo" } } });
 const stub = (responses) => {
   const calls = [];
   return { calls, run: async (cmd, args, options) => {
@@ -42,6 +42,14 @@ test("fresh permission and external edits prevent mutations", async () => {
   }
 });
 
+test("maintainer permissions cannot edit another author's comments, reviews, or replies", async () => {
+  for (const [kind, type] of [["comment", "IssueComment"], ["review", "PullRequestReview"], ["inline", "PullRequestReviewComment"]]) {
+    const fake = stub([{ data: { node: { ...node(type), viewerDidAuthor: false } } }]);
+    await assert.rejects(editBody(fake.run, { ...pr, target: { kind, id: "node-id" }, body: "Saved", expectedBody: "Original" }), /only edit your own comments/);
+    assert.equal(fake.calls.length, 1);
+  }
+});
+
 test("wrong type, PR, repository, or missing comment prevents mutations", async () => {
   for (const current of [null, node("PullRequestReview"), { ...node("IssueComment"), scope: { number: 8, repository: { nameWithOwner: "owner/repo" } } }, { ...node("IssueComment"), scope: { number: 7, repository: { nameWithOwner: "elsewhere/repo" } } }]) {
     const fake = stub([{ data: { node: current } }]);
@@ -73,11 +81,12 @@ test("description permissions use the current gh identity", async () => {
 
 test("comment permissions batch old history and handle deleted nodes", async () => {
   const ids = Array.from({ length: 101 }, (_, index) => `id-${index}`);
-  const fake = stub([{ data: { nodes: [{ id: "id-0", viewerCanUpdate: true }, null] } }, { data: { nodes: [{ id: "id-100", viewerCanUpdate: false }] } }]);
+  const fake = stub([{ data: { nodes: [{ id: "id-0", viewerCanUpdate: true, viewerDidAuthor: true }, { id: "id-1", viewerCanUpdate: true, viewerDidAuthor: false }, null] } }, { data: { nodes: [{ id: "id-100", viewerCanUpdate: false, viewerDidAuthor: true }] } }]);
   const permissions = await commentPermissions(fake.run, ids);
   assert.equal(fake.calls.length, 2);
   assert.equal(fake.calls[0].payload.variables.ids.length, 100);
   assert.deepEqual(fake.calls[1].payload.variables.ids, ["id-100"]);
   assert.equal(permissions.get("id-0"), true);
+  assert.equal(permissions.get("id-1"), false);
   assert.equal(permissions.get("id-100"), false);
 });

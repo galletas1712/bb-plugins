@@ -8,6 +8,8 @@ interface Comment {
   id: string;
   databaseId: string | number | null;
   viewerCanUpdate: boolean;
+  viewerDidAuthor: boolean;
+  replyTo: { id: string } | null;
   author: { login: string } | null;
   body: string;
   createdAt: string;
@@ -22,7 +24,7 @@ interface ThreadNode extends Omit<GhThread, "side" | "startSide" | "comments"> {
 
 const COMMENTS = `comments(first: 100, after: $commentAfter) {
   pageInfo { hasNextPage endCursor }
-  nodes { id databaseId: fullDatabaseId viewerCanUpdate author { login } body createdAt url }
+  nodes { id databaseId: fullDatabaseId viewerCanUpdate viewerDidAuthor replyTo { id } author { login } body createdAt url }
 }`;
 const THREADS_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $after: String, $commentAfter: String) {
   repository(owner: $owner, name: $repo) {
@@ -87,7 +89,7 @@ export async function fetchReviewThreads(run: Run, owner: string, repo: string, 
         subjectType: node.subjectType,
         side: node.diffSide,
         startSide: node.startDiffSide,
-        comments: comments.map(({ viewerCanUpdate, ...c }) => ({ ...c, databaseId: c.databaseId === null ? null : Number(c.databaseId), canEdit: viewerCanUpdate, author: c.author?.login ?? "ghost" })),
+        comments: comments.map(({ viewerCanUpdate, viewerDidAuthor, replyTo, ...c }) => ({ ...c, replyToId: replyTo?.id ?? null, databaseId: c.databaseId === null ? null : Number(c.databaseId), canEdit: viewerCanUpdate && viewerDidAuthor === true, author: c.author?.login ?? "ghost" })),
       });
     }
     after = nextCursor(page.pageInfo, seen);

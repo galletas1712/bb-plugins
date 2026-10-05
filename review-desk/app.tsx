@@ -19,6 +19,7 @@ import type { ChangedFile } from "./host-contract";
 import type { GhThread, GhIssueComment, GhReview, GhEvent } from "./host-contract";
 import { EditableBody } from "./components/editable-body";
 import { MarkdownDiff } from "./components/markdown-diff";
+import { orderThreadComments } from "./lib/thread-comments";
 import { Button } from "@/components/ui/button";
 import { Icon, type IconName } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
@@ -515,6 +516,7 @@ function AuthorChip({ login, when }: { login: string; when?: string }) {
 /** GitHub comment Markdown: HTML comments dropped, `<details>` rendered as real collapsibles. */
 function CommentBody({ body, className }: { body: string; className?: string }) {
   const cleaned = body.replace(/<!--[\s\S]*?-->/g, "");
+  if (cleaned.trim() === "") return <p className={cn("text-xs text-muted-foreground", className)}>No message.</p>;
   const parts: ReactNode[] = [];
   const re = /<details[^>]*>\s*(?:<summary[^>]*>([\s\S]*?)<\/summary>)?([\s\S]*?)<\/details>/gi;
   let last = 0;
@@ -535,12 +537,20 @@ function CommentBody({ body, className }: { body: string; className?: string }) 
   return <div className={cn(PROSE, className)}>{parts}</div>;
 }
 
+function CommentDetails({ header, children }: { header: ReactNode; children: ReactNode }) {
+  return <details open className="min-w-0">
+    <summary className="cursor-pointer text-xs text-muted-foreground"><span className="inline-flex flex-wrap items-center gap-3 align-middle">{header}</span></summary>
+    <div className="pt-3">{children}</div>
+  </details>;
+}
+
 function ThreadCard({ thread, actions }: { thread: GhThread; actions: Pick<AnnoActions, "reply" | "resolve" | "editComment" | "refreshThreads"> }) {
   const [open, setOpen] = useState(!thread.isResolved && !thread.isOutdated);
   const [reply, setReply] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => { setOpen(!thread.isResolved && !thread.isOutdated); if (thread.isResolved) setReply(null); }, [thread.id, thread.isResolved, thread.isOutdated]);
-  const first = thread.comments[0];
+  const comments = useMemo(() => orderThreadComments(thread.comments), [thread.comments]);
+  const first = comments[0]?.comment;
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
     try { await fn(); } catch (cause) { toast.error(describeError(cause)); } finally { setBusy(false); }
@@ -559,8 +569,10 @@ function ThreadCard({ thread, actions }: { thread: GhThread; actions: Pick<AnnoA
       </div>
       {open ? <>
         <div className="divide-y divide-border border-t border-border">
-          {thread.comments.map((comment, index) => <div key={comment.id} className="px-3 py-3">
-            <EditableBody body={comment.body} canEdit={comment.canEdit} label={`comment by ${comment.author}`} header={index === 0 ? <time dateTime={comment.createdAt} className="text-xs text-muted-foreground">{timeAgo(comment.createdAt)}</time> : <AuthorChip login={comment.author} when={comment.createdAt} />} renderBody={(body) => <CommentBody body={body} />} onSave={(body, expectedBody) => actions.editComment(comment.id, body, expectedBody)} onCancel={actions.refreshThreads} />
+          {comments.map(({ comment, depth }) => <div key={comment.id} className={cn("px-3 py-3", depth > 0 && "ml-4 border-l-2 border-border")}>
+            <CommentDetails header={<><AuthorChip login={comment.author} when={comment.createdAt} />{depth > 0 ? <span>Reply</span> : null}</>}>
+              <EditableBody body={comment.body} canEdit={comment.canEdit} label={`comment by ${comment.author}`} renderBody={(body) => <CommentBody body={body} />} onSave={(body, expectedBody) => actions.editComment(comment.id, body, expectedBody)} onCancel={actions.refreshThreads} />
+            </CommentDetails>
           </div>)}
         </div>
         {reply === null ? <div className="border-t border-border px-3 py-1"><Button variant="ghost" size="sm" disabled={!first?.databaseId} onClick={() => setReply("")}>Reply</Button></div> : (
@@ -574,20 +586,21 @@ function ThreadCard({ thread, actions }: { thread: GhThread; actions: Pick<AnnoA
             <div className="flex justify-end gap-2"><Button type="button" variant="ghost" size="sm" onClick={() => setReply(null)}>Cancel</Button><Button type="submit" size="sm" disabled={busy || reply.trim() === ""}>Reply</Button></div>
           </form>
         )}
-      </> : <p className="truncate px-3 pb-3 text-xs text-muted-foreground">{first?.body.split("\n")[0]}</p>}
+      </> : null}
     </div>
   );
 }
 
-function OutdatedThreads({ threads, actions, onJump }: { threads: GhThread[]; actions: Pick<AnnoActions, "reply" | "resolve" | "editComment" | "refreshThreads">; onJump?: JumpFn }) {
+function ThreadGroup({ label, threads, actions, onJump }: { label: string; threads: GhThread[]; actions: Pick<AnnoActions, "reply" | "resolve" | "editComment" | "refreshThreads">; onJump?: JumpFn }) {
   if (threads.length === 0) return null;
   return <details className="min-w-0 text-sm">
-    <summary className="cursor-pointer select-none text-xs text-muted-foreground hover:text-foreground">Outdated threads ({threads.length})</summary>
+    <summary className="cursor-pointer select-none text-xs text-muted-foreground hover:text-foreground">{label} threads ({threads.length})</summary>
     <div className="mt-3 space-y-3">
       {threads.map((thread) => {
-        const location = thread.path + (thread.originalLine === null ? "" : ":" + thread.originalLine);
+        const line = thread.isOutdated ? thread.originalLine : thread.line;
+        const location = thread.path + (line === null ? "" : ":" + line);
         return <div key={thread.id}>
-          {onJump ? <button type="button" className="break-all text-left font-mono text-xs text-muted-foreground hover:underline" onClick={() => onJump(thread.path, null, thread.side === "LEFT" ? "old" : "new")}>{location}</button>
+          {onJump ? <button type="button" className="break-all text-left font-mono text-xs text-muted-foreground hover:underline" onClick={() => onJump(thread.path, thread.isOutdated ? null : thread.line, thread.side === "LEFT" ? "old" : "new")}>{location}</button>
             : <p className="break-all font-mono text-xs text-muted-foreground">{location}</p>}
           <ThreadCard thread={thread} actions={actions} />
         </div>;
@@ -714,9 +727,10 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
   }, [file.binary, file.path, file.oldPath, review.id, review.baseSha, rpc, base, head]);
   const fileDiff = useMemo(() => patch === null ? null : pickFileDiff(patch, file.path, file.oldPath), [patch, file.path, file.oldPath]);
   const outdatedThreads = threads.filter((thread) => thread.isOutdated);
+  const resolvedThreads = threads.filter((thread) => thread.isResolved && !thread.isOutdated);
   const annotations = useMemo(() => {
     const comments: CommentAnchor<Anno>[] = [
-      ...threads.filter((thread) => !thread.isOutdated).map((thread): CommentAnchor<Anno> => ({ side: thread.side, line: thread.line, detached: thread.subjectType === "FILE", metadata: { kind: "thread", thread } })),
+      ...threads.filter((thread) => !thread.isOutdated && !thread.isResolved).map((thread): CommentAnchor<Anno> => ({ side: thread.side, line: thread.line, detached: thread.subjectType === "FILE", metadata: { kind: "thread", thread } })),
       ...pending.map((pending): CommentAnchor<Anno> => ({ side: pending.side, line: pending.line, detached: pending.stale, metadata: { kind: "pending", pending } })),
       ...notes.map((note): CommentAnchor<Anno> => ({ side: note.side, line: note.line, detached: note.state === "stale", metadata: { kind: "note", note } })),
     ];
@@ -759,12 +773,13 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
       <Button type="button" size="sm" onClick={() => onOpenComposer(file.path, selected)}>{inCommit ? "Comment at head" : "Comment"}</Button>
       <button type="button" className="ml-auto p-1 text-muted-foreground" onClick={() => onSelect(null)} aria-label="Clear selection"><Icon name="X" className="size-4" /></button>
     </div> : null}
-    {annotations.detached.length > 0 || outdatedThreads.length > 0 ? <div className="space-y-3 border-b border-border p-3">
+    {annotations.detached.length > 0 || outdatedThreads.length > 0 || resolvedThreads.length > 0 ? <div className="space-y-3 border-b border-border p-3">
       {annotations.detached.map((anno, index) => <div key={annotationKey(anno, index)}>
         <p className="text-xs text-muted-foreground">{annotationLocation(anno)}</p>
         <Annotation anno={anno} actions={actions} />
       </div>)}
-      <OutdatedThreads threads={outdatedThreads} actions={actions} />
+      <ThreadGroup label="Resolved" threads={resolvedThreads} actions={actions} />
+      <ThreadGroup label="Outdated" threads={outdatedThreads} actions={actions} />
     </div> : null}
     {file.binary ? <p className="p-3 text-sm text-muted-foreground">Binary file.</p>
       : markdown && mode === "rendered" ? contentError !== null ? <p role="alert" className="p-3 text-sm text-destructive">{contentError}</p>
@@ -884,16 +899,17 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
   if (error !== null) return <p role="alert" className="text-sm text-destructive">{error} <button type="button" className="underline" onClick={() => load(true)}>Retry</button></p>;
   if (conversation === null) return <EmptyState>Loading conversation…</EmptyState>;
   const outdatedThreads = threads.filter((thread) => thread.isOutdated);
+  const resolvedThreads = threads.filter((thread) => thread.isResolved && !thread.isOutdated);
   type Item = { key: string; when: string; author: string; body: string; state?: string; url: string; thread?: GhThread; event?: string; target?: { kind: "review" | "comment"; id: string }; canEdit?: boolean };
   const items: Item[] = [
     ...conversation.reviews.map((r) => ({ key: "review-" + r.id, author: r.author, when: r.submittedAt ?? "", body: r.body, state: r.state, url: r.url, canEdit: r.canEdit, target: r.nodeId ? { kind: "review" as const, id: r.nodeId } : undefined })),
     ...conversation.comments.map((c) => ({ key: "comment-" + c.id, author: c.author, when: c.createdAt, body: c.body, url: c.url, canEdit: c.canEdit, target: c.nodeId ? { kind: "comment" as const, id: c.nodeId } : undefined })),
-    ...threads.filter((thread) => !thread.isOutdated).map((thread) => ({ key: "thread-" + thread.id, author: "", when: thread.comments[0]?.createdAt ?? "", body: "", url: "", thread })),
+    ...threads.filter((thread) => !thread.isOutdated && !thread.isResolved).map((thread) => ({ key: "thread-" + thread.id, author: "", when: orderThreadComments(thread.comments)[0]?.comment.createdAt ?? "", body: "", url: "", thread })),
     ...(conversation.events ?? []).map((event) => ({ key: "event-" + event.id, author: event.actor ?? "", when: event.createdAt ?? "", body: event.details, url: event.url ?? "", event: event.event })),
   ];
   items.sort((a, b) => (Date.parse(a.when) || 0) - (Date.parse(b.when) || 0));
   return <div className="space-y-5">
-    {items.length === 0 && outdatedThreads.length === 0 ? <EmptyState>No conversation yet.</EmptyState> : null}
+    {items.length === 0 && threads.length === 0 ? <EmptyState>No conversation yet.</EmptyState> : null}
     {items.map((item) => item.thread ? <div key={item.key}>
       <button type="button" className="break-all text-left font-mono text-xs text-muted-foreground hover:underline" onClick={() => onJump(item.thread!.path, item.thread!.isOutdated ? null : item.thread!.line, item.thread!.side === "LEFT" ? "old" : "new")}>{item.thread.path}{item.thread.line !== null ? ":" + item.thread.line : ""}</button>
       <ThreadCard thread={item.thread} actions={actions} />
@@ -903,17 +919,20 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
       {item.when ? <time dateTime={item.when} className="ml-auto shrink-0">{timeAgo(item.when)}</time> : null}
       {item.url ? <UrlLink href={item.url} className="hover:underline">GitHub</UrlLink> : null}
     </div> : <article key={item.key} className="border-b border-border pb-5 last:border-0">
-      <EditableBody body={item.body} canEdit={Boolean(item.canEdit && item.target)} label={`comment by ${item.author}`} header={<div className="flex flex-wrap items-center gap-3">
+      <CommentDetails header={<>
         <AuthorChip login={item.author} when={item.when} />
         {item.state ? <span className={cn("text-xs", reviewStateTone(item.state))}>{item.state.replace(/_/g, " ").toLowerCase()}</span> : null}
-        <UrlLink href={item.url} className="ml-auto text-xs text-muted-foreground hover:underline">GitHub</UrlLink>
-      </div>} renderBody={(body) => body.trim() ? <CommentBody body={body} /> : null} onCancel={() => load(true)} onSave={async (body, expectedBody) => {
+        <UrlLink href={item.url} className="text-muted-foreground hover:underline">GitHub</UrlLink>
+      </>}>
+      <EditableBody body={item.body} canEdit={Boolean(item.canEdit && item.target)} label={`comment by ${item.author}`} renderBody={(body) => <CommentBody body={body} />} onCancel={() => load(true)} onSave={async (body, expectedBody) => {
         const result = await rpc.call("review_edit_body", { reviewId, target: item.target!, body, expectedBody });
         setConversation((current) => current === null ? null : { ...current, comments: current.comments.map((comment) => comment.nodeId === item.target?.id ? { ...comment, body: result.body } : comment), reviews: current.reviews.map((review) => review.nodeId === item.target?.id ? { ...review, body: result.body } : review) });
         toast.success("Comment updated"); return result;
       }} />
+      </CommentDetails>
     </article>)}
-    <OutdatedThreads threads={outdatedThreads} actions={actions} onJump={onJump} />
+    <ThreadGroup label="Resolved" threads={resolvedThreads} actions={actions} onJump={onJump} />
+    <ThreadGroup label="Outdated" threads={outdatedThreads} actions={actions} onJump={onJump} />
   </div>;
 }
 

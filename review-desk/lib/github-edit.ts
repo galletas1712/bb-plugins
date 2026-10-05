@@ -2,7 +2,7 @@ import type { GhEditTarget } from "../host-contract";
 
 type Run = (cmd: string, args: string[], options?: { input?: string }) => Promise<{ stdout: string }>;
 interface PullRequest { owner: string; repo: string; number: number }
-interface EditableBody { id: string; body: string; viewerCanUpdate: boolean }
+interface EditableBody { id: string; body: string; viewerCanUpdate: boolean; viewerDidAuthor?: boolean }
 
 async function graphql<T>(run: Run, query: string, variables: object): Promise<T> {
   const result = await run("gh", ["api", "graphql", "--input", "-"], { input: JSON.stringify({ query, variables }) });
@@ -32,11 +32,15 @@ export async function readDescription(run: Run, pr: PullRequest): Promise<{ body
 export async function commentPermissions(run: Run, ids: string[]): Promise<Map<string, boolean>> {
   const permissions = new Map<string, boolean>();
   for (let start = 0; start < ids.length; start += 100) {
-    const data = await graphql<{ nodes: ({ id: string; viewerCanUpdate: boolean } | null)[] }>(run, `
+    const data = await graphql<{ nodes: ({ id: string; viewerCanUpdate: boolean; viewerDidAuthor: boolean } | null)[] }>(run, `
       query($ids: [ID!]!) {
-        nodes(ids: $ids) { id ... on Updatable { viewerCanUpdate } }
+        nodes(ids: $ids) {
+          id
+          ... on IssueComment { viewerCanUpdate viewerDidAuthor }
+          ... on PullRequestReview { viewerCanUpdate viewerDidAuthor }
+        }
       }`, { ids: ids.slice(start, start + 100) });
-    for (const node of data.nodes) if (node) permissions.set(node.id, node.viewerCanUpdate);
+    for (const node of data.nodes) if (node) permissions.set(node.id, node.viewerCanUpdate && node.viewerDidAuthor === true);
   }
   return permissions;
 }
@@ -60,7 +64,7 @@ export async function editBody(run: Run, input: PullRequest & { target: GhEditTa
         node(id: $id) {
           __typename
           ... on ${edit.type} {
-            id body viewerCanUpdate
+            id body viewerCanUpdate viewerDidAuthor
             scope: ${scope} { number repository { nameWithOwner } }
           }
         }
@@ -69,6 +73,7 @@ export async function editBody(run: Run, input: PullRequest & { target: GhEditTa
     if (!node || node.__typename !== edit.type || node.scope.number !== input.number || node.scope.repository.nameWithOwner.toLowerCase() !== `${input.owner}/${input.repo}`.toLowerCase()) {
       throw new Error("This comment does not belong to this pull request.");
     }
+    if (!node.viewerDidAuthor) throw new Error("You can only edit your own comments.");
     current = node;
   }
   if (!current.viewerCanUpdate) throw new Error("Your GitHub account cannot edit this text.");
