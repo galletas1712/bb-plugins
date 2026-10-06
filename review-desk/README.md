@@ -4,14 +4,15 @@ Review GitHub pull requests inside bb with their original description, conversat
 
 - Open a PR URL, `owner/repo#123`, or `owner/repo/stack/N`.
 - Read the full conversation: issue comments, reviews, inline threads and replies, and timeline events. GitHub collections are paginated, including commits, checks, labels, assignees, and review requests.
-- Browse changed files in unified or side-by-side diff mode. Use the file tree or, when it is hidden, the file dropdown. Current comments appear on their old/new diff lines. File comments, outdated threads, and comments outside the displayed hunks remain visible above the file. Threads on files no longer in the PR remain in Conversation.
+- Browse changed files in unified or side-by-side diff mode. Toggle the file explorer to choose files. Moved or renamed files appear at both their old and new locations. Current comments appear on their old/new diff lines. File comments, outdated threads, and comments outside the displayed hunks remain visible above the file. Threads on files no longer in the PR remain in Conversation.
 - Resolved and outdated threads sit inside collapsed dropdowns in each file diff and in Conversation. Open a dropdown, then expand individual threads as needed. Every comment and reply has its own show/hide control, with replies beneath their original comment. Review decisions without a message are labeled explicitly.
 - Markdown offers Source and Rendered diffs, with added and removed blocks and links to their source lines. Repository files remain read-only.
 - Edit PR descriptions when your GitHub account has permission. Published comments, review summaries, and inline replies can only be edited by their author. Save checks the latest text and keeps your draft if the request fails.
 - Reply to or resolve GitHub threads. Select lines to draft a comment, then submit the pending comments together as a review. Approval can be submitted without a message; requesting changes requires a review body.
 - Keep a comment private as a note, or add it to your pending review later. Stale comments remain visible and can be deleted.
 - Open individual commits or shift-click a second commit for a range. Commit diffs link back to the PR head for commenting.
-- Navigate a PR stack in the left sidebar on wide layouts or a compact dropdown on narrow layouts. `[` / `]` moves between layers; other layers open when selected.
+- Toggle the file explorer and PR stack sidebars independently. They default to hidden on small screens, but an explicit open or closed choice is remembered across screen sizes and PRs. Selecting a file keeps an explicitly opened explorer open. `[` / `]` moves between stack layers; other layers open when selected.
+- PR summaries show added and deleted line totals. Stack summaries sum the totals of their PRs. Rename-aware Git counts exclude pure file moves while preserving edits made in renamed files.
 - PR status uses one icon everywhere: green for open or approved, gray for draft, purple for merged, and red for closed. Approval uses a checkmark.
 - Recent shows every layer in a tracked stack, including unopened and merged PRs. Remove the full stack with its single trash control. Membership, titles, and statuses refresh automatically about once a minute, even after the original PR leaves the stack. Detached PRs keep their local notes and pending comments.
 

@@ -19,6 +19,7 @@ import type { ChangedFile } from "./host-contract";
 import type { GhThread, GhIssueComment, GhReview, GhEvent } from "./host-contract";
 import { EditableBody } from "./components/editable-body";
 import { MarkdownDiff } from "./components/markdown-diff";
+import { diffStats } from "./lib/diff-stats";
 import { orderThreadComments } from "./lib/thread-comments";
 import { Button } from "@/components/ui/button";
 import { PrMark, StatePill } from "./components/pr-status";
@@ -36,6 +37,7 @@ const REVIEW_CHANGED = "review-changed";
 
 interface DiffJump { path: string; line: number | null; side: "old" | "new" }
 const TREE_KEY = "review-desk:file-tree";
+const STACK_KEY = "review-desk:stack-sidebar";
 const fileSelKey = (reviewId: string, scope = "pr") => `review-desk:diff-file:${reviewId}:${scope}`;
 
 const SHIKI_THEMES = new Set([
@@ -167,7 +169,7 @@ function splitPath(path: string): { name: string; dir: string } {
 
 type FileTreeNode =
   | { kind: "dir"; name: string; path: string; children: FileTreeNode[] }
-  | { kind: "file"; name: string; file: FileEntry };
+  | { kind: "file"; name: string; path: string; location: "old" | "new" | null; file: FileEntry };
 
 function buildFileTree(files: FileEntry[]): FileTreeNode[] {
   const root: Extract<FileTreeNode, { kind: "dir" }> = { kind: "dir", name: "", path: "", children: [] };
@@ -183,8 +185,11 @@ function buildFileTree(files: FileEntry[]): FileTreeNode[] {
     return node;
   };
   for (const file of files) {
-    const { name, dir } = splitPath(file.path);
-    ensure(dir).children.push({ kind: "file", name, file });
+    const moved = file.status === "renamed" && file.oldPath !== null && file.oldPath !== file.path;
+    for (const path of moved ? [file.oldPath!, file.path] : [file.path]) {
+      const { name, dir } = splitPath(path);
+      ensure(dir).children.push({ kind: "file", name, path, location: moved ? path === file.oldPath ? "old" : "new" : null, file });
+    }
   }
   const sort = (nodes: FileTreeNode[]) => {
     nodes.sort((a, b) => (a.kind !== b.kind ? (a.kind === "dir" ? -1 : 1) : a.name.localeCompare(b.name)));
@@ -201,7 +206,7 @@ function filterFileTree(nodes: FileTreeNode[], query: string): FileTreeNode[] {
     const out: FileTreeNode[] = [];
     for (const node of list) {
       if (node.kind === "file") {
-        if (node.file.path.toLowerCase().includes(needle)) out.push(node);
+        if (node.path.toLowerCase().includes(needle)) out.push(node);
         continue;
       }
       if (node.path.toLowerCase().includes(needle) || node.name.toLowerCase().includes(needle)) {
@@ -282,6 +287,17 @@ function useNarrow(element: HTMLElement | null, breakpoint = 640): boolean {
 function pathsEqual(left: string, right: string): boolean {
   const strip = (p: string) => p.replace(/^[ab]\//, "");
   return left === right || strip(left) === strip(right);
+}
+
+// An explicit choice overrides responsive defaults, including after navigation.
+function useSidebar(key: string, narrow: boolean) {
+  const [choice, setChoice] = useState<boolean | null>(() => {
+    const stored = readStorage<unknown>(key);
+    return typeof stored === "boolean" ? stored : null;
+  });
+  const open = choice ?? !narrow;
+  const setOpen = (value: boolean) => { setChoice(value); writeStorage(key, value); };
+  return { open, setOpen, toggle: () => setOpen(!open) };
 }
 
 function pickFileDiff(patch: string, path: string, oldPath: string | null): FileDiffMetadata | null {
@@ -377,6 +393,10 @@ function SyncNotice({ reviewId, message, onRefresh }: { reviewId: string; messag
       finally { setBusy(false); }
     }}>{busy ? "Refreshing…" : "Retry"}</Button>
   </div>;
+}
+
+function DiffStat({ additions, deletions }: { additions: number; deletions: number }) {
+  return <span className="inline-flex shrink-0 gap-1 font-mono text-xs tabular-nums" aria-label={`Diff: ${additions} additions, ${deletions} deletions`}><span className="text-emerald-600 dark:text-emerald-400">+{additions.toLocaleString()}</span><span className="text-red-600 dark:text-red-400">−{deletions.toLocaleString()}</span></span>;
 }
 
 function CountBadge({ count, title }: { count: number; title: string }) {
@@ -735,7 +755,6 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
     {markdown ? <div className="flex items-center gap-1 border-b border-border px-3 py-2" role="group" aria-label="Markdown diff view">
       {(["source", "rendered"] as const).map((view) => <Button key={view} type="button" variant={mode === view ? "outline" : "ghost"} size="sm" className="h-7 text-xs" aria-pressed={mode === view} onClick={() => setMode(view)}>{view === "source" ? "Source" : "Rendered"}</Button>)}
     </div> : null}
-    {file.oldPath && file.oldPath !== file.path ? <p className="px-3 py-2 text-xs text-muted-foreground">Renamed from {file.oldPath}</p> : null}
     {selected ? <div className="flex items-center gap-3 border-b border-border px-3 py-2 text-xs">
       <span className="font-mono text-muted-foreground">Line {Math.min(selected.start, selected.end)}{selected.start !== selected.end ? "–" + Math.max(selected.start, selected.end) : ""}</span>
       <Button type="button" size="sm" onClick={() => onOpenComposer(file.path, selected)}>{inCommit ? "Comment at head" : "Comment"}</Button>
@@ -1062,35 +1081,22 @@ function CommitView({ reviewId, review, target, rpc, onNavigate, onOpenDiff }: {
 
 type JumpFn = (path: string, line: number | null, side: "old" | "new") => void;
 
-function StackSelector({ review, stack, compact, opening, onOpen }: {
+function StackSelector({ review, stack, narrow, opening, onOpen, onClose }: {
   review: Review;
   stack: StackView;
-  compact: boolean;
+  narrow: boolean;
+  onClose(): void;
   opening: number | null;
   onOpen(entry: StackView["entries"][number]): void;
 }) {
   const currentButton = useRef<HTMLButtonElement>(null);
-  useEffect(() => { currentButton.current?.scrollIntoView({ block: "nearest" }); }, [review.number, compact, stack.entries.length]);
-  if (compact) return <div className="flex shrink-0 items-center gap-3 border-b border-border px-3 py-2 text-xs">
-    <details className="relative min-w-0 flex-1">
-      <summary aria-label="Pull request in stack" className="flex cursor-pointer list-none items-center gap-2 rounded-md border border-input bg-background px-2 py-1.5">
-        <PrMark state={review.state} isDraft={review.isDraft} reviewDecision={review.reviewDecision} />
-        <span className="min-w-0 flex-1 truncate">#{review.number} {review.title}</span><Icon name="ChevronDown" className="size-3.5" />
-      </summary>
-      <nav aria-label="Pull requests in stack" className="absolute left-0 right-0 z-40 mt-1 max-h-80 overflow-y-auto rounded-md border border-border bg-card p-1 shadow-lg">
-        {stack.entries.map((entry) => <button key={entry.number} type="button" disabled={opening !== null} aria-current={entry.number === review.number ? "page" : undefined} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-state-hover" onClick={(event) => {
-          event.currentTarget.closest("details")?.removeAttribute("open");
-          if (entry.number !== review.number) onOpen(entry);
-        }}><PrMark state={entry.state} isDraft={entry.isDraft} merged={entry.merged} reviewDecision={entry.reviewDecision} /><span className="min-w-0 truncate">#{entry.number} {entry.title}</span></button>)}
-      </nav>
-    </details>
-    {opening !== null ? <Icon name="Loading" className="size-3.5 shrink-0 animate-spin" aria-label="Opening pull request" /> : <span className="shrink-0 tabular-nums text-muted-foreground">{stack.currentPosition}/{stack.entries.length}</span>}
-  </div>;
-  return <aside aria-label="Pull request stack" className="flex min-h-0 w-52 shrink-0 flex-col border-r border-border bg-card">
+  useEffect(() => { currentButton.current?.scrollIntoView({ block: "nearest" }); }, [review.number, stack.entries.length]);
+  return <aside aria-label="Pull request stack" className={cn("flex min-h-0 w-52 shrink-0 flex-col border-r border-border bg-card", narrow && "absolute inset-y-0 left-0 z-40 shadow-lg")}>
     <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-3 text-xs" title={`Base branch: ${stack.baseRefName}`}>
       <h2 className="font-medium">Stack{stack.number === null ? "" : " #" + stack.number}</h2>
-      <span className="tabular-nums text-muted-foreground">{stack.currentPosition}/{stack.entries.length}</span>
+      <Button variant="ghost" size="sm" className="h-6 w-6 px-0" aria-label="Hide stack sidebar" onClick={onClose}><Icon name="X" className="size-3.5" /></Button>
     </div>
+    <div className="border-b border-border px-3 py-2"><DiffStat {...diffStats(stack.entries)} /></div>
     <nav aria-label="Pull requests in stack" className="min-h-0 flex-1 overflow-y-auto p-1.5">
       <ol className="space-y-1">{stack.entries.map((entry) => {
         const current = entry.number === review.number;
@@ -1106,6 +1112,7 @@ function StackSelector({ review, stack, compact, opening, onOpen }: {
                 <span className="font-mono text-muted-foreground">#{entry.number}</span>
               </span>
               <span className="mt-0.5 line-clamp-2 break-words leading-relaxed">{entry.title}</span>
+              <DiffStat additions={entry.additions} deletions={entry.deletions} />
             </span>
             <CountBadge count={entry.pendingCount} title={`${entry.pendingCount} pending comments`} />
           </button>
@@ -1122,7 +1129,8 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
   const navigate = useBbNavigate();
   const [tab, setTab] = useState<Tab>(commit ? "commits" : "changes");
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
-  const compactStack = useNarrow(container, 960);
+  const narrowStack = useNarrow(container, 960);
+  const stackSidebar = useSidebar(STACK_KEY, narrowStack);
   const [diffJump, setDiffJump] = useState<DiffJump | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewOpened, setReviewOpened] = useState(false);
@@ -1191,12 +1199,13 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
       </div>}
     </div> : null}
   </div>;
-  return <div ref={setContainer} className="flex h-full min-h-0 flex-col">
+  return <div ref={setContainer} aria-label="Pull request review" className="flex h-full min-h-0 flex-col">
     <header className="shrink-0 space-y-3 border-b border-border px-5 py-4">
       <div className="flex flex-wrap items-center gap-3 text-xs">
         <button type="button" className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground" onClick={() => navigate.toPluginPanel(PANEL_PATH)}><Icon name="ChevronLeft" className="size-3.5" />Reviews</button>
         <span className="text-muted-foreground">{review.owner}/{review.repo} #{review.number}</span>
         <StatePill state={review.state} reviewDecision={review.reviewDecision} isDraft={review.isDraft} />
+        <DiffStat additions={review.additions} deletions={review.deletions} />
         <div className="ml-auto flex items-center gap-2">
           <Button size="sm" onClick={() => { setReviewOpened(true); setReviewOpen(true); }}>Submit review{pending.length > 0 ? " (" + pending.length + ")" : ""}</Button>
           <details className="relative">
@@ -1215,6 +1224,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
         <span className="font-mono">{review.headRefName} → {review.baseRefName}</span>
       </div>
       <nav className="flex flex-wrap items-center gap-1" aria-label="Pull request">
+        {stack ? <Button variant={stackSidebar.open ? "secondary" : "ghost"} size="sm" aria-label={stackSidebar.open ? "Hide stack sidebar" : "Show stack sidebar"} aria-pressed={stackSidebar.open} onClick={stackSidebar.toggle}><Icon name="Layers" className="size-3.5" />Stack</Button> : null}
         <Button variant={tab === "conversation" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("conversation")}>Conversation</Button>
         <Button variant={tab === "changes" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("changes")}>Changes</Button>
         <Button variant={tab === "commits" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("commits")}>Commits</Button>
@@ -1224,8 +1234,11 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
       <span className="min-w-0 flex-1 break-words">Couldn’t refresh this review: {error}</span>
       <Button variant="outline" size="sm" onClick={refetch}>Retry</Button>
     </div> : <SyncNotice reviewId={reviewId} message={detail.syncError} onRefresh={refetch} />}
-    <div className={cn("flex min-h-0 min-w-0 flex-1", compactStack && "flex-col")}>
-      {stack ? <StackSelector review={review} stack={stack} compact={compactStack} opening={openingSlice} onOpen={(entry) => void openStackEntry(entry)} /> : null}
+    <div className="relative flex min-h-0 min-w-0 flex-1">
+      {stack && stackSidebar.open ? <>
+        {narrowStack ? <button type="button" className="absolute inset-0 z-30 bg-background/60" aria-label="Close stack sidebar" onClick={() => stackSidebar.setOpen(false)} /> : null}
+        <StackSelector review={review} stack={stack} narrow={narrowStack} opening={openingSlice} onOpen={(entry) => void openStackEntry(entry)} onClose={() => stackSidebar.setOpen(false)} />
+      </> : null}
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden">{content}</div>
     </div>
     <dialog ref={reviewDialog} aria-label="Submit review" className="m-auto max-h-[85vh] w-[min(40rem,calc(100vw-2rem))] overflow-y-auto rounded-lg border border-border bg-background p-0 text-foreground shadow-xl backdrop:bg-black/40" onCancel={() => setReviewOpen(false)} onClose={() => setReviewOpen(false)}>
@@ -1287,17 +1300,18 @@ function FileTreeRows({
         }
         const active = selected === node.file.path;
         return (
-          <li key={node.file.path}>
+          <li key={node.path}>
             <button
               type="button"
               onClick={() => onSelect(node.file.path)}
               className={cn("flex w-full items-center gap-1 py-0.5 pr-2 text-left hover:bg-state-hover", active && "bg-state-hover")}
               style={{ paddingLeft: 20 + depth * 12 }}
-              title={node.file.path}
+              title={node.location === null ? node.path : `${node.file.oldPath} → ${node.file.path}`}
             >
               <span className="min-w-0 flex-1 truncate">{node.name}</span>
+              {node.location ? <span className="shrink-0 text-[10px] text-muted-foreground">{node.location}</span> : null}
               {node.file.unresolvedCount > 0 ? <Icon name="MessageSquare" className="size-3 shrink-0 text-muted-foreground" aria-label={`${node.file.unresolvedCount} unresolved threads`} /> : null}
-              <span className="shrink-0 font-mono text-[10px]"><span className="text-primary">+{node.file.additions}</span> <span className="text-destructive">-{node.file.deletions}</span></span>
+              {node.location !== "old" ? <DiffStat additions={node.file.additions} deletions={node.file.deletions} /> : null}
             </button>
           </li>
         );
@@ -1354,8 +1368,7 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
   const narrow = useNarrow(container);
   const scope = commit === null ? "pr" : `${commit.from ?? ""}..${commit.to}`;
 
-  const [showTree, setShowTree] = useState(() => !window.matchMedia("(max-width: 767px)").matches && readStorage<boolean>(TREE_KEY) !== false);
-  useEffect(() => { if (narrow) setShowTree(false); }, [narrow]);
+  const { open: showTree, setOpen: setShowTree, toggle: toggleTree } = useSidebar(TREE_KEY, narrow);
   const [picked, setPicked] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [diffStyle, setDiffStyle] = useState<"unified" | "split">("unified");
@@ -1438,18 +1451,9 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
     return () => { window.clearTimeout(timer); cancel?.(); };
   }, [container, jump, jumpPath, scope, selectedPath]);
 
-  const toggleTree = () => {
-    setShowTree((value) => {
-      const next = !value;
-      if (!narrow) writeStorage(TREE_KEY, next);
-      return next;
-    });
-  };
-
   const selectFile = (path: string) => {
     setPicked(path);
     writeStorage(fileSelKey(reviewId, scope), path);
-    if (narrow) setShowTree(false);
   };
 
   if (commit !== null && (commitError !== null || commitData === null)) return <div className="h-full p-4">
@@ -1470,7 +1474,7 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
   const source: DiffSource | undefined = inCommit && commitData !== null ? { kind: "range", base: commitData.base, head: commitData.head } : undefined;
 
   const tree = showTree ? (
-    <div className={cn(
+    <aside aria-label="Changed files" className={cn(
       "flex flex-col border-r border-border bg-card",
       narrow ? "absolute inset-y-0 left-0 z-30 w-[min(18rem,85%)] shadow-lg" : "w-60 shrink-0",
     )}>
@@ -1485,7 +1489,7 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <FileTree files={files} selected={selectedPath} onSelect={selectFile} filter={filter} />
       </div>
-    </div>
+    </aside>
   ) : null;
 
   return (
@@ -1510,18 +1514,7 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
             >
               <Icon name="PanelLeft" className="size-3.5" />
             </Button>
-            {!showTree ? <select
-              value={selectedPath ?? ""}
-              onChange={(e) => { if (e.target.value !== "") selectFile(e.target.value); }}
-              className="h-7 min-w-0 flex-1 rounded-md border border-input bg-background px-1.5 font-mono text-xs"
-              aria-label="Changed file"
-              disabled={files.length === 0}
-            >
-              {files.length === 0 ? <option value="">No files</option> : null}
-              {files.map((entry) => (
-                <option key={entry.path} value={entry.path}>{entry.path}</option>
-              ))}
-            </select> : <span className="min-w-0 flex-1 truncate font-mono" title={selectedPath ?? undefined}>{selectedPath ?? "No files"}</span>}
+            <span className="min-w-0 flex-1 truncate font-mono" title={selectedPath ?? undefined}>{selectedPath ?? "No files"}</span>
           </div>
           {file ? <div className="ml-auto flex items-center gap-3">
             <span className="font-mono"><span className="text-primary">+{file.additions}</span> <span className="text-destructive">−{file.deletions}</span></span>
@@ -1772,6 +1765,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                             <span className="block truncate text-sm font-medium">{r.title}</span>
                             <span className="flex items-center gap-2 truncate text-xs text-muted-foreground">
                               <span className="truncate">{r.owner}/{r.repo} #{r.number}</span>
+                              <DiffStat additions={r.additions} deletions={r.deletions} />
                               <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
                             </span>
                           </span>
@@ -1797,6 +1791,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                             <span className="truncate">{latest.owner}/{latest.repo}</span>
                             {stackInfo.number !== null ? <span className="font-mono" title={`GitHub stack #${stackInfo.number}`}>#{stackInfo.number}</span> : null}
                             <span className="inline-flex items-center gap-1" title={`${stackInfo.size} pull requests in stack`}><Icon name="Layers" className="size-3.5" />{stackInfo.size} PRs</span>
+                            <DiffStat {...diffStats(group.items)} />
                             <CountBadge count={group.items.reduce((n, r) => n + r.pendingCount, 0)} title="Pending comments" />
                           </span>
                         </span>
@@ -1812,6 +1807,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                               <span className="w-8 shrink-0 font-mono text-[11px] text-muted-foreground">{r.stack?.position}/{stackInfo.size}</span>
                               <span className="w-12 shrink-0 font-mono text-xs">#{r.number}</span>
                               <span className="min-w-0 flex-1 truncate text-xs">{r.title}</span>
+                              <DiffStat additions={r.additions} deletions={r.deletions} />
                               <PrMark state={r.state} reviewDecision={r.reviewDecision} isDraft={r.isDraft} />
                               <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
                             </button>

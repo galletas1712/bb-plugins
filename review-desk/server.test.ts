@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createFakePluginHost, makeHostResponse } from "@get-bb/plugin-sdk/testing";
 import plugin, { type ReviewSummary } from "./server";
-import type { GhPr, PrStack } from "./host-contract";
+import type { ChangedFile, GhPr, PrStack } from "./host-contract";
 
 const pr = (number: number): GhPr => ({ number, title: `PR ${number}`, body: "Body", state: "OPEN", isDraft: false, url: `https://github.com/o/r/pull/${number}`, author: { login: "me" }, baseRefName: "main", headRefName: `branch-${number}`, headRefOid: `head-${number}`, baseRefOid: "base", additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, mergeable: null, updatedAt: "2026-10-06T00:00:00Z", createdAt: "2026-10-05T00:00:00Z", checks: [], labels: [], reviewers: [], assignees: [], commits: [] });
 const stack = (numbers: number[]): PrStack => ({ number: 7, baseRefName: "main", source: "github", entries: numbers.map((number, i) => ({ position: i + 1, number, title: `PR ${number}`, state: "OPEN", isDraft: false, merged: false, url: pr(number).url, additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, headRefName: `branch-${number}`, headSha: `head-${number}`, baseRefName: "main", files: [] })) });
 
 async function fixture() {
+  let files: ChangedFile[] = [];
+  const remotePrs = new Map<number, Partial<GhPr>>();
   let snapshot: PrStack | null = stack([1, 2, 3]);
   let onStack: (() => Promise<void> | void) | undefined;
   const calls: { method: string; input: any }[] = [];
@@ -15,12 +17,12 @@ async function fixture() {
     const args = input as any;
     calls.push({ method, input });
     switch (method) {
-      case "gh_pr": case "gh_pr_status": return pr(args.number);
+      case "gh_pr": case "gh_pr_status": return { ...pr(args.number), ...remotePrs.get(args.number) };
       case "gh_pr_details": return { commits: [], labels: [], checks: [], reviewers: [], assignees: [] };
       case "repo_clone": return { repoPath: "/repo" };
       case "repo_prepare": return { worktree: `/repo/${args.number}`, headSha: args.headSha, baseSha: "base" };
       case "repo_release": return { ok: true };
-      case "git_files": return { files: [] };
+      case "git_files": return { files };
       case "gh_threads": return { threads: [] };
       case "gh_conversation": return { comments: [], reviews: [], events: [] };
       case "gh_stack": await onStack?.(); return { stack: args.stackNumber !== null || snapshot?.entries.some((entry) => entry.number === args.number) ? snapshot : null };
@@ -31,7 +33,7 @@ async function fixture() {
   const rpc = (method: string, input: unknown) => harness.behavior.callRpc(method, input);
   const open = async (number: number) => (await rpc("reviews_open", { ref: `o/r#${number}` }) as any).review;
   const list = async () => (await rpc("reviews_list", null) as { reviews: ReviewSummary[] }).reviews;
-  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; } };
+  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; } };
 }
 
 test("Recent includes unopened layers and refreshed metadata, preserves detached drafts, and survives reload", async () => {
@@ -152,5 +154,35 @@ test("remaining layers have contiguous positions when GitHub retains old positio
     snapshot.entries[0].position = 2; snapshot.entries[1].position = 4;
     store.save("o", "r", snapshot, "host");
     assert.deepEqual((await f.list()).filter((r) => r.stack).map((r) => r.stack?.position).sort(), [1, 2]);
+  } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("PR and stack summaries use rename-aware cached totals and retain GitHub totals for unopened layers", async () => {
+  const f = await fixture();
+  try {
+    f.setFiles([
+      { path: "new/pure.ts", oldPath: "old/pure.ts", status: "renamed", additions: 0, deletions: 0, binary: false },
+      { path: "new/edited.ts", oldPath: "old/edited.ts", status: "renamed", additions: 3, deletions: 2, binary: false },
+    ]);
+    const snapshot = stack([1, 2, 3]);
+    snapshot.entries[0].additions = 1000; snapshot.entries[0].deletions = 1000;
+    snapshot.entries[1].additions = 17; snapshot.entries[1].deletions = 5;
+    f.setStack(snapshot);
+    const first = await f.open(1);
+    await f.rpc("reviews_sync", { reviewId: first.id });
+    const list = await f.list();
+    assert.equal(list.find((r) => r.number === 1)?.additions, 3);
+    assert.equal(list.find((r) => r.number === 1)?.deletions, 2);
+    assert.equal(list.find((r) => r.number === 2)?.additions, 17);
+    const detail = await f.rpc("reviews_get", { reviewId: first.id }) as any;
+    assert.equal(detail.review.additions, 3); assert.equal(detail.review.deletions, 2);
+    assert.equal(detail.stack.entries[0].additions, 3); assert.equal(detail.stack.entries[0].deletions, 2);
+    f.setStack(stack([2, 3]));
+    await f.rpc("reviews_sync", { reviewId: first.id });
+    assert.equal((await f.list()).find((r) => r.number === 1)?.additions, 3);
+    f.setFiles([]);
+    f.setPr(1, { baseRefName: "different-base" });
+    await f.rpc("reviews_sync", { reviewId: first.id });
+    assert.equal((await f.list()).find((r) => r.number === 1)?.additions, 0);
   } finally { await f.harness.lifecycle.dispose(); }
 });

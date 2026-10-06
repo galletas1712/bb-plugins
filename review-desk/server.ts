@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { createStackStore, type TrackedStack } from "./stack-store";
+import { diffStats } from "./lib/diff-stats";
 import { hunkLineNumbers } from "./diff-lines";
 import {
   changedFileSchema,
@@ -74,6 +75,8 @@ const reviewSummarySchema = z.object({
   isDraft: z.boolean(),
   reviewDecision: z.string().nullable(),
   headSha: z.string(),
+  additions: z.number(),
+  deletions: z.number(),
   pendingCount: z.number(),
   updatedAt: z.number(),
   stack: z.object({
@@ -785,6 +788,7 @@ export default async function plugin(bb: BbPluginApi) {
         const local = q.reviewByKey.get(row.owner, row.repo, entry.number);
         return {
           ...entry,
+          ...(local?.head_sha === entry.headSha ? reviewStats(local) : {}),
           reviewId: local?.id ?? null,
           pendingCount: local === undefined ? 0 : q.pending.all(local.id).length,
           viewedCount: local === undefined ? 0 : q.viewed.all(local.id).length,
@@ -832,6 +836,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function filesFor(row: ReviewRow): Promise<ChangedFile[]> {
     return cachedFiles(row) ?? refreshFiles(row);
+  }
+
+  function reviewStats(row: ReviewRow) {
+    const files = cachedFiles(row);
+    return files === null ? { additions: row.additions, deletions: row.deletions } : diffStats(files);
   }
 
   function applyPr(row: ReviewRow, pr: GhPr, prepared: { worktree: string; headSha: string; baseSha: string }): void {
@@ -952,7 +961,7 @@ export default async function plugin(bb: BbPluginApi) {
       : { worktree: row.worktree, headSha: pr.headRefOid, baseSha: row.base_sha };
     applyPr(row, { ...pr, ...details, commits: details.commits ?? parseJson<Review["commits"]>(row.commits_json, []) }, prepared);
     const fresh = requireReview(reviewId);
-    if (headChanged || cachedFiles(fresh) === null) await refreshFiles(fresh);
+    if (headChanged || baseMoved || cachedFiles(fresh) === null) await refreshFiles(fresh);
     await refreshThreads(fresh);
     await reanchorNotes(fresh);
     await refreshConversation(fresh);
@@ -1063,7 +1072,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     for (const p of pending) bump(fileForPath(files, p.path)?.path ?? p.path, "pending");
     return {
-      review: toReview(row),
+      review: { ...toReview(row), ...diffStats(files) },
       files: files.map((f) => {
         const counts = perPath.get(f.path) ?? { threads: 0, unresolved: 0, pending: 0 };
         return { ...f, viewed: viewed.has(f.path), threadCount: counts.threads, unresolvedCount: counts.unresolved, pendingCount: counts.pending };
@@ -1206,6 +1215,7 @@ export default async function plugin(bb: BbPluginApi) {
               id: local?.id ?? null, owner: tracked.owner, repo: tracked.repo,
               number: entry.number, title: entry.title, state: entry.merged ? "MERGED" : entry.state,
               isDraft: entry.isDraft, reviewDecision: entry.reviewDecision, headSha: entry.headSha,
+              ...(local?.head_sha === entry.headSha ? reviewStats(local) : { additions: entry.additions, deletions: entry.deletions }),
               pendingCount: local ? q.pending.all(local.id).length : 0,
               updatedAt: local?.updated_at ?? tracked.openedAt,
               stack: { number: tracked.stack.number, position: entry.position, size: tracked.stack.entries.length, key: tracked.key },
@@ -1221,6 +1231,7 @@ export default async function plugin(bb: BbPluginApi) {
             isDraft: row.is_draft === 1,
             reviewDecision: row.review_decision,
             headSha: row.head_sha,
+            ...reviewStats(row),
             pendingCount: q.pending.all(row.id).length,
             updatedAt: row.updated_at,
             stack: null,

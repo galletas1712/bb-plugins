@@ -6,7 +6,18 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http:
 for (const name of ["window", "document", "HTMLElement", "Node", "MutationObserver", "customElements"]) globalThis[name] = dom.window[name];
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
-globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+const observers = new Set();
+globalThis.ResizeObserver = class {
+  constructor(callback) { this.callback = callback; }
+  observe(element) { this.element = element; observers.add(this); }
+  disconnect() { observers.delete(this); }
+};
+const resize = async (width) => act(() => {
+  for (const observer of observers) {
+    observer.element.getBoundingClientRect = () => ({ width });
+    observer.callback();
+  }
+});
 const { fireEvent, act } = await import("@testing-library/react");
 const { loadPluginApp, renderSlot } = await import("@get-bb/plugin-sdk/testing/app");
 const app = await loadPluginApp(() => import("../app.tsx"));
@@ -58,7 +69,7 @@ const summaries = [
   { number: 3, title: "Draft layer", state: "OPEN", isDraft: true, reviewDecision: "APPROVED" },
   { number: 4, title: "Open PR", state: "OPEN" },
   { number: 5, title: "Closed PR", state: "CLOSED", reviewDecision: "APPROVED" },
-].map((item) => ({ id: item.number === 3 ? null : `review-${item.number}`, owner: "o", repo: "r", headSha: "head", pendingCount: 0, updatedAt: 0, isDraft: false, reviewDecision: null, ...item, stack: item.number <= 3 ? { key: "gh:o/r#7", number: 7, position: item.number, size: 3 } : null }));
+].map((item) => ({ id: item.number === 3 ? null : `review-${item.number}`, owner: "o", repo: "r", headSha: "head", additions: item.number * 10, deletions: item.number * 2, pendingCount: 0, updatedAt: 0, isDraft: false, reviewDecision: null, ...item, stack: item.number <= 3 ? { key: "gh:o/r#7", number: 7, position: item.number, size: 3 } : null }));
 
 test("Recent uses one status per PR, only offers stack-level removal, and opens unopened layers", async () => {
   let removed = null; let opened = null;
@@ -74,6 +85,9 @@ test("Recent uses one status per PR, only offers stack-level removal, and opens 
     for (const label of ["Approved", "Merged", "Draft", "Open", "Closed"]) assert.equal(slot.getAllByRole("img", { name: label }).length, label === "Approved" ? 2 : 1);
     assert.ok(slot.getAllByRole("img", { name: "Approved" }).every((mark) => mark.className.includes("text-emerald-600")));
     assert.ok(slot.getByRole("img", { name: "Merged" }).className.includes("text-purple-600"));
+    assert.ok(slot.getByLabelText("Diff: 60 additions, 12 deletions"));
+    assert.ok(slot.getByLabelText("Diff: 10 additions, 2 deletions"));
+    assert.ok(slot.getByLabelText("Diff: 40 additions, 8 deletions"));
     assert.equal(slot.getAllByRole("button", { name: "Remove stack reviews" }).length, 1);
     assert.equal(slot.getAllByRole("button", { name: "Remove review", exact: true }).length, 2);
     assert.equal(slot.queryByRole("button", { name: "Remove #1" }), null);
@@ -87,7 +101,7 @@ test("Recent uses one status per PR, only offers stack-level removal, and opens 
 
 test("the PR header and stack navigation share status precedence and the menu removes the whole stack", async () => {
   HTMLElement.prototype.scrollIntoView = () => {};
-  const entries = summaries.slice(0, 3).map((item) => ({ ...item, position: item.stack.position, merged: item.state === "MERGED", url: review.url, headRefName: "branch", baseRefName: "main", files: [], additions: 0, deletions: 0, changedFiles: 0, reviewId: item.id, viewedCount: 0 }));
+  const entries = summaries.slice(0, 3).map((item) => ({ ...item, position: item.stack.position, merged: item.state === "MERGED", url: review.url, headRefName: "branch", baseRefName: "main", files: [], changedFiles: 0, reviewId: item.id, viewedCount: 0 }));
   const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
     reviews_list: () => ({ reviews: summaries }),
     reviews_get: () => ({ ...detail, review: { ...review, reviewDecision: "APPROVED" }, stack: { number: 7, source: "github", baseRefName: "main", currentPosition: 1, entries } }),
@@ -101,4 +115,69 @@ test("the PR header and stack navigation share status precedence and the menu re
     assert.ok(slot.getByRole("button", { name: "Remove stack" }));
     assert.equal(slot.queryByRole("button", { name: "Remove review", exact: true }), null);
   } finally { slot.lifecycle.unmount(); }
+});
+
+const stackDetail = () => ({ ...detail, stack: { number: 7, source: "github", baseRefName: "main", currentPosition: 1, entries: summaries.slice(0, 3).map((item) => ({ ...item, position: item.stack.position, merged: item.state === "MERGED", url: review.url, headRefName: "branch", baseRefName: "main", files: [], changedFiles: 0, reviewId: item.id, viewedCount: 0 })) } });
+const mountReview = (data) => renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+  reviews_list: () => ({ reviews: [] }), reviews_get: () => data, review_seen: () => ({ ok: true }),
+  review_patch: () => ({ patch: "", file: data.files[0] ?? null }),
+} });
+
+test("sidebars auto-hide on small screens, preserve explicit choices through resize and remount, and need no dropdowns", async () => {
+  window.localStorage.clear();
+  HTMLElement.prototype.scrollIntoView = () => {};
+  const previousWidth = window.innerWidth;
+  window.innerWidth = 1200;
+  let slot = mountReview(stackDetail());
+  try {
+    await slot.findByRole("complementary", { name: "Pull request stack" });
+    assert.ok(slot.getByRole("complementary", { name: "Changed files" }));
+    await resize(500);
+    assert.equal(slot.queryByRole("complementary", { name: "Changed files" }), null);
+    assert.equal(slot.queryByRole("complementary", { name: "Pull request stack" }), null);
+    assert.equal(slot.queryByLabelText("Changed file"), null);
+    assert.equal(slot.queryByLabelText("Pull request in stack"), null);
+    fireEvent.click(slot.getByRole("button", { name: "Show file list" }));
+    fireEvent.click(slot.getByRole("button", { name: "Show stack sidebar" }));
+    await resize(1200); await resize(500);
+    assert.ok(slot.getByRole("complementary", { name: "Changed files" }));
+    assert.ok(slot.getByRole("complementary", { name: "Pull request stack" }));
+    assert.equal(JSON.parse(window.localStorage.getItem("review-desk:file-tree")), true);
+    assert.equal(JSON.parse(window.localStorage.getItem("review-desk:stack-sidebar")), true);
+    fireEvent.click(slot.getByRole("button", { name: "Hide file list" }));
+    await resize(1200);
+    assert.equal(slot.queryByRole("complementary", { name: "Changed files" }), null);
+    slot.lifecycle.unmount(); window.innerWidth = 500;
+    slot = mountReview(stackDetail());
+    await slot.findByRole("complementary", { name: "Pull request stack" });
+    assert.equal(slot.queryByRole("complementary", { name: "Changed files" }), null);
+    assert.ok(slot.getByLabelText("Diff: 60 additions, 12 deletions"));
+    fireEvent.click(slot.getAllByRole("button", { name: "Hide stack sidebar" })[0]);
+    assert.equal(slot.queryByRole("complementary", { name: "Pull request stack" }), null);
+  } finally { slot.lifecycle.unmount(); window.innerWidth = previousWidth; window.localStorage.clear(); }
+});
+
+test("moved files appear at both explorer locations and selecting either keeps the sidebar open", async () => {
+  window.localStorage.clear(); window.localStorage.setItem("review-desk:file-tree", "true");
+  const previousWidth = window.innerWidth; window.innerWidth = 500;
+  const moved = { path: "new/beta.ts", oldPath: "old/alpha.ts", status: "renamed", additions: 0, deletions: 0, binary: false, viewed: false, threadCount: 0, unresolvedCount: 0, pendingCount: 0 };
+  const slot = mountReview({ ...detail, files: [moved] });
+  try {
+    await slot.findByRole("complementary", { name: "Changed files" });
+    const old = await slot.findByRole("button", { name: /alpha.ts.*old/ });
+    const current = slot.getByRole("button", { name: /beta.ts.*new/ });
+    assert.equal(old.title, "old/alpha.ts → new/beta.ts");
+    assert.equal(current.title, old.title);
+    fireEvent.click(old);
+    assert.ok(slot.getByRole("complementary", { name: "Changed files" }));
+    fireEvent.click(current);
+    assert.ok(slot.getByRole("complementary", { name: "Changed files" }));
+    assert.equal(slot.queryByText("Renamed from old/alpha.ts"), null);
+    const patches = slot.inspection.rpcCalls.filter((call) => call.method === "review_patch");
+    assert.ok(patches.length > 0);
+    assert.ok(patches.every((call) => call.input.path === "new/beta.ts"));
+    fireEvent.change(slot.getByRole("textbox", { name: "Filter files" }), { target: { value: "old/alpha" } });
+    assert.ok(slot.getByRole("button", { name: /alpha.ts.*old/ }));
+    assert.equal(slot.queryByRole("button", { name: /beta.ts.*new/ }), null);
+  } finally { slot.lifecycle.unmount(); window.innerWidth = previousWidth; window.localStorage.clear(); }
 });
