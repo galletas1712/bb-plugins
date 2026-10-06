@@ -1,0 +1,156 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { createFakePluginHost, makeHostResponse } from "@get-bb/plugin-sdk/testing";
+import plugin, { type ReviewSummary } from "./server";
+import type { GhPr, PrStack } from "./host-contract";
+
+const pr = (number: number): GhPr => ({ number, title: `PR ${number}`, body: "Body", state: "OPEN", isDraft: false, url: `https://github.com/o/r/pull/${number}`, author: { login: "me" }, baseRefName: "main", headRefName: `branch-${number}`, headRefOid: `head-${number}`, baseRefOid: "base", additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, mergeable: null, updatedAt: "2026-10-06T00:00:00Z", createdAt: "2026-10-05T00:00:00Z", checks: [], labels: [], reviewers: [], assignees: [], commits: [] });
+const stack = (numbers: number[]): PrStack => ({ number: 7, baseRefName: "main", source: "github", entries: numbers.map((number, i) => ({ position: i + 1, number, title: `PR ${number}`, state: "OPEN", isDraft: false, merged: false, url: pr(number).url, additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, headRefName: `branch-${number}`, headSha: `head-${number}`, baseRefName: "main", files: [] })) });
+
+async function fixture() {
+  let snapshot: PrStack | null = stack([1, 2, 3]);
+  let onStack: (() => Promise<void> | void) | undefined;
+  const calls: { method: string; input: any }[] = [];
+  let { bb, harness } = createFakePluginHost({ pluginId: "review-desk", sdk: { projects: { list: async () => [] }, hosts: { list: async () => [makeHostResponse({ id: "host", status: "connected" })] } }, experimental_callHostRpc: async ({ method, input }) => {
+    const args = input as any;
+    calls.push({ method, input });
+    switch (method) {
+      case "gh_pr": case "gh_pr_status": return pr(args.number);
+      case "gh_pr_details": return { commits: [], labels: [], checks: [], reviewers: [], assignees: [] };
+      case "repo_clone": return { repoPath: "/repo" };
+      case "repo_prepare": return { worktree: `/repo/${args.number}`, headSha: args.headSha, baseSha: "base" };
+      case "repo_release": return { ok: true };
+      case "git_files": return { files: [] };
+      case "gh_threads": return { threads: [] };
+      case "gh_conversation": return { comments: [], reviews: [], events: [] };
+      case "gh_stack": await onStack?.(); return { stack: args.stackNumber !== null || snapshot?.entries.some((entry) => entry.number === args.number) ? snapshot : null };
+      default: throw new Error(`unexpected host call ${method}`);
+    }
+  } });
+  await plugin(bb);
+  const rpc = (method: string, input: unknown) => harness.behavior.callRpc(method, input);
+  const open = async (number: number) => (await rpc("reviews_open", { ref: `o/r#${number}` }) as any).review;
+  const list = async () => (await rpc("reviews_list", null) as { reviews: ReviewSummary[] }).reviews;
+  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; } };
+}
+
+test("Recent includes unopened layers and refreshed metadata, preserves detached drafts, and survives reload", async () => {
+  const f = await fixture();
+  try {
+    const first = await f.open(1);
+    await f.rpc("pending_add", { reviewId: first.id, path: "a.ts", line: 1, side: "RIGHT", body: "Keep this draft" });
+    assert.deepEqual((await f.list()).map((r) => r.number).sort(), [1, 2, 3]);
+    assert.equal((await f.list()).find((r) => r.number === 2)?.id, null);
+    assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, 1);
+    const next = stack([2, 3, 4]);
+    next.entries[0] = { ...next.entries[0], title: "Renamed and approved", reviewDecision: "APPROVED" };
+    next.entries[1] = { ...next.entries[1], state: "MERGED", merged: true };
+    next.entries[2].isDraft = true;
+    f.setStack(next);
+    await f.rpc("reviews_sync", { reviewId: first.id });
+    const listed = await f.list();
+    assert.deepEqual(listed.filter((r) => r.stack).map((r) => r.number).sort(), [2, 3, 4]);
+    assert.equal(listed.find((r) => r.number === 2)?.title, "Renamed and approved");
+    assert.equal(listed.find((r) => r.number === 2)?.reviewDecision, "APPROVED");
+    assert.equal(listed.find((r) => r.number === 3)?.state, "MERGED");
+    assert.equal(listed.find((r) => r.number === 4)?.isDraft, true);
+    assert.equal(listed.find((r) => r.number === 1)?.stack, null);
+    assert.equal(listed.find((r) => r.number === 1)?.pendingCount, 1);
+    await f.reload();
+    assert.deepEqual((await f.list()).filter((r) => r.stack).map((r) => r.number).sort(), [2, 3, 4]);
+    assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, 1);
+  } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("background refresh follows the stack number after every opened PR leaves", async () => {
+  const f = await fixture(); const now = Date.now;
+  try {
+    const first = await f.open(1);
+    f.setStack(stack([2, 3]));
+    await f.rpc("reviews_sync", { reviewId: first.id });
+    f.setStack(stack([4, 5]));
+    Date.now = () => now() + 120_000;
+    const service = f.harness.behavior.runService("sync-open-reviews");
+    f.onStack(() => { if (f.calls.at(-1)?.input.stackNumber === 7) service.controller.abort(); });
+    await service.done;
+    assert.deepEqual((await f.list()).filter((r) => r.stack).map((r) => r.number).sort(), [4, 5]);
+    assert.ok(f.calls.some((call) => call.method === "gh_stack" && call.input.stackNumber === 7 && call.input.number === null));
+  } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("stack removal is atomic, includes every opened layer, and also applies through a layer's removal RPC", async () => {
+  const f = await fixture();
+  try {
+    const first = await f.open(1); await f.open(2);
+    const db = f.bb.storage.database();
+    db.exec("CREATE TRIGGER fail_removal BEFORE DELETE ON reviews WHEN OLD.number = 2 BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+    await assert.rejects(f.rpc("stacks_remove", { key: "gh:o/r#7" }), /test failure/);
+    assert.equal((await f.list()).length, 3);
+    assert.equal(f.calls.filter((call) => call.method === "repo_release").length, 0);
+    db.exec("DROP TRIGGER fail_removal");
+    await f.rpc("reviews_remove", { reviewId: first.id });
+    assert.deepEqual(await f.list(), []);
+    assert.equal(f.calls.filter((call) => call.method === "repo_release").length, 2);
+    await f.reload();
+    assert.deepEqual(await f.list(), []);
+  } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("an in-flight stack refresh cannot resurrect a removed stack", async () => {
+  const f = await fixture();
+  try {
+    const first = await f.open(1);
+    let release!: () => void; let entered!: () => void;
+    const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+    f.onStack(() => new Promise<void>((resolve) => { release = resolve; entered(); }));
+    const syncing = f.rpc("reviews_sync", { reviewId: first.id });
+    await enteredPromise;
+    await f.rpc("stacks_remove", { key: "gh:o/r#7" });
+    release(); await syncing;
+    assert.deepEqual(await f.list(), []);
+  } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("legacy stack caches migrate without losing unopened layers or reappearing after removal", async () => {
+  const f = await fixture();
+  try {
+    await f.open(1);
+    const db = f.bb.storage.database();
+    db.exec("DELETE FROM tracked_stacks");
+    db.prepare("UPDATE stack_cache SET json = ? WHERE number = 1").run(JSON.stringify(stack([1, 2, 3])));
+    await f.reload();
+    assert.equal((await f.list()).length, 3);
+    await f.rpc("stacks_remove", { key: "gh:o/r#7" });
+    await f.reload();
+    assert.deepEqual(await f.list(), []);
+  } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("moving a PR between native stacks preserves both stacks and inferred stacks retain their identity", async () => {
+  const f = await fixture();
+  try {
+    await f.open(1);
+    const { createStackStore } = await import("./stack-store");
+    const store = createStackStore(f.bb.storage.database());
+    store.save("o", "r", { ...stack([3, 4]), number: 8 }, "host");
+    assert.deepEqual(store.get("gh:o/r#7")?.stack.entries.map((entry) => entry.number), [1, 2]);
+    assert.equal(store.forPr("o", "r", 3)?.key, "gh:o/r#8");
+    const key = store.save("o", "r", { ...stack([20, 21]), number: null, source: "inferred" }, "host");
+    store.save("o", "r", { ...stack([21, 22]), number: null, source: "inferred" }, "host", key);
+    assert.deepEqual(store.get(key)?.stack.entries.map((entry) => entry.number), [21, 22]);
+    assert.equal(store.forPr("o", "r", 20), undefined);
+  } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("remaining layers have contiguous positions when GitHub retains old position numbers", async () => {
+  const f = await fixture();
+  try {
+    await f.open(1);
+    const { createStackStore } = await import("./stack-store");
+    const store = createStackStore(f.bb.storage.database());
+    const snapshot = stack([2, 4]);
+    snapshot.entries[0].position = 2; snapshot.entries[1].position = 4;
+    store.save("o", "r", snapshot, "host");
+    assert.deepEqual((await f.list()).filter((r) => r.stack).map((r) => r.stack?.position).sort(), [1, 2]);
+  } finally { await f.harness.lifecycle.dispose(); }
+});

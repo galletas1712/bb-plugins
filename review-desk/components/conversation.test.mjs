@@ -7,7 +7,7 @@ for (const name of ["window", "document", "HTMLElement", "Node", "MutationObserv
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
 globalThis.ResizeObserver = class { observe() {} disconnect() {} };
-const { fireEvent } = await import("@testing-library/react");
+const { fireEvent, act } = await import("@testing-library/react");
 const { loadPluginApp, renderSlot } = await import("@get-bb/plugin-sdk/testing/app");
 const app = await loadPluginApp(() => import("../app.tsx"));
 
@@ -49,5 +49,56 @@ test("conversation shows each comment, independently toggles bodies, and keeps r
     fireEvent.click(dropdown.querySelector("summary"));
     assert.equal(dropdown.open, true);
     assert.ok(slot.getByText("Discussion body"));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+const summaries = [
+  { number: 1, title: "Approved layer", state: "OPEN", reviewDecision: "APPROVED" },
+  { number: 2, title: "Merged layer", state: "MERGED", reviewDecision: "APPROVED" },
+  { number: 3, title: "Draft layer", state: "OPEN", isDraft: true, reviewDecision: "APPROVED" },
+  { number: 4, title: "Open PR", state: "OPEN" },
+  { number: 5, title: "Closed PR", state: "CLOSED", reviewDecision: "APPROVED" },
+].map((item) => ({ id: item.number === 3 ? null : `review-${item.number}`, owner: "o", repo: "r", headSha: "head", pendingCount: 0, updatedAt: 0, isDraft: false, reviewDecision: null, ...item, stack: item.number <= 3 ? { key: "gh:o/r#7", number: 7, position: item.number, size: 3 } : null }));
+
+test("Recent uses one status per PR, only offers stack-level removal, and opens unopened layers", async () => {
+  let removed = null; let opened = null;
+  const previousConfirm = window.confirm;
+  window.confirm = () => true;
+  const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: {
+    reviews_list: () => ({ reviews: summaries }),
+    stacks_remove: (input) => { removed = input; return { ok: true }; },
+    reviews_open: (input) => { opened = input; return { review: { ...review, id: "opened-layer", number: 3 } }; },
+  } });
+  try {
+    await slot.findAllByText("Approved layer");
+    for (const label of ["Approved", "Merged", "Draft", "Open", "Closed"]) assert.equal(slot.getAllByRole("img", { name: label }).length, label === "Approved" ? 2 : 1);
+    assert.ok(slot.getAllByRole("img", { name: "Approved" }).every((mark) => mark.className.includes("text-emerald-600")));
+    assert.ok(slot.getByRole("img", { name: "Merged" }).className.includes("text-purple-600"));
+    assert.equal(slot.getAllByRole("button", { name: "Remove stack reviews" }).length, 1);
+    assert.equal(slot.getAllByRole("button", { name: "Remove review", exact: true }).length, 2);
+    assert.equal(slot.queryByRole("button", { name: "Remove #1" }), null);
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: /Draft layer/ })); });
+    assert.deepEqual(opened, { ref: "o/r#3" });
+    assert.ok(slot.inspection.navigateCalls.some((call) => call.options?.subPath === "opened-layer"));
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Remove stack reviews" })); });
+    assert.deepEqual(removed, { key: "gh:o/r#7" });
+  } finally { slot.lifecycle.unmount(); window.confirm = previousConfirm; }
+});
+
+test("the PR header and stack navigation share status precedence and the menu removes the whole stack", async () => {
+  HTMLElement.prototype.scrollIntoView = () => {};
+  const entries = summaries.slice(0, 3).map((item) => ({ ...item, position: item.stack.position, merged: item.state === "MERGED", url: review.url, headRefName: "branch", baseRefName: "main", files: [], additions: 0, deletions: 0, changedFiles: 0, reviewId: item.id, viewedCount: 0 }));
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: summaries }),
+    reviews_get: () => ({ ...detail, review: { ...review, reviewDecision: "APPROVED" }, stack: { number: 7, source: "github", baseRefName: "main", currentPosition: 1, entries } }),
+    review_seen: () => ({ ok: true }),
+  } });
+  try {
+    await slot.findByText("Approved");
+    assert.ok(slot.getByRole("img", { name: "Approved" }));
+    assert.ok(slot.getByRole("img", { name: "Merged" }));
+    assert.ok(slot.getByRole("img", { name: "Draft" }));
+    assert.ok(slot.getByRole("button", { name: "Remove stack" }));
+    assert.equal(slot.queryByRole("button", { name: "Remove review", exact: true }), null);
   } finally { slot.lifecycle.unmount(); }
 });

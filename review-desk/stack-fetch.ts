@@ -274,7 +274,7 @@ async function graphqlStackWith(run: GhRun, query: string, owner: string, repo: 
     return entry;
   });
   const entries = [...new Map(resolved.filter((e): e is PrStackEntry => e !== null).map((entry) => [entry.number, entry])).values()].sort((a, b) => a.position - b.position);
-  if (entries.length < 2) return null;
+  if (entries.length === 0) return null;
   return { number: meta.number, baseRefName: meta.baseRefName || entries[0]?.baseRefName || "", source: "github", entries };
 }
 
@@ -400,7 +400,7 @@ async function enrich(run: GhRun, owner: string, repo: string, entries: PrStackE
 
 function fromRest(stack: RestStack): PrStack | null {
   const prs = stack.pull_requests ?? [];
-  if (prs.length < 2) return null;
+  if (prs.length === 0) return null;
   const baseRefName = stack.base?.ref ?? prs[0]?.base?.ref ?? "";
   const entries = prs.map((pr, i) => restToPartial(pr, i + 1, baseRefName));
   return { number: stack.number, baseRefName, source: "github", entries };

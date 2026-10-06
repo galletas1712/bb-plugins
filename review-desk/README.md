@@ -12,9 +12,10 @@ Review GitHub pull requests inside bb with their original description, conversat
 - Keep a comment private as a note, or add it to your pending review later. Stale comments remain visible and can be deleted.
 - Open individual commits or shift-click a second commit for a range. Commit diffs link back to the PR head for commenting.
 - Navigate a PR stack in the left sidebar on wide layouts or a compact dropdown on narrow layouts. `[` / `]` moves between layers; other layers open when selected.
-- Approved PRs show a green checkmark in Recent, stack layers, and stack navigation.
+- PR status uses one icon everywhere: green for open or approved, gray for draft, purple for merged, and red for closed. Approval uses a checkmark.
+- Recent shows every layer in a tracked stack, including unopened and merged PRs. Remove the full stack with its single trash control. Membership, titles, and statuses refresh automatically about once a minute, even after the original PR leaves the stack. Detached PRs keep their local notes and pending comments.
 
-Changes, Conversation, and Commits use a single main workspace, one view at a time. Submit review opens a dialog with pending comments and review controls, with checks and metadata in expandable sections. Open reviews refresh from GitHub in the background. Fetch errors are shown with a retry action.
+Changes, Conversation, and Commits use a single main workspace, one view at a time. Submit review opens a dialog with pending comments and review controls, with checks and metadata in expandable sections. Reviews and tracked stacks refresh from GitHub in the background. Fetch errors are shown with a retry action.
 
 Requires an authenticated `gh` CLI on the machine holding the repository. Review Desk finds a local checkout or clones one, then creates a detached worktree for reading the diff.
 
@@ -29,7 +30,7 @@ bb plugin install .
 bb plugin reload review-desk
 ```
 
-Tests use Node's built-in test runner with tsx. Focused regressions cover pagination, GitHub comment coordinates, diff annotations, rendered Markdown, and editing GitHub text.
+Tests use Node's built-in test runner with tsx. Focused regressions cover pagination, GitHub comment coordinates, diff annotations, rendered Markdown, editing GitHub text, status displays, and persistent stack synchronization and removal.
 
 ## CLI
 
@@ -45,7 +46,8 @@ bb review-desk stack <reviewId>
 - `server.ts`: SQLite storage, caching, pending comments, private notes, RPC and CLI.
 - `host.ts`, `host-contract.ts`: repository operations and GitHub RPC contracts.
 - `github-conversation.ts`: paginated GitHub history and metadata.
-- `stack-fetch.ts`: native stack discovery and branch-based fallback.
+- `stack-fetch.ts`, `stack-store.ts`: stack discovery, persistent tracking, and branch-based fallback.
+- `components/pr-status.tsx`: shared status icons and labels.
 - `diff-lines.ts`, `diff-annotations.ts`: valid comment locations and visible annotation placement.
 - `components/editable-body.tsx`, `lib/github-edit.ts`: shared text editor and GitHub permission, conflict, and scope checks.
 - `components/markdown-diff.tsx`, `lib/markdown-diff.ts`: rendered Markdown block comparisons.

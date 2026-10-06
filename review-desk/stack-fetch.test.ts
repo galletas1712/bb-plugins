@@ -133,3 +133,10 @@ test("a failed later file page is surfaced rather than treated as a complete sta
   };
   await assert.rejects(fetchPullRequestStack(run, input), /Could not fetch all files.*Rate limit exceeded/);
 });
+
+test("a native stack remains a stack when only one layer remains", async () => {
+  const run: GhRun = async () => stackPage(1, null);
+  const found = await fetchPullRequestStack(run, input);
+  assert.equal(found?.number, 7);
+  assert.equal(found?.entries.length, 1);
+});

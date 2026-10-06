@@ -21,7 +21,8 @@ import { EditableBody } from "./components/editable-body";
 import { MarkdownDiff } from "./components/markdown-diff";
 import { orderThreadComments } from "./lib/thread-comments";
 import { Button } from "@/components/ui/button";
-import { Icon, type IconName } from "@/components/ui/icon";
+import { PrMark, StatePill } from "./components/pr-status";
+import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { commentSelection, placeAnnotations, type CommentAnchor } from "./diff-annotations";
@@ -62,7 +63,7 @@ function payloadReview(payload: unknown): { reviewId: string; what: string } | n
 
 function confirmRemoveReview(multiple = false): boolean {
   return window.confirm(multiple
-    ? "Remove these reviews from Review Desk? The pull requests stay on GitHub."
+    ? "Remove this entire stack from Review Desk, including its local notes and pending comments? The pull requests stay on GitHub."
     : "Remove this review from Review Desk? The pull request stays on GitHub.");
 }
 
@@ -376,39 +377,6 @@ function SyncNotice({ reviewId, message, onRefresh }: { reviewId: string; messag
       finally { setBusy(false); }
     }}>{busy ? "Refreshing…" : "Retry"}</Button>
   </div>;
-}
-
-function StatePill({ state, isDraft }: { state: string; isDraft: boolean }) {
-  const label = isDraft ? "Draft" : state === "OPEN" ? "Open" : state === "MERGED" ? "Merged" : state === "CLOSED" ? "Closed" : state.toLowerCase();
-  const tone = isDraft ? "border-border text-muted-foreground" : state === "OPEN" ? "border-primary/40 bg-primary/10 text-primary" : state === "MERGED" ? "border-foreground/30 bg-foreground/10 text-foreground" : "border-destructive/40 bg-destructive/10 text-destructive";
-  return <span className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium", tone)}><Icon name={prStatusIcon(state, { isDraft })} className="size-3" />{label}</span>;
-}
-
-
-
-function prStatusIcon(state: string, opts?: { isDraft?: boolean; merged?: boolean }): Extract<IconName, "GitMerge" | "GitPullRequestDraft" | "GitPullRequestClosed" | "GitPullRequest"> {
-  if (opts?.merged || state === "MERGED") return "GitMerge";
-  if (opts?.isDraft) return "GitPullRequestDraft";
-  if (state !== "OPEN") return "GitPullRequestClosed";
-  return "GitPullRequest";
-}
-
-function prStatusTone(state: string, opts?: { isDraft?: boolean; merged?: boolean }): string {
-  return state === "OPEN" && !opts?.isDraft && !opts?.merged ? "text-primary" : "text-muted-foreground";
-}
-
-function PrMark({ state, isDraft, merged, className }: { state: string; isDraft?: boolean; merged?: boolean; className?: string }) {
-  const title = merged || state === "MERGED" ? "Merged" : isDraft ? "Draft" : state === "OPEN" ? "Open" : state;
-  return (
-    <span title={title} className="inline-flex shrink-0">
-      <Icon name={prStatusIcon(state, { isDraft, merged })} className={cn("size-3.5", prStatusTone(state, { isDraft, merged }), className)} />
-    </span>
-  );
-}
-
-function ApprovalMark({ reviewDecision }: { reviewDecision: string | null }) {
-  if (reviewDecision !== "APPROVED") return null;
-  return <span role="img" aria-label="Approved" title="Approved" className="inline-flex shrink-0 text-emerald-600 dark:text-emerald-400"><Icon name="Check" className="size-3.5" /></span>;
 }
 
 function CountBadge({ count, title }: { count: number; title: string }) {
@@ -1104,17 +1072,18 @@ function StackSelector({ review, stack, compact, opening, onOpen }: {
   const currentButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { currentButton.current?.scrollIntoView({ block: "nearest" }); }, [review.number, compact, stack.entries.length]);
   if (compact) return <div className="flex shrink-0 items-center gap-3 border-b border-border px-3 py-2 text-xs">
-    <label className="flex min-w-0 flex-1 items-center gap-3">
-      <span className="shrink-0 text-muted-foreground">Stack</span>
-      <select aria-label="Pull request in stack" value={review.number} disabled={opening !== null}
-        className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2"
-        onChange={(event) => {
-          const entry = stack.entries.find((item) => item.number === Number(event.target.value));
-          if (entry && entry.number !== review.number) onOpen(entry);
-        }}>
-        {stack.entries.map((entry) => <option key={entry.number} value={entry.number} aria-label={`${entry.reviewDecision === "APPROVED" ? "Approved, " : ""}#${entry.number} ${entry.title}`}>{entry.reviewDecision === "APPROVED" ? "✅ " : ""}#{entry.number} {entry.title}</option>)}
-      </select>
-    </label>
+    <details className="relative min-w-0 flex-1">
+      <summary aria-label="Pull request in stack" className="flex cursor-pointer list-none items-center gap-2 rounded-md border border-input bg-background px-2 py-1.5">
+        <PrMark state={review.state} isDraft={review.isDraft} reviewDecision={review.reviewDecision} />
+        <span className="min-w-0 flex-1 truncate">#{review.number} {review.title}</span><Icon name="ChevronDown" className="size-3.5" />
+      </summary>
+      <nav aria-label="Pull requests in stack" className="absolute left-0 right-0 z-40 mt-1 max-h-80 overflow-y-auto rounded-md border border-border bg-card p-1 shadow-lg">
+        {stack.entries.map((entry) => <button key={entry.number} type="button" disabled={opening !== null} aria-current={entry.number === review.number ? "page" : undefined} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-state-hover" onClick={(event) => {
+          event.currentTarget.closest("details")?.removeAttribute("open");
+          if (entry.number !== review.number) onOpen(entry);
+        }}><PrMark state={entry.state} isDraft={entry.isDraft} merged={entry.merged} reviewDecision={entry.reviewDecision} /><span className="min-w-0 truncate">#{entry.number} {entry.title}</span></button>)}
+      </nav>
+    </details>
     {opening !== null ? <Icon name="Loading" className="size-3.5 shrink-0 animate-spin" aria-label="Opening pull request" /> : <span className="shrink-0 tabular-nums text-muted-foreground">{stack.currentPosition}/{stack.entries.length}</span>}
   </div>;
   return <aside aria-label="Pull request stack" className="flex min-h-0 w-52 shrink-0 flex-col border-r border-border bg-card">
@@ -1131,11 +1100,10 @@ function StackSelector({ review, stack, compact, opening, onOpen }: {
             onClick={() => { if (!current) onOpen(entry); }}
             className={cn("flex w-full items-start gap-2 rounded-md px-2 py-2.5 text-left text-xs", current ? "bg-state-active" : "hover:bg-state-hover", (entry.merged || entry.state !== "OPEN") && !current && "text-muted-foreground")}
             title={entry.title}>
-            <span className="mt-0.5 shrink-0">{opening === entry.number ? <Icon name="Loading" className="size-3.5 animate-spin" aria-label="Opening pull request" /> : <PrMark state={entry.state} isDraft={entry.isDraft} merged={entry.merged} />}</span>
+            <span className="mt-0.5 shrink-0">{opening === entry.number ? <Icon name="Loading" className="size-3.5 animate-spin" aria-label="Opening pull request" /> : <PrMark state={entry.state} reviewDecision={entry.reviewDecision} isDraft={entry.isDraft} merged={entry.merged} />}</span>
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1.5">
                 <span className="font-mono text-muted-foreground">#{entry.number}</span>
-                <ApprovalMark reviewDecision={entry.reviewDecision} />
               </span>
               <span className="mt-0.5 line-clamp-2 break-words leading-relaxed">{entry.title}</span>
             </span>
@@ -1228,7 +1196,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
       <div className="flex flex-wrap items-center gap-3 text-xs">
         <button type="button" className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground" onClick={() => navigate.toPluginPanel(PANEL_PATH)}><Icon name="ChevronLeft" className="size-3.5" />Reviews</button>
         <span className="text-muted-foreground">{review.owner}/{review.repo} #{review.number}</span>
-        <StatePill state={review.state} isDraft={review.isDraft} />
+        <StatePill state={review.state} reviewDecision={review.reviewDecision} isDraft={review.isDraft} />
         <div className="ml-auto flex items-center gap-2">
           <Button size="sm" onClick={() => { setReviewOpened(true); setReviewOpen(true); }}>Submit review{pending.length > 0 ? " (" + pending.length + ")" : ""}</Button>
           <details className="relative">
@@ -1236,7 +1204,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
             <div className="absolute right-0 z-30 mt-2 w-48 rounded-md border border-border bg-card p-1 shadow-lg">
               <button type="button" disabled={busy} className="w-full rounded px-3 py-2 text-left hover:bg-state-hover" onClick={() => void run(() => rpc.call("reviews_sync", { reviewId }))}>Refresh from GitHub</button>
               <button type="button" disabled={busy} className="w-full rounded px-3 py-2 text-left hover:bg-state-hover" onClick={() => void run(() => rpc.call("review_set_draft", { reviewId, draft: !review.isDraft }))}>{review.isDraft ? "Mark ready" : "Convert to draft"}</button>
-              <button type="button" disabled={busy} className="w-full rounded px-3 py-2 text-left text-destructive hover:bg-state-hover" onClick={() => { if (confirmRemoveReview()) void run(async () => { await rpc.call("reviews_remove", { reviewId }); navigate.toPluginPanel(PANEL_PATH); }); }}>Remove review</button>
+              <button type="button" disabled={busy} className="w-full rounded px-3 py-2 text-left text-destructive hover:bg-state-hover" onClick={() => { if (confirmRemoveReview(stack !== null)) void run(async () => { await rpc.call("reviews_remove", { reviewId }); navigate.toPluginPanel(PANEL_PATH); }); }}>{stack ? "Remove stack" : "Remove review"}</button>
             </div>
           </details>
         </div>
@@ -1715,16 +1683,16 @@ function ReviewForm({ reviewId, detail, rpc, refetch, onJump, onSubmitted }: {
 
 function groupReviews(reviews: ReviewSummary[]): { key: string; stack: ReviewSummary["stack"]; items: ReviewSummary[] }[] {
   const groups: { key: string; stack: ReviewSummary["stack"]; items: ReviewSummary[] }[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<ReviewSummary>();
   for (const review of reviews) {
-    if (seen.has(review.id)) continue;
+    if (seen.has(review)) continue;
     if (review.stack === null) {
-      seen.add(review.id);
-      groups.push({ key: review.id, stack: null, items: [review] });
+      seen.add(review);
+      groups.push({ key: `${review.owner}/${review.repo}#${review.number}`, stack: null, items: [review] });
       continue;
     }
     const items = reviews.filter((other) => other.stack?.key === review.stack?.key).sort((a, b) => (a.stack?.position ?? 0) - (b.stack?.position ?? 0));
-    for (const item of items) seen.add(item.id);
+    for (const item of items) seen.add(item);
     groups.push({ key: review.stack.key, stack: review.stack, items });
   }
   return groups;
@@ -1739,15 +1707,25 @@ function ReviewsPage({ subPath }: { subPath: string }) {
   const [openError, setOpenError] = useState<string | null>(null);
   const { reviewId, commit } = parseReviewSubPath(subPath);
   if (reviewId !== null) return <ReviewView key={reviewId} reviewId={reviewId} commit={commit} />;
-  const drop = async (ids: string[], multiple = false) => {
-    if (!confirmRemoveReview(multiple)) return;
+  const drop = async (review: ReviewSummary) => {
+    if (!confirmRemoveReview(review.stack !== null)) return;
     try {
-      for (const id of ids) await rpc.call("reviews_remove", { reviewId: id });
+      if (review.stack) await rpc.call("stacks_remove", { key: review.stack.key });
+      else if (review.id) await rpc.call("reviews_remove", { reviewId: review.id });
       refetch();
-      toast.success(ids.length === 1 ? "Removed from Review Desk" : `Removed ${ids.length} reviews`);
-    } catch (cause) {
-      toast.error(describeError(cause));
-    }
+      toast.success("Removed from Review Desk");
+    } catch (cause) { toast.error(describeError(cause)); }
+  };
+  const openSummary = async (summary: ReviewSummary) => {
+    if (summary.id) { navigate.toPluginPanel(PANEL_PATH, { subPath: summary.id }); return; }
+    setOpening(true);
+    setOpenError(null);
+    try {
+      const { review } = await rpc.call("reviews_open", { ref: `${summary.owner}/${summary.repo}#${summary.number}` });
+      refetch();
+      navigate.toPluginPanel(PANEL_PATH, { subPath: review.id });
+    } catch (cause) { setOpenError(describeError(cause)); }
+    finally { setOpening(false); }
   };
   const open = async (e: FormEvent) => {
     e.preventDefault();
@@ -1788,19 +1766,18 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                   return (
                     <li key={group.key} className="overflow-hidden rounded-lg border border-border">
                       <div className="flex items-center">
-                        <button type="button" onClick={() => navigate.toPluginPanel(PANEL_PATH, { subPath: r.id })} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-state-hover">
-                          <PrMark state={r.state} isDraft={r.isDraft} className="size-4" />
+                        <button type="button" disabled={opening} onClick={() => void openSummary(r)} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-state-hover">
+                          <PrMark state={r.state} reviewDecision={r.reviewDecision} isDraft={r.isDraft} className="size-4" />
                           <span className="min-w-0 flex-1">
                             <span className="block truncate text-sm font-medium">{r.title}</span>
                             <span className="flex items-center gap-2 truncate text-xs text-muted-foreground">
                               <span className="truncate">{r.owner}/{r.repo} #{r.number}</span>
-                              <ApprovalMark reviewDecision={r.reviewDecision} />
                               <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
                             </span>
                           </span>
                           <span className="shrink-0 text-xs text-muted-foreground">{timeAgo(r.updatedAt)}</span>
                         </button>
-                        <RemoveReviewButton label="Remove review" onClick={() => void drop([r.id])} />
+                        <RemoveReviewButton label="Remove review" onClick={() => void drop(r)} />
                       </div>
                     </li>
                   );
@@ -1812,34 +1789,32 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                 return (
                   <li key={group.key} className="overflow-hidden rounded-lg border border-border">
                     <div className="flex items-center">
-                      <button type="button" onClick={() => navigate.toPluginPanel(PANEL_PATH, { subPath: latest.id })} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-state-hover">
-                        <Icon name="GitPullRequestArrow" className={cn("size-4 shrink-0", latest.state === "OPEN" ? "text-primary" : "text-muted-foreground")} />
+                      <button type="button" disabled={opening} onClick={() => void openSummary(latest)} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-state-hover">
+                        <PrMark state={latest.state} isDraft={latest.isDraft} reviewDecision={latest.reviewDecision} className="size-4" />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-medium">{latest.title}</span>
                           <span className="flex items-center gap-2 truncate text-xs text-muted-foreground">
                             <span className="truncate">{latest.owner}/{latest.repo}</span>
                             {stackInfo.number !== null ? <span className="font-mono" title={`GitHub stack #${stackInfo.number}`}>#{stackInfo.number}</span> : null}
-                            <LayerMark position={group.items.length} size={stackInfo.size} title={`${group.items.length} of ${stackInfo.size} layers opened`} />
+                            <span className="inline-flex items-center gap-1" title={`${stackInfo.size} pull requests in stack`}><Icon name="Layers" className="size-3.5" />{stackInfo.size} PRs</span>
                             <CountBadge count={group.items.reduce((n, r) => n + r.pendingCount, 0)} title="Pending comments" />
                           </span>
                         </span>
                         <span className="shrink-0 text-xs text-muted-foreground">{timeAgo(latest.updatedAt)}</span>
                       </button>
-                      <RemoveReviewButton label="Remove stack reviews" onClick={() => void drop(group.items.map((item) => item.id), true)} />
+                      <RemoveReviewButton label="Remove stack reviews" onClick={() => void drop(latest)} />
                     </div>
                     <ul className="divide-y divide-border/60 border-t border-border/60">
                       {layers.map((r) => (
-                        <li key={r.id}>
+                        <li key={r.number}>
                           <div className="flex items-center">
-                            <button type="button" onClick={() => navigate.toPluginPanel(PANEL_PATH, { subPath: r.id })} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-1.5 pl-11 text-left hover:bg-state-hover">
+                            <button type="button" disabled={opening} onClick={() => void openSummary(r)} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-1.5 pl-11 text-left hover:bg-state-hover">
                               <span className="w-8 shrink-0 font-mono text-[11px] text-muted-foreground">{r.stack?.position}/{stackInfo.size}</span>
                               <span className="w-12 shrink-0 font-mono text-xs">#{r.number}</span>
                               <span className="min-w-0 flex-1 truncate text-xs">{r.title}</span>
-                              <PrMark state={r.state} isDraft={r.isDraft} />
-                              <ApprovalMark reviewDecision={r.reviewDecision} />
+                              <PrMark state={r.state} reviewDecision={r.reviewDecision} isDraft={r.isDraft} />
                               <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
                             </button>
-                            <RemoveReviewButton label={`Remove #${r.number}`} onClick={() => void drop([r.id])} />
                           </div>
                         </li>
                       ))}
