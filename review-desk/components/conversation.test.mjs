@@ -161,13 +161,23 @@ test("moved files appear at both explorer locations and selecting either keeps t
   window.localStorage.clear(); window.localStorage.setItem("review-desk:file-tree", "true");
   const previousWidth = window.innerWidth; window.innerWidth = 500;
   const moved = { path: "new/beta.ts", oldPath: "old/alpha.ts", status: "renamed", additions: 0, deletions: 0, binary: false, viewed: false, threadCount: 0, unresolvedCount: 0, pendingCount: 0 };
-  const slot = mountReview({ ...detail, files: [moved] });
+  const slot = mountReview({ ...detail, files: [moved, { ...moved, path: "added.ts", oldPath: null, status: "added" }, { ...moved, path: "deleted.ts", oldPath: null, status: "deleted" }] });
   try {
     await slot.findByRole("complementary", { name: "Changed files" });
-    const old = await slot.findByRole("button", { name: /alpha.ts.*old/ });
-    const current = slot.getByRole("button", { name: /beta.ts.*new/ });
+    const old = await slot.findByRole("button", { name: /alpha.ts.*Deleted/ });
+    const current = slot.getByRole("button", { name: /beta.ts.*Added/ });
     assert.equal(old.title, "old/alpha.ts → new/beta.ts");
     assert.equal(current.title, old.title);
+    for (const row of [old, slot.getByRole("button", { name: /deleted.ts.*Deleted/ })]) {
+      const marker = row.querySelector("[aria-label=Deleted]");
+      assert.equal(marker.textContent, "D");
+      assert.ok(marker.className.includes("text-red-600"));
+    }
+    for (const row of [current, slot.getByRole("button", { name: /added.ts.*Added/ })]) {
+      const marker = row.querySelector("[aria-label=Added]");
+      assert.equal(marker.textContent, "U");
+      assert.ok(marker.className.includes("text-emerald-600"));
+    }
     fireEvent.click(old);
     assert.ok(slot.getByRole("complementary", { name: "Changed files" }));
     fireEvent.click(current);
@@ -177,7 +187,7 @@ test("moved files appear at both explorer locations and selecting either keeps t
     assert.ok(patches.length > 0);
     assert.ok(patches.every((call) => call.input.path === "new/beta.ts"));
     fireEvent.change(slot.getByRole("textbox", { name: "Filter files" }), { target: { value: "old/alpha" } });
-    assert.ok(slot.getByRole("button", { name: /alpha.ts.*old/ }));
-    assert.equal(slot.queryByRole("button", { name: /beta.ts.*new/ }), null);
+    assert.ok(slot.getByRole("button", { name: /alpha.ts.*Deleted/ }));
+    assert.equal(slot.queryByRole("button", { name: /beta.ts.*Added/ }), null);
   } finally { slot.lifecycle.unmount(); window.innerWidth = previousWidth; window.localStorage.clear(); }
 });

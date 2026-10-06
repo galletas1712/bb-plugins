@@ -1299,6 +1299,8 @@ function FileTreeRows({
           );
         }
         const active = selected === node.file.path;
+        const deleted = node.location === "old" || node.file.status === "deleted";
+        const added = node.location === "new" || node.file.status === "added" || node.file.status === "copied";
         return (
           <li key={node.path}>
             <button
@@ -1309,7 +1311,7 @@ function FileTreeRows({
               title={node.location === null ? node.path : `${node.file.oldPath} → ${node.file.path}`}
             >
               <span className="min-w-0 flex-1 truncate">{node.name}</span>
-              {node.location ? <span className="shrink-0 text-[10px] text-muted-foreground">{node.location}</span> : null}
+              {deleted || added ? <span className={cn("shrink-0 font-mono text-[10px] font-semibold", deleted ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400")} aria-label={deleted ? "Deleted" : "Added"} title={deleted ? "Deleted" : "Added"}>{deleted ? "D" : "U"}</span> : null}
               {node.file.unresolvedCount > 0 ? <Icon name="MessageSquare" className="size-3 shrink-0 text-muted-foreground" aria-label={`${node.file.unresolvedCount} unresolved threads`} /> : null}
               {node.location !== "old" ? <DiffStat additions={node.file.additions} deletions={node.file.deletions} /> : null}
             </button>
