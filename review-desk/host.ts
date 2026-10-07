@@ -263,8 +263,8 @@ export default experimental_defineHostEntry({
       }
       return { isDraft: draft };
     },
-    async gh_stack({ owner, repo, number, stackNumber }) {
-      return { stack: await fetchPullRequestStack(run, { owner, repo, number, stackNumber }) };
+    async gh_stack(input) {
+      return { stack: await fetchPullRequestStack(run, input) };
     },
     async gh_resolve({ threadId, resolve }) {
       const mutation = resolve

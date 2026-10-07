@@ -258,6 +258,7 @@ export const hostContract = defineRpcContract({
       repo: z.string(),
       number: z.number().nullable(),
       stackNumber: z.number().nullable(),
+      metadataOnly: z.boolean().optional(),
     }),
     output: z.object({ stack: prStackSchema.nullable() }),
   },

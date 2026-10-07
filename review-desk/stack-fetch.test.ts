@@ -7,11 +7,11 @@ const result = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "",
 const variable = (args: string[], name: string) => args.find((arg) => arg.startsWith(`${name}=`))?.slice(name.length + 1);
 const pr = (number: number) => ({
   number, title: `PR ${number}`, state: "OPEN", isDraft: false, url: `https://github.com/o/r/pull/${number}`,
-  additions: 1, deletions: 0, changedFiles: 1, reviewDecision: null,
+  additions: 1, deletions: 0, changedFiles: 1, reviewDecision: null as string | null,
   headRefName: `branch-${number}`, headRefOid: `sha-${number}`, baseRefName: number === 1 ? "main" : `branch-${number - 1}`, mergedAt: null,
   files: { pageInfo: pageInfo(), nodes: [{ path: `file-${number}.ts` }] },
 });
-const stackPage = (number: number, after: string | null, pullRequest = pr(number)) => result({
+const stackPage = (number: number, after: string | null, pullRequest: Partial<ReturnType<typeof pr>> = pr(number)) => result({
   data: { repository: { pullRequest: { stack: {
     number: 7, baseRefName: "main", entries: {
       pageInfo: pageInfo(after), nodes: [{ position: number, pullRequest }],
@@ -139,4 +139,25 @@ test("a native stack remains a stack when only one layer remains", async () => {
   const found = await fetchPullRequestStack(run, input);
   assert.equal(found?.number, 7);
   assert.equal(found?.entries.length, 1);
+});
+
+test("metadata polling paginates stack membership without downloading file lists or zero-diff PRs individually", async () => {
+  let calls = 0;
+  const run: GhRun = async (_cmd, args) => {
+    calls++;
+    assert.ok(args.includes("graphql"));
+    assert.ok(!(variable(args, "query") ?? "").includes("files("));
+    const number = variable(args, "after") ? 2 : 1;
+    const { files: _files, ...metadata } = pr(number);
+    return stackPage(number, number === 1 ? "next" : null, {
+      ...metadata, additions: number === 1 ? 0 : 20, changedFiles: number === 1 ? 0 : 500,
+      reviewDecision: number === 2 ? "APPROVED" : null,
+    });
+  };
+  const stack = await fetchPullRequestStack(run, { ...input, metadataOnly: true });
+  assert.equal(calls, 2);
+  assert.deepEqual(stack?.entries.map((entry) => entry.number), [1, 2]);
+  assert.equal(stack?.entries[1].additions, 20);
+  assert.equal(stack?.entries[1].reviewDecision, "APPROVED");
+  assert.deepEqual(stack?.entries[1].files, []);
 });

@@ -12,15 +12,21 @@ async function fixture() {
   const remotePrs = new Map<number, Partial<GhPr>>();
   let snapshot: PrStack | null = stack([1, 2, 3]);
   let onStack: (() => Promise<void> | void) | undefined;
+  let onDetails: (() => Promise<void> | void) | undefined;
+  let onStatus: (() => Promise<void> | void) | undefined;
   const calls: { method: string; input: any }[] = [];
   let { bb, harness } = createFakePluginHost({ pluginId: "review-desk", sdk: { projects: { list: async () => [] }, hosts: { list: async () => [makeHostResponse({ id: "host", status: "connected" })] } }, experimental_callHostRpc: async ({ method, input }) => {
     const args = input as any;
     calls.push({ method, input });
     switch (method) {
-      case "gh_pr": case "gh_pr_status": return { ...pr(args.number), ...remotePrs.get(args.number) };
-      case "gh_pr_details": return { commits: [], labels: [], checks: [], reviewers: [], assignees: [] };
+      case "gh_pr": case "gh_pr_status": {
+        const result = { ...pr(args.number), ...remotePrs.get(args.number) };
+        if (method === "gh_pr_status") await onStatus?.();
+        return result;
+      }
+      case "gh_pr_details": await onDetails?.(); return { commits: [], labels: [], checks: [], reviewers: [], assignees: [] };
       case "repo_clone": return { repoPath: "/repo" };
-      case "repo_prepare": return { worktree: `/repo/${args.number}`, headSha: args.headSha, baseSha: "base" };
+      case "repo_prepare": return { worktree: `/repo/${args.number}`, headSha: args.headSha, baseSha: remotePrs.get(args.number)?.baseRefOid ?? "base" };
       case "repo_release": return { ok: true };
       case "git_files": return { files };
       case "gh_threads": return { threads: [] };
@@ -33,7 +39,7 @@ async function fixture() {
   const rpc = (method: string, input: unknown) => harness.behavior.callRpc(method, input);
   const open = async (number: number) => (await rpc("reviews_open", { ref: `o/r#${number}` }) as any).review;
   const list = async () => (await rpc("reviews_list", null) as { reviews: ReviewSummary[] }).reviews;
-  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; } };
+  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; }, onDetails: (fn: typeof onDetails) => { onDetails = fn; }, onStatus: (fn: typeof onStatus) => { onStatus = fn; } };
 }
 
 test("Recent includes unopened layers and refreshed metadata, preserves detached drafts, and survives reload", async () => {
@@ -60,7 +66,7 @@ test("Recent includes unopened layers and refreshed metadata, preserves detached
     assert.equal(listed.find((r) => r.number === 1)?.pendingCount, 1);
     await f.reload();
     assert.deepEqual((await f.list()).filter((r) => r.stack).map((r) => r.number).sort(), [2, 3, 4]);
-    assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, 1);
+    assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, 2);
   } finally { await f.harness.lifecycle.dispose(); }
 });
 
@@ -72,7 +78,7 @@ test("background refresh follows the stack number after every opened PR leaves",
     await f.rpc("reviews_sync", { reviewId: first.id });
     f.setStack(stack([4, 5]));
     Date.now = () => now() + 120_000;
-    const service = f.harness.behavior.runService("sync-open-reviews");
+    const service = f.harness.behavior.runService("sync-stacks");
     f.onStack(() => { if (f.calls.at(-1)?.input.stackNumber === 7) service.controller.abort(); });
     await service.done;
     assert.deepEqual((await f.list()).filter((r) => r.stack).map((r) => r.number).sort(), [4, 5]);
@@ -165,6 +171,7 @@ test("PR and stack summaries use rename-aware cached totals and retain GitHub to
       { path: "new/edited.ts", oldPath: "old/edited.ts", status: "renamed", additions: 3, deletions: 2, binary: false },
     ]);
     const snapshot = stack([1, 2, 3]);
+    f.setPr(1, { additions: 1000, deletions: 1000 });
     snapshot.entries[0].additions = 1000; snapshot.entries[0].deletions = 1000;
     snapshot.entries[1].additions = 17; snapshot.entries[1].deletions = 5;
     f.setStack(snapshot);
@@ -185,4 +192,84 @@ test("PR and stack summaries use rename-aware cached totals and retain GitHub to
     await f.rpc("reviews_sync", { reviewId: first.id });
     assert.equal((await f.list()).find((r) => r.number === 1)?.additions, 0);
   } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("base-tip pushes refresh the diff with an unchanged head and forced sync repairs a stale cache", async () => {
+  const f = await fixture(); const now = Date.now;
+  try {
+    f.setFiles([{ path: "a.ts", oldPath: null, status: "modified", additions: 1, deletions: 0, binary: false }]);
+    const first = await f.open(1);
+    f.setPr(1, { baseRefOid: "new-base", additions: 9 });
+    f.setFiles([{ path: "a.ts", oldPath: null, status: "modified", additions: 9, deletions: 0, binary: false }]);
+    Date.now = () => now() + 20_000;
+    const service = f.harness.behavior.runService("sync-open-reviews");
+    f.onDetails(() => service.controller.abort());
+    await service.done;
+    const detail = await f.rpc("reviews_get", { reviewId: first.id }) as any;
+    assert.equal(detail.review.headSha, first.headSha);
+    assert.equal(detail.review.baseSha, "new-base");
+    assert.equal(detail.review.additions, 9);
+    assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, 2);
+    // A merge-base cache from a different comparison must never be reused.
+    const db = f.bb.storage.database();
+    db.prepare("UPDATE files_cache SET base_sha = 'old-base', json = '[]' WHERE review_id = ?").run(first.id);
+    assert.equal((await f.rpc("reviews_get", { reviewId: first.id }) as any).files[0].additions, 9);
+    f.setFiles([{ path: "a.ts", oldPath: null, status: "modified", additions: 12, deletions: 0, binary: false }]);
+    await f.rpc("reviews_sync", { reviewId: first.id });
+    assert.equal((await f.rpc("reviews_get", { reviewId: first.id }) as any).review.additions, 12);
+  } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("stack polling updates membership and counts while review details are blocked", async () => {
+  const f = await fixture(); const now = Date.now;
+  let release!: () => void;
+  try {
+    const first = await f.open(1);
+    let entered!: () => void;
+    const pending = new Promise<void>((resolve) => { entered = resolve; });
+    f.onDetails(() => new Promise<void>((resolve) => { release = resolve; entered(); }));
+    f.setPr(1, { additions: 8, headRefOid: "pushed-head" });
+    f.setFiles([{ path: "a.ts", oldPath: null, status: "added", additions: 8, deletions: 0, binary: false }]);
+    Date.now = () => now() + 20_000;
+    const reviews = f.harness.behavior.runService("sync-open-reviews");
+    await pending;
+    // File counts are published before the heavy query finishes.
+    assert.equal((await f.rpc("reviews_get", { reviewId: first.id }) as any).review.additions, 8);
+    const next = stack([1, 2, 3, 4]);
+    Date.now = () => now() + 40_000;
+    next.entries[0].headSha = "pushed-head";
+    next.entries[0].additions = 11; // Same head, newer remote comparison.
+    next.entries[3].additions = 29;
+    next.entries[3].reviewDecision = "APPROVED";
+    f.setStack(next);
+    const stacks = f.harness.behavior.runService("sync-stacks");
+    f.onStack(() => stacks.controller.abort());
+    await stacks.done;
+    const list = await f.list();
+    assert.equal(list.find((r) => r.number === 1)?.additions, 11);
+    assert.equal(list.find((r) => r.number === 4)?.additions, 29);
+    assert.equal(list.find((r) => r.number === 4)?.reviewDecision, "APPROVED");
+    assert.equal(f.calls.at(-1)?.input.metadataOnly, true);
+    reviews.controller.abort(); release(); await reviews.done;
+  } finally { release?.(); Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("a manual refresh waits for a normal sync and then fetches the latest push", async () => {
+  const f = await fixture(); const now = Date.now;
+  let release!: () => void;
+  try {
+    const first = await f.open(1);
+    let entered!: () => void;
+    const pending = new Promise<void>((resolve) => { entered = resolve; });
+    f.onStatus(() => new Promise<void>((resolve) => { release = resolve; entered(); }));
+    Date.now = () => now() + 20_000;
+    await f.rpc("reviews_get", { reviewId: first.id });
+    await pending;
+    const manual = f.rpc("reviews_sync", { reviewId: first.id });
+    f.setPr(1, { headRefOid: "pushed-head" });
+    f.onStatus(undefined); release();
+    const result = await manual as any;
+    assert.equal(result.review.headSha, "pushed-head");
+    assert.equal(result.headChanged, true);
+  } finally { release?.(); Date.now = now; await f.harness.lifecycle.dispose(); }
 });

@@ -191,3 +191,74 @@ test("moved files appear at both explorer locations and selecting either keeps t
     assert.equal(slot.queryByRole("button", { name: /beta.ts.*Added/ }), null);
   } finally { slot.lifecycle.unmount(); window.innerWidth = previousWidth; window.localStorage.clear(); }
 });
+
+test("Recent refreshes on focus, reconnect and visible polling without accepting older responses", async () => {
+  const previousInterval = window.setInterval;
+  const previousClear = window.clearInterval;
+  const timers = new Map();
+  let nextTimer = 0;
+  window.setInterval = (callback, delay) => { assert.equal(delay, 15_000); timers.set(++nextTimer, callback); return nextTimer; };
+  window.clearInterval = (id) => timers.delete(id);
+  let current = summaries;
+  let deferred = null;
+  const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: {
+    reviews_list: () => deferred ?? { reviews: current },
+  } });
+  try {
+    await slot.findAllByText("Approved layer");
+    let release;
+    deferred = new Promise((resolve) => { release = resolve; });
+    await act(async () => { window.dispatchEvent(new window.Event("focus")); });
+    deferred = null;
+    current = [{ ...summaries[0], title: "New PR title", additions: 99, stack: null }];
+    await act(async () => { window.dispatchEvent(new window.Event("focus")); });
+    await slot.findByText("New PR title");
+    await act(async () => { release({ reviews: summaries }); });
+    assert.equal(slot.queryByText("Approved layer"), null);
+    assert.ok(slot.getByLabelText("Diff: 99 additions, 2 deletions"));
+    current = [{ ...current[0], title: "Reconnected PR" }];
+    await act(async () => {
+      await slot.behavior.setRealtimeConnectionState("reconnecting");
+      await slot.behavior.setRealtimeConnectionState("connected");
+    });
+    await slot.findByText("Reconnected PR");
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    current = [{ ...current[0], title: "Polled PR" }];
+    await act(async () => { for (const callback of timers.values()) callback(); });
+    await slot.findByText("Polled PR");
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    current = [{ ...current[0], title: "Hidden PR" }];
+    await act(async () => { for (const callback of timers.values()) callback(); });
+    assert.equal(slot.queryByText("Hidden PR"), null);
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    await act(async () => { document.dispatchEvent(new window.Event("visibilitychange")); });
+    await slot.findByText("Hidden PR");
+  } finally {
+    slot.lifecycle.unmount();
+    assert.equal(timers.size, 0);
+    window.setInterval = previousInterval; window.clearInterval = previousClear;
+    delete document.visibilityState;
+  }
+});
+
+test("returning to a PR refreshes counts and reloads its patch after head or base changes", async () => {
+  const file = { path: "a.ts", oldPath: null, status: "modified", additions: 1, deletions: 0, binary: false, viewed: false, threadCount: 0, unresolvedCount: 0, pendingCount: 0 };
+  let current = { ...detail, threads: [], review: { ...review, additions: 1 }, files: [file] };
+  let patches = 0;
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => current, review_seen: () => ({ ok: true }),
+    review_patch: () => { patches++; return { patch: "", file }; },
+  } });
+  try {
+    await slot.findAllByLabelText("Diff: 1 additions, 0 deletions");
+    const before = patches;
+    current = { ...current, review: { ...current.review, headSha: "new-head", additions: 8 }, files: [{ ...file, additions: 8 }] };
+    await act(async () => { window.dispatchEvent(new window.Event("focus")); });
+    await slot.findAllByLabelText("Diff: 8 additions, 0 deletions");
+    assert.equal(patches, before + 1);
+    current = { ...current, review: { ...current.review, baseSha: "new-base", additions: 3 }, files: [{ ...file, additions: 3 }] };
+    await act(async () => { window.dispatchEvent(new window.Event("focus")); });
+    await slot.findAllByLabelText("Diff: 3 additions, 0 deletions");
+    assert.equal(patches, before + 2);
+  } finally { slot.lifecycle.unmount(); }
+});

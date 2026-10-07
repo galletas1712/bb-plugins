@@ -20,6 +20,7 @@ import {
   type GhPr,
   type GhThread,
   type PrStack,
+  type PrStackEntry,
 } from "./host-contract";
 
 // ---------------------------------------------------------------------------
@@ -362,11 +363,13 @@ const MIGRATIONS = [
    )`,
   `ALTER TABLE helpers ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
   `CREATE TABLE IF NOT EXISTS tracked_stacks (key TEXT PRIMARY KEY, owner TEXT NOT NULL, repo TEXT NOT NULL, host_id TEXT NOT NULL, json TEXT NOT NULL, fetched_at INTEGER NOT NULL, opened_at INTEGER NOT NULL)`,
+  `ALTER TABLE reviews ADD COLUMN base_ref_sha TEXT NOT NULL DEFAULT ''`,
+  `ALTER TABLE files_cache ADD COLUMN base_sha TEXT NOT NULL DEFAULT ''`,
 ];
 
 interface ReviewRow {
   id: string; owner: string; repo: string; number: number; title: string; body: string; state: string; is_draft: number; url: string; author: string | null;
-  base_ref: string; head_ref: string; head_sha: string; base_sha: string; additions: number; deletions: number; changed_files: number;
+  base_ref: string; base_ref_sha: string; head_ref: string; head_sha: string; base_sha: string; additions: number; deletions: number; changed_files: number;
   review_decision: string | null; mergeable: string | null; labels_json: string; checks_json: string; reviewers_json: string; assignees_json: string; commits_json: string; gh_created_at: string;
   worktree: string; environment_id: string | null; host_id: string; repo_path: string; project_id: string | null; gh_updated_at: string; synced_at: number; created_at: number; updated_at: number;
 }
@@ -393,14 +396,15 @@ function createStore(db: Database.Database) {
       `UPDATE reviews SET title = ?, body = ?, state = ?, is_draft = ?, author = ?, base_ref = ?, head_ref = ?, head_sha = ?, base_sha = ?, additions = ?, deletions = ?, changed_files = ?, review_decision = ?, mergeable = ?, labels_json = ?, checks_json = ?, reviewers_json = ?, assignees_json = ?, commits_json = ?, gh_created_at = ?, worktree = ?, gh_updated_at = ?, synced_at = ?, updated_at = ? WHERE id = ?`,
     ),
     setSyncedAt: db.prepare<[number, string]>(`UPDATE reviews SET synced_at = ? WHERE id = ?`),
+    setBaseRefSha: db.prepare<[string, string]>(`UPDATE reviews SET base_ref_sha = ? WHERE id = ?`),
     setDraft: db.prepare<[number, number, string]>(`UPDATE reviews SET is_draft = ?, updated_at = ? WHERE id = ?`),
     setBody: db.prepare<[string, number, string]>(`UPDATE reviews SET body = ?, updated_at = ? WHERE id = ?`),
     setClosed: db.prepare<[string, number, string, string | null, string, number, number, string]>(
       `UPDATE reviews SET state = ?, is_draft = ?, title = ?, review_decision = ?, gh_updated_at = ?, synced_at = ?, updated_at = ? WHERE id = ?`,
     ),
     deleteReview: db.prepare<[string]>(`DELETE FROM reviews WHERE id = ?`),
-    filesCache: db.prepare<[string], { head_sha: string; json: string }>(`SELECT head_sha, json FROM files_cache WHERE review_id = ?`),
-    setFilesCache: db.prepare<[string, string, string]>(`INSERT INTO files_cache (review_id, head_sha, json) VALUES (?, ?, ?) ON CONFLICT(review_id) DO UPDATE SET head_sha = excluded.head_sha, json = excluded.json`),
+    filesCache: db.prepare<[string], { head_sha: string; base_sha: string; json: string }>(`SELECT head_sha, base_sha, json FROM files_cache WHERE review_id = ?`),
+    setFilesCache: db.prepare<[string, string, string, string]>(`INSERT INTO files_cache (review_id, head_sha, base_sha, json) VALUES (?, ?, ?, ?) ON CONFLICT(review_id) DO UPDATE SET head_sha = excluded.head_sha, base_sha = excluded.base_sha, json = excluded.json`),
     viewed: db.prepare<[string], { path: string }>(`SELECT path FROM viewed WHERE review_id = ?`),
     setViewed: db.prepare<[string, string, number]>(`INSERT OR REPLACE INTO viewed (review_id, path, viewed_at) VALUES (?, ?, ?)`),
     unsetViewed: db.prepare<[string, string]>(`DELETE FROM viewed WHERE review_id = ? AND path = ?`),
@@ -669,6 +673,13 @@ export default async function plugin(bb: BbPluginApi) {
 
   function storeStack(owner: string, repo: string, number: number, stack: PrStack | null, hostId: string, previousKey?: string): void {
     const previous = previousKey === undefined ? stacks.forPr(owner, repo, number) : stacks.get(previousKey);
+    if (stack !== null && previous) {
+      stack = { ...stack, entries: stack.entries.map((entry) => {
+        const old = previous.stack.entries.find((e) => e.number === entry.number);
+        return entry.files.length === 0 && entry.changedFiles > 0 && old?.headSha === entry.headSha
+          ? { ...entry, files: old.files } : entry;
+      }) };
+    }
     if (stack === null) {
       if (previous) stacks.remove(previous.key);
     } else {
@@ -710,11 +721,12 @@ export default async function plugin(bb: BbPluginApi) {
     }, q.reviewByKey.get(owner, repo, number)!.host_id);
   }
 
-  const stackRefresh = new Map<string, Promise<void>>();
+  const stackRefresh = new Map<string, { work: Promise<void>; forced: boolean }>();
   const stackFailures = new Map<string, { at: number; error: unknown }>();
-  const reviewSync = new Map<string, Promise<{ review: Review; headChanged: boolean }>>();
-  const SYNC_EVERY_MS = 60_000;
-  const STACK_FRESH_MS = 60_000;
+  const reviewSync = new Map<string, { work: Promise<{ review: Review; headChanged: boolean }>; forced: boolean }>();
+  const SYNC_EVERY_MS = 15_000;
+  const STACK_FRESH_MS = 15_000;
+  const REVIEW_SWEEP_MS = 60_000;
   const DETAILS_EVERY_MS = 5 * 60_000;
 
   function stackFetchedAt(owner: string, repo: string, number: number): number | null {
@@ -737,15 +749,20 @@ export default async function plugin(bb: BbPluginApi) {
     if (!force && failure && Date.now() - failure.at < SYNC_EVERY_MS) throw failure.error;
     if (!force && !failure && Date.now() - (tracked?.fetchedAt ?? stackFetchedAt(owner, repo, number) ?? 0) < STACK_FRESH_MS) return;
     const inflight = stackRefresh.get(key);
-    if (inflight !== undefined) return inflight;
+    if (inflight !== undefined) {
+      if (!force || inflight.forced) return inflight.work;
+      await inflight.work.catch(() => undefined);
+      if (tracked && stacks.get(tracked.key) === undefined) return;
+      return refreshStackSnapshot(owner, repo, number, hostId, tracked ? stacks.get(tracked.key) : stacks.forPr(owner, repo, number), true);
+    }
     const work = (async () => {
       try {
         const probe = tracked?.stack.entries.find((entry) => entry.state === "OPEN" && !entry.merged) ?? tracked?.stack.entries[0];
         // Use the bulk GraphQL query normally. Fall back to the stable stack number
         // if the probe PR left the stack, so membership changes do not lose tracking.
-        let result = await host.call("gh_stack", { owner, repo, number: probe?.number ?? number, stackNumber: null }, { hostId });
+        let result = await host.call("gh_stack", { owner, repo, number: probe?.number ?? number, stackNumber: null, metadataOnly: !force }, { hostId });
         if (tracked?.stack.number != null && result.stack?.number !== tracked.stack.number) {
-          result = await host.call("gh_stack", { owner, repo, number: null, stackNumber: tracked.stack.number }, { hostId });
+          result = await host.call("gh_stack", { owner, repo, number: null, stackNumber: tracked.stack.number, metadataOnly: !force }, { hostId });
         }
         // Removing a stack while a refresh runs must not bring it back.
         if (tracked ? stacks.get(tracked.key) !== undefined : q.reviewByKey.get(owner, repo, number) !== undefined) {
@@ -759,7 +776,7 @@ export default async function plugin(bb: BbPluginApi) {
         stackRefresh.delete(key);
       }
     })();
-    stackRefresh.set(key, work);
+    stackRefresh.set(key, { work, forced: force });
     return work;
   }
 
@@ -788,7 +805,7 @@ export default async function plugin(bb: BbPluginApi) {
         const local = q.reviewByKey.get(row.owner, row.repo, entry.number);
         return {
           ...entry,
-          ...(local?.head_sha === entry.headSha ? reviewStats(local) : {}),
+          ...stackEntryStats(local, entry),
           reviewId: local?.id ?? null,
           pendingCount: local === undefined ? 0 : q.pending.all(local.id).length,
           viewedCount: local === undefined ? 0 : q.viewed.all(local.id).length,
@@ -824,13 +841,13 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function refreshFiles(row: ReviewRow): Promise<ChangedFile[]> {
     const result = await host.call("git_files", { worktree: row.worktree, baseSha: row.base_sha, headSha: row.head_sha }, hostOptions(row));
-    q.setFilesCache.run(row.id, row.head_sha, JSON.stringify(result.files));
+    q.setFilesCache.run(row.id, row.head_sha, row.base_sha, JSON.stringify(result.files));
     return result.files;
   }
 
   function cachedFiles(row: ReviewRow): ChangedFile[] | null {
     const cache = q.filesCache.get(row.id);
-    if (cache === undefined || cache.head_sha !== row.head_sha) return null;
+    if (cache === undefined || cache.head_sha !== row.head_sha || cache.base_sha !== row.base_sha) return null;
     return parseJson<ChangedFile[]>(cache.json, []);
   }
 
@@ -843,15 +860,21 @@ export default async function plugin(bb: BbPluginApi) {
     return files === null ? { additions: row.additions, deletions: row.deletions } : diffStats(files);
   }
 
+  function stackEntryStats(local: ReviewRow | undefined, entry: PrStackEntry) {
+    // A base push can change totals before local Git catches up, with the same head.
+    return local?.head_sha === entry.headSha && local.additions === entry.additions && local.deletions === entry.deletions
+      ? reviewStats(local) : { additions: entry.additions, deletions: entry.deletions };
+  }
+
   function applyPr(row: ReviewRow, pr: GhPr, prepared: { worktree: string; headSha: string; baseSha: string }): void {
     const now = Date.now();
-    detailsRefreshedAt.set(row.id, now);
     q.updateReviewMeta.run(
       pr.title, pr.body, pr.state, pr.isDraft ? 1 : 0, pr.author?.login ?? null, pr.baseRefName, pr.headRefName, prepared.headSha, prepared.baseSha,
       pr.additions, pr.deletions, pr.changedFiles, pr.reviewDecision, pr.mergeable, JSON.stringify(pr.labels), JSON.stringify(pr.checks),
       JSON.stringify(pr.reviewers), JSON.stringify(pr.assignees), JSON.stringify(pr.commits), pr.createdAt,
       prepared.worktree, pr.updatedAt, now, now, row.id,
     );
+    q.setBaseRefSha.run(pr.baseRefOid, row.id);
   }
 
   async function openPr(owner: string, repo: string, number: number): Promise<Review> {
@@ -873,9 +896,10 @@ export default async function plugin(bb: BbPluginApi) {
     const now = Date.now();
     q.insertReview.run(id, owner, repo, number, pr.title, pr.url, prepared.worktree, located.hostId, located.repoPath, located.projectId, now, now, now);
     applyPr(requireReview(id), pr, prepared);
+    detailsRefreshedAt.set(id, now);
     const row = requireReview(id);
     await refreshFiles(row);
-    await refreshStack(row);
+    await refreshStack(row, true);
     publish(id, "opened");
     return toReview(row);
   }
@@ -902,7 +926,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function syncReview(reviewId: string, force = false): Promise<{ review: Review; headChanged: boolean }> {
     const inflight = reviewSync.get(reviewId);
-    if (inflight !== undefined) return inflight;
+    if (inflight !== undefined) {
+      if (!force || inflight.forced) return inflight.work;
+      await inflight.work.catch(() => undefined);
+      return syncReview(reviewId, true);
+    }
     const work = (async () => {
       try {
         const result = await syncReviewOnce(reviewId, force);
@@ -915,7 +943,7 @@ export default async function plugin(bb: BbPluginApi) {
         reviewSync.delete(reviewId);
       }
     })();
-    reviewSync.set(reviewId, work);
+    reviewSync.set(reviewId, { work, forced: force });
     return work;
   }
 
@@ -939,7 +967,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { review: toReview(requireReview(reviewId)), headChanged: false };
     }
     const headChanged = pr.headRefOid !== row.head_sha;
-    const baseMoved = pr.baseRefName !== row.base_ref;
+    const baseMoved = pr.baseRefName !== row.base_ref || pr.baseRefOid !== row.base_ref_sha;
     const touched = force || syncErrors.has(reviewId) || headChanged || baseMoved || pr.updatedAt !== row.gh_updated_at || pr.title !== row.title || pr.body !== row.body || pr.state !== row.state || pr.isDraft !== (row.is_draft === 1) || (pr.reviewDecision ?? null) !== row.review_decision || q.threadsCache.get(row.id) === undefined;
     const detailsDue = Date.now() - (detailsRefreshedAt.get(reviewId) ?? 0) >= DETAILS_EVERY_MS;
     if (!touched && !detailsDue) {
@@ -947,27 +975,38 @@ export default async function plugin(bb: BbPluginApi) {
       await refreshStack(row);
       return { review: toReview(requireReview(reviewId)), headChanged: false };
     }
-    const details = await host.call("gh_pr_details", {
-      owner: row.owner, repo: row.repo, number: row.number,
-      includeCommits: force || headChanged || !detailsRefreshedAt.has(reviewId),
-    }, hostOptions(row));
     const key = `${row.owner}__${row.repo}__${row.number}`;
-    const prepared = headChanged || baseMoved || row.worktree === ""
+    const prepared = force || headChanged || baseMoved || row.worktree === ""
       ? await host.call(
           "repo_prepare",
           { repoPath: row.repo_path, number: row.number, headSha: pr.headRefOid, baseRefName: pr.baseRefName, worktreesDir: "", key },
           hostOptions(row),
         )
       : { worktree: row.worktree, headSha: pr.headRefOid, baseSha: row.base_sha };
-    applyPr(row, { ...pr, ...details, commits: details.commits ?? parseJson<Review["commits"]>(row.commits_json, []) }, prepared);
+    const retainedDetails = {
+      labels: parseJson<Review["labels"]>(row.labels_json, []),
+      checks: parseJson<Review["checks"]>(row.checks_json, []),
+      reviewers: parseJson<Review["reviewers"]>(row.reviewers_json, []),
+      assignees: parseJson<Review["assignees"]>(row.assignees_json, []),
+      commits: parseJson<Review["commits"]>(row.commits_json, []),
+    };
+    applyPr(row, { ...pr, ...retainedDetails }, prepared);
     const fresh = requireReview(reviewId);
-    if (headChanged || baseMoved || cachedFiles(fresh) === null) await refreshFiles(fresh);
+    if (force || headChanged || baseMoved || cachedFiles(fresh) === null) await refreshFiles(fresh);
+    // Publish the new diff before slower checks, commits and conversation queries.
+    publish(reviewId, wasOpen ? "synced" : "reopened");
+    const details = await host.call("gh_pr_details", {
+      owner: row.owner, repo: row.repo, number: row.number,
+      includeCommits: force || headChanged || !detailsRefreshedAt.has(reviewId),
+    }, hostOptions(row));
+    applyPr(fresh, { ...pr, ...details, commits: details.commits ?? retainedDetails.commits }, prepared);
+    detailsRefreshedAt.set(reviewId, Date.now());
     await refreshThreads(fresh);
     await reanchorNotes(fresh);
     await refreshConversation(fresh);
     await refreshStack(fresh, force);
     publish(reviewId, wasOpen ? "synced" : "reopened");
-    return { review: toReview(fresh), headChanged };
+    return { review: toReview(q.review.get(reviewId) ?? fresh), headChanged };
   }
 
   /** After a push, move open notes to the line whose content they were written against, or mark them stale. */
@@ -1215,7 +1254,7 @@ export default async function plugin(bb: BbPluginApi) {
               id: local?.id ?? null, owner: tracked.owner, repo: tracked.repo,
               number: entry.number, title: entry.title, state: entry.merged ? "MERGED" : entry.state,
               isDraft: entry.isDraft, reviewDecision: entry.reviewDecision, headSha: entry.headSha,
-              ...(local?.head_sha === entry.headSha ? reviewStats(local) : { additions: entry.additions, deletions: entry.deletions }),
+              ...stackEntryStats(local, entry),
               pendingCount: local ? q.pending.all(local.id).length : 0,
               updatedAt: local?.updated_at ?? tracked.openedAt,
               stack: { number: tracked.stack.number, position: entry.position, size: tracked.stack.entries.length, key: tracked.key },
@@ -1462,23 +1501,35 @@ export default async function plugin(bb: BbPluginApi) {
     async start(signal) {
       while (!signal.aborted) {
         const started = Date.now();
+        const queue = q.reviews.all();
         await Promise.all(
-          q.reviews.all().map(async (row) => {
-            try {
-              await syncReview(row.id);
-            } catch (cause) {
-              bb.log.warn(`sync ${row.owner}/${row.repo}#${row.number}: ${errorMessage(cause)}`);
+          Array.from({ length: 4 }, async () => {
+            while (queue.length > 0 && !signal.aborted) {
+              const row = queue.shift()!;
+              try { await syncReview(row.id); }
+              catch (cause) { bb.log.warn(`sync ${row.owner}/${row.repo}#${row.number}: ${errorMessage(cause)}`); }
             }
           }),
         );
-        for (const tracked of stacks.list()) {
+        await sleep(Math.max(0, REVIEW_SWEEP_MS - (Date.now() - started)), signal);
+      }
+    },
+  });
+
+  // Keep membership and totals updating while review Git or conversation work is slow.
+  bb.background.service("sync-stacks", {
+    async start(signal) {
+      while (!signal.aborted) {
+        const started = Date.now();
+        await Promise.all(stacks.list().map(async (tracked) => {
           try {
             await refreshStackSnapshot(tracked.owner, tracked.repo, tracked.stack.entries[0]?.number ?? 0, tracked.hostId, tracked);
           } catch (cause) {
             bb.log.warn(`sync stack ${tracked.key}: ${errorMessage(cause)}`);
           }
-        }
-        await sleep(Math.max(0, SYNC_EVERY_MS - (Date.now() - started)), signal);
+        }));
+        discoverStacks(q.reviews.all().filter((row) => stacks.forPr(row.owner, row.repo, row.number) === undefined));
+        await sleep(Math.max(0, STACK_FRESH_MS - (Date.now() - started)), signal);
       }
     },
   });

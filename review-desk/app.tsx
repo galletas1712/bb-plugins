@@ -8,6 +8,7 @@ import {
   UrlLink,
   useBbNavigate,
   useRealtime,
+  useRealtimeConnectionState,
   useRpc,
   experimental_FileLink as FileLink,
   experimental_useCodeTheme as useCodeTheme,
@@ -315,20 +316,44 @@ function pickFileDiff(patch: string, path: string, oldPath: string | null): File
   }
 }
 
+function useRefreshFallback(refetch: () => void) {
+  const connection = useRealtimeConnectionState();
+  useEffect(() => {
+    const refreshVisible = () => { if (document.visibilityState !== "hidden") refetch(); };
+    const timer = window.setInterval(refreshVisible, 15_000);
+    window.addEventListener("focus", refreshVisible);
+    document.addEventListener("visibilitychange", refreshVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshVisible);
+      document.removeEventListener("visibilitychange", refreshVisible);
+    };
+  }, [refetch]);
+  const previousConnection = useRef(connection);
+  useEffect(() => {
+    if (connection === "connected" && previousConnection.current !== "connected") refetch();
+    previousConnection.current = connection;
+  }, [connection, refetch]);
+}
+
 function useReviews() {
   const rpc = useRpc<Contract>();
   const [reviews, setReviews] = useState<ReviewSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const generation = useRef(0);
   const refetch = useCallback(() => {
+    const request = ++generation.current;
     rpc.call("reviews_list").then(
       (result) => {
+        if (request !== generation.current) return;
         setReviews(result.reviews);
         setError(null);
       },
-      (cause: unknown) => setError(describeError(cause)),
+      (cause: unknown) => { if (request === generation.current) setError(describeError(cause)); },
     );
   }, [rpc]);
-  useEffect(refetch, [refetch]);
+  useEffect(() => { refetch(); return () => { generation.current++; }; }, [refetch]);
+  useRefreshFallback(refetch);
   useRealtime(REVIEW_CHANGED, refetch);
   return { reviews, error, refetch };
 }
@@ -369,6 +394,7 @@ function useReview(reviewId: string | null) {
     }
     refetch();
   });
+  useRefreshFallback(refetch);
   return { rpc, detail, error, refetch };
 }
 

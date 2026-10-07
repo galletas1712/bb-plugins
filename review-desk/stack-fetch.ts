@@ -278,8 +278,8 @@ async function graphqlStackWith(run: GhRun, query: string, owner: string, repo: 
   return { number: meta.number, baseRefName: meta.baseRefName || entries[0]?.baseRefName || "", source: "github", entries };
 }
 
-async function graphqlStack(run: GhRun, owner: string, repo: string, number: number): Promise<PrStack | null | "unsupported"> {
-  const full = await graphqlStackWith(run, STACK_QUERY, owner, repo, number);
+async function graphqlStack(run: GhRun, owner: string, repo: string, number: number, metadataOnly: boolean): Promise<PrStack | null | "unsupported"> {
+  const full = await graphqlStackWith(run, metadataOnly ? STACK_QUERY_LITE : STACK_QUERY, owner, repo, number);
   if (full !== "retry") return full;
   const lite = await graphqlStackWith(run, STACK_QUERY_LITE, owner, repo, number);
   return lite === "retry" ? "unsupported" : lite;
@@ -384,16 +384,16 @@ function mergeView(entry: PrStackEntry, view: PrView | null, files: string[]): P
   };
 }
 
-async function enrich(run: GhRun, owner: string, repo: string, entries: PrStackEntry[], { fetchReviewDecision = false }: { fetchReviewDecision?: boolean } = {}): Promise<PrStackEntry[]> {
+async function enrich(run: GhRun, owner: string, repo: string, entries: PrStackEntry[], { fetchReviewDecision = false, fetchFiles = true }: { fetchReviewDecision?: boolean; fetchFiles?: boolean } = {}): Promise<PrStackEntry[]> {
   return mapLimit(entries, 6, async (entry) => {
     // REST stack entries omit reviewDecision, even when their other metadata is complete.
-    const needsView = fetchReviewDecision || entry.title.startsWith("#") || entry.headSha === "" || entry.url === "" || entry.additions === 0 && entry.changedFiles === 0;
+    const needsView = fetchReviewDecision || entry.title.startsWith("#") || entry.headSha === "" || entry.url === "";
     const view = needsView ? await prView(run, owner, repo, entry.number) : null;
     if (needsView && view === null) throw new Error(`Could not fetch PR #${entry.number} in the stack`);
     const metadata = mergeView(entry, view, entry.files);
-    const files = metadata.files.length < metadata.changedFiles ? await prFiles(run, owner, repo, entry.number) : metadata.files;
+    const files = fetchFiles && metadata.files.length < metadata.changedFiles ? await prFiles(run, owner, repo, entry.number) : metadata.files;
     const merged = { ...metadata, files };
-    if (merged.files.length < merged.changedFiles) throw new Error(`GitHub returned only ${merged.files.length} of ${merged.changedFiles} files for PR #${entry.number}`);
+    if (fetchFiles && merged.files.length < merged.changedFiles) throw new Error(`GitHub returned only ${merged.files.length} of ${merged.changedFiles} files for PR #${entry.number}`);
     return merged;
   });
 }
@@ -466,7 +466,7 @@ async function defaultBranch(run: GhRun, owner: string, repo: string): Promise<s
   }
 }
 
-async function inferStack(run: GhRun, owner: string, repo: string, seed: number): Promise<PrStack | null> {
+async function inferStack(run: GhRun, owner: string, repo: string, seed: number, metadataOnly: boolean): Promise<PrStack | null> {
   const seedView = await prView(run, owner, repo, seed);
   if (seedView === null) return null;
   const trunk = await defaultBranch(run, owner, repo);
@@ -490,7 +490,7 @@ async function inferStack(run: GhRun, owner: string, repo: string, seed: number)
   }
   if (down.length < 2) return null;
   const entries = down.map((v, i) => viewToEntry(v, i + 1));
-  const enriched = await enrich(run, owner, repo, entries);
+  const enriched = await enrich(run, owner, repo, entries, { fetchFiles: !metadataOnly });
   return { number: null, baseRefName: trunk, source: "inferred", entries: enriched };
 }
 
@@ -501,23 +501,23 @@ async function inferStack(run: GhRun, owner: string, repo: string, seed: number)
  */
 export async function fetchPullRequestStack(
   run: GhRun,
-  input: { owner: string; repo: string; number: number | null; stackNumber: number | null },
+  input: { owner: string; repo: string; number: number | null; stackNumber: number | null; metadataOnly?: boolean },
 ): Promise<PrStack | null> {
-  const { owner, repo, number, stackNumber } = input;
+  const { owner, repo, number, stackNumber, metadataOnly = false } = input;
   if (stackNumber !== null) {
     const rest = await restStackByNumber(run, owner, repo, stackNumber);
     if (rest === "unsupported" || rest === null) return null;
     const stack = fromRest(rest);
     if (stack === null) return null;
-    stack.entries = await enrich(run, owner, repo, stack.entries, { fetchReviewDecision: true });
+    stack.entries = await enrich(run, owner, repo, stack.entries, { fetchReviewDecision: true, fetchFiles: !metadataOnly });
     return stack;
   }
   if (number === null) return null;
 
-  const gql = await graphqlStack(run, owner, repo, number);
+  const gql = await graphqlStack(run, owner, repo, number, metadataOnly);
   if (gql !== "unsupported") {
     if (gql === null) return null;
-    gql.entries = await enrich(run, owner, repo, gql.entries);
+    gql.entries = await enrich(run, owner, repo, gql.entries, { fetchFiles: !metadataOnly });
     return gql;
   }
 
@@ -526,9 +526,9 @@ export async function fetchPullRequestStack(
     if (rest === null) return null;
     const stack = fromRest(rest);
     if (stack === null) return null;
-    stack.entries = await enrich(run, owner, repo, stack.entries, { fetchReviewDecision: true });
+    stack.entries = await enrich(run, owner, repo, stack.entries, { fetchReviewDecision: true, fetchFiles: !metadataOnly });
     return stack;
   }
 
-  return inferStack(run, owner, repo, number);
+  return inferStack(run, owner, repo, number, metadataOnly);
 }
