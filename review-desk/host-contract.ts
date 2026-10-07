@@ -147,7 +147,19 @@ export const prStackSchema = z.object({
 });
 export type PrStack = z.infer<typeof prStackSchema>;
 
+export const ownPrsSchema = z.object({
+  login: z.string(),
+  prs: z.array(z.object({
+    owner: z.string(), repo: z.string(), number: z.number(), title: z.string(),
+    state: z.enum(["OPEN", "CLOSED", "MERGED"]), isDraft: z.boolean(),
+    headSha: z.string(), additions: z.number(), deletions: z.number(),
+    reviewDecision: z.string().nullable(), updatedAt: z.string(),
+  })),
+});
+export type OwnPrs = z.infer<typeof ownPrsSchema>;
+
 export const hostContract = defineRpcContract({
+  gh_own_prs: { input: z.null(), output: ownPrsSchema },
   /** Fetch the PR head and base, and keep a detached worktree at the head. */
   repo_prepare: {
     input: z.object({

@@ -262,3 +262,23 @@ test("returning to a PR refreshes counts and reloads its patch after head or bas
     assert.equal(patches, before + 2);
   } finally { slot.lifecycle.unmount(); }
 });
+
+test("unopened authored PRs can be opened or removed and discovery errors leave cached reviews visible", async () => {
+  const own = { ...summaries[3], id: null, title: "Authored draft", isDraft: true };
+  let removed = null; let opened = null;
+  const previousConfirm = window.confirm; window.confirm = () => true;
+  const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: {
+    reviews_list: () => ({ reviews: [own], discoveryError: "GitHub temporarily unavailable" }),
+    reviews_open: (input) => { opened = input; return { review }; },
+    reviews_remove: (input) => { removed = input; return { ok: true }; },
+  } });
+  try {
+    await slot.findByText("Authored draft");
+    assert.ok(slot.getByText("GitHub temporarily unavailable"));
+    assert.ok(slot.getByRole("img", { name: "Draft" }));
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: /Authored draft/ })); });
+    assert.deepEqual(opened, { ref: "o/r#4" });
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Remove review", exact: true })); });
+    assert.deepEqual(removed, { owner: "o", repo: "r", number: 4 });
+  } finally { slot.lifecycle.unmount(); window.confirm = previousConfirm; }
+});

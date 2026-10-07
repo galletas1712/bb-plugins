@@ -3,6 +3,7 @@
 Review GitHub pull requests inside bb with their original description, conversation, and diffs.
 
 - Open a PR URL, `owner/repo#123`, or `owner/repo/stack/N`.
+- Your authenticated GitHub account's open PRs appear automatically across all repositories, including drafts. Discovery checks every 15 seconds and excludes closed or merged PRs. Files load when you open a PR. Explicitly removed PRs stay hidden until reopened. Existing tracked stacks still show their complete set of layers.
 - Read the full conversation: issue comments, reviews, inline threads and replies, and timeline events. GitHub collections are paginated, including commits, checks, labels, assignees, and review requests.
 - Browse changed files in unified or side-by-side diff mode. Toggle the file explorer to choose files. Moved or renamed files appear at both their old and new locations. Deleted and old locations use a red D, and added and new locations use a green U. Current comments appear on their old/new diff lines. File comments, outdated threads, and comments outside the displayed hunks remain visible above the file. Threads on files no longer in the PR remain in Conversation.
 - Resolved and outdated threads sit inside collapsed dropdowns in each file diff and in Conversation. Open a dropdown, then expand individual threads as needed. Every comment and reply has its own show/hide control, with replies beneath their original comment. Review decisions without a message are labeled explicitly.

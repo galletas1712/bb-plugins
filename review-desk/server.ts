@@ -16,11 +16,13 @@ import {
   hostContract,
   prStackEntrySchema,
   prStackSchema,
+  ownPrsSchema,
   type ChangedFile,
   type GhPr,
   type GhThread,
   type PrStack,
   type PrStackEntry,
+  type OwnPrs,
 } from "./host-contract";
 
 // ---------------------------------------------------------------------------
@@ -143,7 +145,7 @@ const okSchema = z.object({ ok: z.literal(true) });
 const reviewIdSchema = z.object({ reviewId: z.string() });
 
 export const rpcContract = defineRpcContract({
-  reviews_list: { input: z.null(), output: z.object({ reviews: z.array(reviewSummarySchema) }) },
+  reviews_list: { input: z.null(), output: z.object({ reviews: z.array(reviewSummarySchema), discoveryError: z.string().nullable().default(null) }) },
   reviews_open: { input: z.object({ ref: z.string().trim().min(1) }), output: z.object({ review: reviewSchema }) },
   reviews_get: {
     input: reviewIdSchema,
@@ -160,7 +162,7 @@ export const rpcContract = defineRpcContract({
     }),
   },
   reviews_sync: { input: reviewIdSchema, output: z.object({ review: reviewSchema, headChanged: z.boolean() }) },
-  reviews_remove: { input: reviewIdSchema, output: okSchema },
+  reviews_remove: { input: z.union([reviewIdSchema, z.object({ owner: z.string(), repo: z.string(), number: z.number() })]), output: okSchema },
   stacks_remove: { input: z.object({ key: z.string() }), output: okSchema },
   review_patch: {
     input: z.object({ reviewId: z.string(), path: z.string() }),
@@ -365,6 +367,7 @@ const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS tracked_stacks (key TEXT PRIMARY KEY, owner TEXT NOT NULL, repo TEXT NOT NULL, host_id TEXT NOT NULL, json TEXT NOT NULL, fetched_at INTEGER NOT NULL, opened_at INTEGER NOT NULL)`,
   `ALTER TABLE reviews ADD COLUMN base_ref_sha TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE files_cache ADD COLUMN base_sha TEXT NOT NULL DEFAULT ''`,
+  `CREATE TABLE IF NOT EXISTS own_prs_cache (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL, fetched_at INTEGER NOT NULL)`,
 ];
 
 interface ReviewRow {
@@ -386,6 +389,8 @@ function newId(): string {
 function createStore(db: Database.Database) {
   const q = {
     reviews: db.prepare<[], ReviewRow>(`SELECT * FROM reviews ORDER BY updated_at DESC`),
+    ownPrsCache: db.prepare<[], { json: string; fetched_at: number }>(`SELECT json, fetched_at FROM own_prs_cache WHERE id = 1`),
+    setOwnPrsCache: db.prepare<[string, number]>(`INSERT INTO own_prs_cache (id, json, fetched_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at`),
     review: db.prepare<[string], ReviewRow>(`SELECT * FROM reviews WHERE id = ?`),
     reviewByKey: db.prepare<[string, string, number], ReviewRow>(`SELECT * FROM reviews WHERE owner = ? AND repo = ? AND number = ?`),
     insertReview: db.prepare<[string, string, string, number, string, string, string, string, string, string | null, number, number, number]>(
@@ -701,6 +706,7 @@ export default async function plugin(bb: BbPluginApi) {
     const removed: ReviewRow[] = [];
     db.transaction(() => {
       for (const entry of tracked.stack.entries) {
+        q.dismiss.run(tracked.owner, tracked.repo, entry.number);
         const local = q.reviewByKey.get(tracked.owner, tracked.repo, entry.number);
         if (local) { forgetReview(local, true); removed.push(local); }
         q.deleteStackCache.run(tracked.owner, tracked.repo, entry.number);
@@ -728,6 +734,34 @@ export default async function plugin(bb: BbPluginApi) {
   const STACK_FRESH_MS = 15_000;
   const REVIEW_SWEEP_MS = 60_000;
   const DETAILS_EVERY_MS = 5 * 60_000;
+
+  let ownPrRefresh: Promise<void> | undefined;
+  let ownPrAttemptAt = 0;
+  let ownPrError: string | null = null;
+  function cachedOwnPrs(): OwnPrs | null {
+    const parsed = ownPrsSchema.safeParse(parseJson(q.ownPrsCache.get()?.json ?? "null", null));
+    return parsed.success ? parsed.data : null;
+  }
+  async function refreshOwnPrs(): Promise<void> {
+    if (ownPrRefresh) return ownPrRefresh;
+    if (Date.now() - Math.max(ownPrAttemptAt, q.ownPrsCache.get()?.fetched_at ?? 0) < SYNC_EVERY_MS) return;
+    ownPrAttemptAt = Date.now();
+    ownPrRefresh = (async () => {
+      try {
+        const result = await host.call("gh_own_prs", null, { hostId: await primaryHostId() });
+        const next = { ...result, prs: result.prs.filter((pr) => prIsOpen(pr.state)) };
+        const changed = JSON.stringify(cachedOwnPrs()) !== JSON.stringify(next) || ownPrError !== null;
+        q.setOwnPrsCache.run(JSON.stringify(next), Date.now());
+        ownPrError = null;
+        if (changed) publish("", "own-prs");
+      } catch (cause) {
+        const error = errorMessage(cause);
+        if (ownPrError !== error) { ownPrError = error; publish("", "own-prs"); }
+        throw cause;
+      } finally { ownPrRefresh = undefined; }
+    })();
+    return ownPrRefresh;
+  }
 
   function stackFetchedAt(owner: string, repo: string, number: number): number | null {
     return stacks.forPr(owner, repo, number)?.fetchedAt ?? stackCacheRow(owner, repo, number)?.fetched_at ?? null;
@@ -860,7 +894,7 @@ export default async function plugin(bb: BbPluginApi) {
     return files === null ? { additions: row.additions, deletions: row.deletions } : diffStats(files);
   }
 
-  function stackEntryStats(local: ReviewRow | undefined, entry: PrStackEntry) {
+  function stackEntryStats(local: ReviewRow | undefined, entry: Pick<PrStackEntry, "headSha" | "additions" | "deletions">) {
     // A base push can change totals before local Git catches up, with the same head.
     return local?.head_sha === entry.headSha && local.additions === entry.additions && local.deletions === entry.deletions
       ? reviewStats(local) : { additions: entry.additions, deletions: entry.deletions };
@@ -1243,10 +1277,16 @@ export default async function plugin(bb: BbPluginApi) {
   // -- RPC -------------------------------------------------------------------
 
   bb.rpc.register(rpcContract, {
-    reviews_list: () => {
+    reviews_list: async () => {
+      const refreshing = refreshOwnPrs().catch(() => undefined);
+      if (cachedOwnPrs() === null) await refreshing;
+      const own = cachedOwnPrs();
       const rows = q.reviews.all();
+      const prKey = (pr: { owner: string; repo: string; number: number }) => `${pr.owner}/${pr.repo}#${pr.number}`;
+      const owned = new Set(own?.prs.map(prKey));
       discoverStacks(rows);
       return {
+        discoveryError: ownPrError,
         reviews: [
           ...stacks.list().flatMap((tracked): ReviewSummary[] => tracked.stack.entries.map((entry) => {
             const local = q.reviewByKey.get(tracked.owner, tracked.repo, entry.number);
@@ -1260,7 +1300,15 @@ export default async function plugin(bb: BbPluginApi) {
               stack: { number: tracked.stack.number, position: entry.position, size: tracked.stack.entries.length, key: tracked.key },
             };
           })),
-          ...rows.filter((row) => cachedPrStack(row.owner, row.repo, row.number) === null).map((row) => ({
+          ...(own?.prs ?? []).filter((pr) => cachedPrStack(pr.owner, pr.repo, pr.number) === null && !q.dismissed.get(pr.owner, pr.repo, pr.number)).map((pr): ReviewSummary => {
+            const local = q.reviewByKey.get(pr.owner, pr.repo, pr.number);
+            return {
+              ...pr, id: local?.id ?? null, ...stackEntryStats(local, pr),
+              pendingCount: local ? q.pending.all(local.id).length : 0,
+              updatedAt: Date.parse(pr.updatedAt), stack: null,
+            };
+          }),
+          ...rows.filter((row) => cachedPrStack(row.owner, row.repo, row.number) === null && !owned.has(prKey(row)) && row.author !== own?.login).map((row) => ({
             id: row.id,
             owner: row.owner,
             repo: row.repo,
@@ -1281,11 +1329,13 @@ export default async function plugin(bb: BbPluginApi) {
     reviews_open: async ({ ref }) => ({ review: await openReview(ref) }),
     reviews_get: ({ reviewId }) => reviewDetail(reviewId),
     reviews_sync: ({ reviewId }) => syncReview(reviewId, true),
-    reviews_remove: async ({ reviewId }) => {
-      const row = requireReview(reviewId);
-      const tracked = stacks.forPr(row.owner, row.repo, row.number);
+    reviews_remove: async (input) => {
+      const { owner, repo, number } = "reviewId" in input ? requireReview(input.reviewId) : input;
+      const row = q.reviewByKey.get(owner, repo, number);
+      const tracked = stacks.forPr(owner, repo, number);
       if (tracked) removeStack(tracked.key);
-      else dropReview(row, { dismiss: true, reason: "removed" });
+      else if (row) dropReview(row, { dismiss: true, reason: "removed" });
+      else { q.dismiss.run(owner, repo, number); publish("", "removed"); }
       return { ok: true as const };
     },
     stacks_remove: ({ key }) => { removeStack(key); return { ok: true as const }; },
@@ -1520,7 +1570,6 @@ export default async function plugin(bb: BbPluginApi) {
   bb.background.service("sync-stacks", {
     async start(signal) {
       while (!signal.aborted) {
-        const started = Date.now();
         await Promise.all(stacks.list().map(async (tracked) => {
           try {
             await refreshStackSnapshot(tracked.owner, tracked.repo, tracked.stack.entries[0]?.number ?? 0, tracked.hostId, tracked);
@@ -1529,7 +1578,17 @@ export default async function plugin(bb: BbPluginApi) {
           }
         }));
         discoverStacks(q.reviews.all().filter((row) => stacks.forPr(row.owner, row.repo, row.number) === undefined));
-        await sleep(Math.max(0, STACK_FRESH_MS - (Date.now() - started)), signal);
+        await sleep(STACK_FRESH_MS, signal);
+      }
+    },
+  });
+
+  bb.background.service("sync-own-prs", {
+    async start(signal) {
+      while (!signal.aborted) {
+        try { await refreshOwnPrs(); }
+        catch (cause) { bb.log.warn(`sync authored PRs: ${errorMessage(cause)}`); }
+        await sleep(SYNC_EVERY_MS, signal);
       }
     },
   });

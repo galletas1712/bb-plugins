@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createFakePluginHost, makeHostResponse } from "@get-bb/plugin-sdk/testing";
 import plugin, { type ReviewSummary } from "./server";
-import type { ChangedFile, GhPr, PrStack } from "./host-contract";
+import type { ChangedFile, GhPr, PrStack, OwnPrs } from "./host-contract";
 
 const pr = (number: number): GhPr => ({ number, title: `PR ${number}`, body: "Body", state: "OPEN", isDraft: false, url: `https://github.com/o/r/pull/${number}`, author: { login: "me" }, baseRefName: "main", headRefName: `branch-${number}`, headRefOid: `head-${number}`, baseRefOid: "base", additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, mergeable: null, updatedAt: "2026-10-06T00:00:00Z", createdAt: "2026-10-05T00:00:00Z", checks: [], labels: [], reviewers: [], assignees: [], commits: [] });
 const stack = (numbers: number[]): PrStack => ({ number: 7, baseRefName: "main", source: "github", entries: numbers.map((number, i) => ({ position: i + 1, number, title: `PR ${number}`, state: "OPEN", isDraft: false, merged: false, url: pr(number).url, additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, headRefName: `branch-${number}`, headSha: `head-${number}`, baseRefName: "main", files: [] })) });
@@ -14,11 +14,15 @@ async function fixture() {
   let onStack: (() => Promise<void> | void) | undefined;
   let onDetails: (() => Promise<void> | void) | undefined;
   let onStatus: (() => Promise<void> | void) | undefined;
+  let own: OwnPrs = { login: "viewer", prs: [] };
+  let ownError: string | null = null;
+  let onOwn: (() => void) | undefined;
   const calls: { method: string; input: any }[] = [];
   let { bb, harness } = createFakePluginHost({ pluginId: "review-desk", sdk: { projects: { list: async () => [] }, hosts: { list: async () => [makeHostResponse({ id: "host", status: "connected" })] } }, experimental_callHostRpc: async ({ method, input }) => {
     const args = input as any;
     calls.push({ method, input });
     switch (method) {
+      case "gh_own_prs": onOwn?.(); if (ownError) throw new Error(ownError); return own;
       case "gh_pr": case "gh_pr_status": {
         const result = { ...pr(args.number), ...remotePrs.get(args.number) };
         if (method === "gh_pr_status") await onStatus?.();
@@ -39,7 +43,7 @@ async function fixture() {
   const rpc = (method: string, input: unknown) => harness.behavior.callRpc(method, input);
   const open = async (number: number) => (await rpc("reviews_open", { ref: `o/r#${number}` }) as any).review;
   const list = async () => (await rpc("reviews_list", null) as { reviews: ReviewSummary[] }).reviews;
-  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; }, onDetails: (fn: typeof onDetails) => { onDetails = fn; }, onStatus: (fn: typeof onStatus) => { onStatus = fn; } };
+  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; }, onDetails: (fn: typeof onDetails) => { onDetails = fn; }, onStatus: (fn: typeof onStatus) => { onStatus = fn; }, setOwn: (next: OwnPrs) => { own = next; }, setOwnError: (error: string | null) => { ownError = error; }, onOwn: (fn: typeof onOwn) => { onOwn = fn; } };
 }
 
 test("Recent includes unopened layers and refreshed metadata, preserves detached drafts, and survives reload", async () => {
@@ -249,7 +253,7 @@ test("stack polling updates membership and counts while review details are block
     assert.equal(list.find((r) => r.number === 1)?.additions, 11);
     assert.equal(list.find((r) => r.number === 4)?.additions, 29);
     assert.equal(list.find((r) => r.number === 4)?.reviewDecision, "APPROVED");
-    assert.equal(f.calls.at(-1)?.input.metadataOnly, true);
+    assert.equal(f.calls.filter((call) => call.method === "gh_stack").at(-1)?.input.metadataOnly, true);
     reviews.controller.abort(); release(); await reviews.done;
   } finally { release?.(); Date.now = now; await f.harness.lifecycle.dispose(); }
 });
@@ -272,4 +276,73 @@ test("a manual refresh waits for a normal sync and then fetches the latest push"
     assert.equal(result.review.headSha, "pushed-head");
     assert.equal(result.headChanged, true);
   } finally { release?.(); Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+const ownPr = (number: number, repo = "r"): OwnPrs["prs"][number] => ({ owner: "o", repo, number, title: `Own PR ${number}`, state: "OPEN", isDraft: false, headSha: `head-${number}`, additions: number, deletions: 0, reviewDecision: null, updatedAt: "2026-10-07T00:00:00Z" });
+
+test("all authored open PRs appear lazily, deduplicate stacks and local reviews, survive reload, and retire without losing drafts", async () => {
+  const f = await fixture(); const now = Date.now;
+  let clock = now();
+  Date.now = () => clock;
+  const poll = async () => {
+    clock += 20_000;
+    const service = f.harness.behavior.runService("sync-own-prs");
+    f.onOwn(() => service.controller.abort());
+    await service.done; f.onOwn(undefined);
+  };
+  try {
+    await f.open(1);
+    f.setOwn({ login: "viewer", prs: [ownPr(1), { ...ownPr(4), isDraft: true, reviewDecision: "APPROVED" }, ownPr(4, "other"), { ...ownPr(5), state: "CLOSED" }, { ...ownPr(6), state: "MERGED" }] });
+    const listed = await f.list();
+    assert.equal(listed.filter((pr) => pr.repo === "r" && pr.number === 1).length, 1);
+    assert.equal(listed.find((pr) => pr.repo === "r" && pr.number === 4)?.isDraft, true);
+    assert.equal(listed.find((pr) => pr.repo === "r" && pr.number === 4)?.id, null);
+    assert.equal(listed.filter((pr) => pr.number === 4).length, 2);
+    assert.equal(listed.some((pr) => pr.number === 5 || pr.number === 6), false);
+    assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, 1);
+    f.setPr(4, { author: { login: "viewer" } });
+    const opened = await f.open(4);
+    await f.rpc("pending_add", { reviewId: opened.id, path: "a.ts", line: 1, side: "RIGHT", body: "Preserve my draft" });
+    assert.equal((await f.list()).filter((pr) => pr.repo === "r" && pr.number === 4).length, 1);
+    await f.reload();
+    assert.equal((await f.list()).find((pr) => pr.repo === "r" && pr.number === 4)?.id, opened.id);
+    f.setOwn({ login: "viewer", prs: [ownPr(1), ownPr(7)] });
+    await poll();
+    const next = await f.list();
+    assert.ok(next.some((pr) => pr.number === 7));
+    assert.equal(next.some((pr) => pr.number === 4), false);
+    assert.equal(f.bb.storage.database().prepare<[string], { n: number }>("SELECT COUNT(*) AS n FROM pending WHERE review_id = ?").get(opened.id)?.n, 1);
+  } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("automatic discovery respects removal of unopened PRs and entire stacks, and retains data on failure", async () => {
+  const f = await fixture(); const now = Date.now;
+  let clock = now(); Date.now = () => clock;
+  const poll = async () => {
+    clock += 20_000;
+    const service = f.harness.behavior.runService("sync-own-prs");
+    f.onOwn(() => service.controller.abort());
+    await service.done; f.onOwn(undefined);
+  };
+  try {
+    await f.open(1);
+    f.setOwn({ login: "viewer", prs: [ownPr(1), ownPr(2), ownPr(3), ownPr(4)] });
+    await f.list();
+    await f.rpc("reviews_remove", { owner: "o", repo: "r", number: 4 });
+    await f.rpc("stacks_remove", { key: "gh:o/r#7" });
+    await poll();
+    assert.deepEqual(await f.list(), []);
+    await f.reload();
+    assert.deepEqual(await f.list(), []);
+    f.setOwn({ login: "viewer", prs: [ownPr(8)] });
+    await poll();
+    f.setOwnError("GitHub unavailable");
+    await poll();
+    const result = await f.rpc("reviews_list", null) as any;
+    assert.equal(result.discoveryError, "GitHub unavailable");
+    assert.equal(result.reviews[0].number, 8);
+    f.setOwnError(null);
+    await poll();
+    assert.equal((await f.rpc("reviews_list", null) as any).discoveryError, null);
+  } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
 });

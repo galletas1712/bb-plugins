@@ -347,7 +347,7 @@ function useReviews() {
       (result) => {
         if (request !== generation.current) return;
         setReviews(result.reviews);
-        setError(null);
+        setError(result.discoveryError ?? null);
       },
       (cause: unknown) => { if (request === generation.current) setError(describeError(cause)); },
     );
@@ -1733,6 +1733,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
     try {
       if (review.stack) await rpc.call("stacks_remove", { key: review.stack.key });
       else if (review.id) await rpc.call("reviews_remove", { reviewId: review.id });
+      else await rpc.call("reviews_remove", { owner: review.owner, repo: review.repo, number: review.number });
       refetch();
       toast.success("Removed from Review Desk");
     } catch (cause) { toast.error(describeError(cause)); }
@@ -1777,8 +1778,9 @@ function ReviewsPage({ subPath }: { subPath: string }) {
         </form>
         {openError ? <p className="mt-2 text-sm text-destructive">{openError}</p> : null}
         <div className="mt-10">
-          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Recent</div>
-          {error ? <p className="text-sm text-destructive">{error}</p> : reviews === null ? <p className="text-sm text-muted-foreground">Loading…</p> : reviews.length === 0 ? <EmptyState>No reviews yet.</EmptyState> : (
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Pull requests</div>
+          {error ? <p className="mb-3 text-sm text-destructive">{error}</p> : null}
+          {reviews === null ? <p className="text-sm text-muted-foreground">Loading…</p> : reviews.length === 0 ? <EmptyState>No reviews yet.</EmptyState> : (
             <ul className="space-y-3">
               {groupReviews(reviews).map((group) => {
                 if (group.stack === null) {

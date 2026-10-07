@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { hostContract, type ChangedFile, type GhPrStatus } from "./host-contract";
 import { fetchPullRequestStack } from "./stack-fetch";
+import { fetchOwnPullRequests } from "./own-prs";
 import { editBody, readDescription } from "./lib/github-edit";
 import { fetchConversation, fetchPrMetadata, fetchReviewThreads } from "./github-conversation";
 
@@ -263,6 +264,7 @@ export default experimental_defineHostEntry({
       }
       return { isDraft: draft };
     },
+    gh_own_prs() { return fetchOwnPullRequests(run); },
     async gh_stack(input) {
       return { stack: await fetchPullRequestStack(run, input) };
     },
