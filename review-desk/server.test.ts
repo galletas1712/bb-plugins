@@ -61,15 +61,17 @@ test("Recent includes unopened layers and refreshed metadata, preserves detached
     f.setStack(next);
     await f.rpc("reviews_sync", { reviewId: first.id });
     const listed = await f.list();
-    assert.deepEqual(listed.filter((r) => r.stack).map((r) => r.number).sort(), [2, 3, 4]);
+    assert.deepEqual(listed.filter((r) => r.stack).map((r) => r.number).sort(), [2, 4]);
     assert.equal(listed.find((r) => r.number === 2)?.title, "Renamed and approved");
     assert.equal(listed.find((r) => r.number === 2)?.reviewDecision, "APPROVED");
-    assert.equal(listed.find((r) => r.number === 3)?.state, "MERGED");
+    assert.equal(listed.find((r) => r.number === 3), undefined);
+    assert.equal(listed.find((r) => r.number === 4)?.stack?.position, 2);
+    assert.equal(listed.find((r) => r.number === 4)?.stack?.size, 2);
     assert.equal(listed.find((r) => r.number === 4)?.isDraft, true);
     assert.equal(listed.find((r) => r.number === 1)?.stack, null);
     assert.equal(listed.find((r) => r.number === 1)?.pendingCount, 1);
     await f.reload();
-    assert.deepEqual((await f.list()).filter((r) => r.stack).map((r) => r.number).sort(), [2, 3, 4]);
+    assert.deepEqual((await f.list()).filter((r) => r.stack).map((r) => r.number).sort(), [2, 4]);
     assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, 2);
   } finally { await f.harness.lifecycle.dispose(); }
 });
@@ -363,4 +365,71 @@ test("review activity comes from GitHub rather than opening or syncing the local
     const after = await f.list();
     for (const number of [1, 2, 9]) assert.equal(after.find((pr) => pr.number === number)?.updatedAt, before.find((pr) => pr.number === number)?.updatedAt);
   } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("merged layers and completed stacks disappear from every read model without deleting drafts", async () => {
+  const f = await fixture();
+  try {
+    const first = await f.open(1); const second = await f.open(2);
+    await f.rpc("pending_add", { reviewId: first.id, path: "a.ts", line: 1, side: "RIGHT", body: "Keep after merge" });
+    const mixed = stack([1, 2, 3]);
+    mixed.entries[0].merged = true; // GitHub's merged flag also hides a stale OPEN state.
+    mixed.entries[0].additions = 1000;
+    mixed.entries[1].additions = 7;
+    mixed.entries[2].state = "CLOSED";
+    f.setStack(mixed); f.setPr(1, { state: "MERGED" });
+    await f.rpc("reviews_sync", { reviewId: first.id });
+    const visible = await f.list();
+    assert.deepEqual(visible.map((pr) => pr.number), [2]);
+    assert.equal(visible[0].additions, 7);
+    assert.deepEqual(visible[0].stack, { number: 7, position: 1, size: 1, key: "gh:o/r#7" });
+    const detail = await f.rpc("reviews_get", { reviewId: second.id }) as any;
+    assert.deepEqual(detail.stack.entries.map((pr: any) => pr.number), [2]);
+    assert.equal(detail.stack.entries[0].additions, 7);
+    assert.equal(detail.stack.currentPosition, 1);
+    await assert.rejects(f.rpc("reviews_get", { reviewId: first.id }), /closed/);
+    const merged = stack([1, 2, 3]);
+    for (const pr of merged.entries) pr.state = "MERGED";
+    f.setStack(merged); f.setPr(2, { state: "MERGED" });
+    await f.rpc("reviews_sync", { reviewId: second.id });
+    assert.deepEqual(await f.list(), []);
+    const preparations = f.calls.filter((call) => call.method === "repo_prepare").length;
+    await assert.rejects(f.rpc("reviews_open", { ref: "o/r/stack/7" }), /No open pull requests/);
+    await assert.rejects(f.open(1), /merged or closed/);
+    assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, preparations);
+    await f.reload();
+    assert.deepEqual(await f.list(), []);
+    const db = f.bb.storage.database();
+    assert.equal(db.prepare<[string], { n: number }>("SELECT COUNT(*) AS n FROM pending WHERE review_id = ?").get(first.id)?.n, 1);
+    assert.equal(db.prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM tracked_stacks").get()?.n, 1);
+    // Tracking stays intact so adding a new open layer brings the stack back.
+    f.setStack({ ...merged, entries: [...merged.entries, { ...stack([5]).entries[0], position: 4 }] });
+    await f.rpc("reviews_sync", { reviewId: second.id });
+    const reopened = await f.list();
+    assert.deepEqual(reopened.map((pr) => pr.number), [5]);
+    assert.equal(reopened[0].stack?.size, 1);
+    assert.equal(reopened[0].stack?.position, 1);
+  } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("local merge status overrides stale authored and stack snapshots and standalone completed PRs stay hidden", async () => {
+  const f = await fixture();
+  try {
+    const first = await f.open(1); const standalone = await f.open(4);
+    f.setOwn({ login: "viewer", prs: [ownPr(4)] });
+    await f.list();
+    // A status refresh may learn of the merge before either bulk snapshot refreshes.
+    const db = f.bb.storage.database();
+    db.prepare("UPDATE reviews SET state = 'MERGED' WHERE id IN (?, ?)").run(first.id, standalone.id);
+    assert.deepEqual((await f.list()).map((pr) => pr.number).sort(), [2, 3]);
+    const second = await f.open(2);
+    const detail = await f.rpc("reviews_get", { reviewId: second.id }) as any;
+    assert.deepEqual(detail.stack.entries.map((pr: any) => pr.number), [2, 3]);
+    assert.equal(detail.stack.currentPosition, 1);
+    f.setPr(9, { state: "CLOSED" });
+    await assert.rejects(f.open(9), /merged or closed/);
+    f.setPr(10, { state: "MERGED" });
+    await assert.rejects(f.open(10), /merged or closed/);
+    assert.equal(f.calls.some((call) => call.method === "repo_prepare" && [9, 10].includes(call.input.number)), false);
+  } finally { await f.harness.lifecycle.dispose(); }
 });

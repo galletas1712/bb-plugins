@@ -676,6 +676,22 @@ export default async function plugin(bb: BbPluginApi) {
     return stacks.forPr(owner, repo, number)?.stack ?? null;
   }
 
+  function reviewablePr(owner: string, repo: string, pr: { number: number; state: string; merged?: boolean }): boolean {
+    const local = q.reviewByKey.get(owner, repo, pr.number);
+    return prIsOpen(pr.state) && !pr.merged && (local === undefined || prIsOpen(local.state));
+  }
+
+  function activePrStack(owner: string, repo: string, stack: PrStack | null): PrStack | null {
+    if (stack === null) return null;
+    const entries = stack.entries.filter((entry) => reviewablePr(owner, repo, entry)).map((entry, index) => ({ ...entry, position: index + 1 }));
+    return entries.length === 0 ? null : { ...stack, entries };
+  }
+
+  function reviewIsActive(row: ReviewRow): boolean {
+    const entry = cachedPrStack(row.owner, row.repo, row.number)?.entries.find((entry) => entry.number === row.number);
+    return prIsOpen(row.state) && (entry === undefined || reviewablePr(row.owner, row.repo, entry));
+  }
+
   function storeStack(owner: string, repo: string, number: number, stack: PrStack | null, hostId: string, previousKey?: string): void {
     const previous = previousKey === undefined ? stacks.forPr(owner, repo, number) : stacks.get(previousKey);
     if (stack !== null && previous) {
@@ -829,12 +845,13 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function stackViewFor(row: ReviewRow): StackView | null {
-    const stack = cachedPrStack(row.owner, row.repo, row.number);
+    const stack = activePrStack(row.owner, row.repo, cachedPrStack(row.owner, row.repo, row.number));
     if (stack === null) return null;
     const current = stack.entries.find((e) => e.number === row.number);
+    if (current === undefined) return null;
     return {
       ...stack,
-      currentPosition: current?.position ?? 1,
+      currentPosition: current.position,
       entries: stack.entries.map((entry) => {
         const local = q.reviewByKey.get(row.owner, row.repo, entry.number);
         return {
@@ -916,10 +933,13 @@ export default async function plugin(bb: BbPluginApi) {
     const existing = q.reviewByKey.get(owner, repo, number);
     if (existing !== undefined) {
       await syncReview(existing.id);
-      return toReview(requireReview(existing.id));
+      const row = requireReview(existing.id);
+      if (!reviewIsActive(row)) throw new Error(`PR #${number} is already merged or closed`);
+      return toReview(row);
     }
     const located = await locateRepo(owner, repo);
     const pr = await host.call("gh_pr", { owner, repo, number }, { hostId: located.hostId });
+    if (!prIsOpen(pr.state)) throw new Error(`PR #${number} is already merged or closed`);
     const key = `${owner}__${repo}__${number}`;
     const prepared = await host.call(
       "repo_prepare",
@@ -934,6 +954,7 @@ export default async function plugin(bb: BbPluginApi) {
     const row = requireReview(id);
     await refreshFiles(row);
     await refreshStack(row, true);
+    if (!reviewIsActive(row)) throw new Error(`PR #${number} is already merged or closed`);
     publish(id, "opened");
     return toReview(row);
   }
@@ -951,8 +972,10 @@ export default async function plugin(bb: BbPluginApi) {
       if (result.stack === null || result.stack.entries.length === 0) {
         throw new Error(`no GitHub stack #${parsed.stackNumber} in ${parsed.owner}/${parsed.repo}`);
       }
+      const active = activePrStack(parsed.owner, parsed.repo, result.stack);
+      if (active === null) throw new Error(`No open pull requests remain in stack #${parsed.stackNumber}`);
       storeStack(parsed.owner, parsed.repo, result.stack.entries[0].number, result.stack, located.hostId);
-      const pick = result.stack.entries.find((e) => e.state === "OPEN" && !e.merged) ?? result.stack.entries[0];
+      const pick = active.entries[0];
       return openPr(parsed.owner, parsed.repo, pick.number);
     }
     return openPr(parsed.owner, parsed.repo, parsed.number);
@@ -1124,6 +1147,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function reviewDetail(reviewId: string) {
     const row = requireReview(reviewId);
+    if (!reviewIsActive(row)) throw new Error("closed");
     void syncReview(reviewId).catch(() => undefined);
     await ensureStack(row);
     const files = await filesFor(row);
@@ -1288,20 +1312,23 @@ export default async function plugin(bb: BbPluginApi) {
       return {
         discoveryError: ownPrError,
         reviews: [
-          ...stacks.list().flatMap((tracked): ReviewSummary[] => tracked.stack.entries.map((entry) => {
-            const local = q.reviewByKey.get(tracked.owner, tracked.repo, entry.number);
-            const activity = owned.get(prKey({ owner: tracked.owner, repo: tracked.repo, number: entry.number }))?.updatedAt ?? local?.gh_updated_at;
-            return {
-              id: local?.id ?? null, owner: tracked.owner, repo: tracked.repo,
-              number: entry.number, title: entry.title, state: entry.merged ? "MERGED" : entry.state,
-              isDraft: entry.isDraft, reviewDecision: entry.reviewDecision, headSha: entry.headSha,
-              ...stackEntryStats(local, entry),
-              pendingCount: local ? q.pending.all(local.id).length : 0,
-              updatedAt: Date.parse(activity ?? "") || tracked.openedAt,
-              stack: { number: tracked.stack.number, position: entry.position, size: tracked.stack.entries.length, key: tracked.key },
-            };
-          })),
-          ...(own?.prs ?? []).filter((pr) => cachedPrStack(pr.owner, pr.repo, pr.number) === null && !q.dismissed.get(pr.owner, pr.repo, pr.number)).map((pr): ReviewSummary => {
+          ...stacks.list().flatMap((tracked): ReviewSummary[] => {
+            const stack = activePrStack(tracked.owner, tracked.repo, tracked.stack);
+            return stack?.entries.map((entry) => {
+              const local = q.reviewByKey.get(tracked.owner, tracked.repo, entry.number);
+              const activity = owned.get(prKey({ owner: tracked.owner, repo: tracked.repo, number: entry.number }))?.updatedAt ?? local?.gh_updated_at;
+              return {
+                id: local?.id ?? null, owner: tracked.owner, repo: tracked.repo,
+                number: entry.number, title: entry.title, state: entry.state,
+                isDraft: entry.isDraft, reviewDecision: entry.reviewDecision, headSha: entry.headSha,
+                ...stackEntryStats(local, entry),
+                pendingCount: local ? q.pending.all(local.id).length : 0,
+                updatedAt: Date.parse(activity ?? "") || tracked.openedAt,
+                stack: { number: stack.number, position: entry.position, size: stack.entries.length, key: tracked.key },
+              };
+            }) ?? [];
+          }),
+          ...(own?.prs ?? []).filter((pr) => reviewablePr(pr.owner, pr.repo, pr) && cachedPrStack(pr.owner, pr.repo, pr.number) === null && !q.dismissed.get(pr.owner, pr.repo, pr.number)).map((pr): ReviewSummary => {
             const local = q.reviewByKey.get(pr.owner, pr.repo, pr.number);
             return {
               ...pr, id: local?.id ?? null, ...stackEntryStats(local, pr),
@@ -1309,7 +1336,7 @@ export default async function plugin(bb: BbPluginApi) {
               updatedAt: Date.parse(pr.updatedAt), stack: null,
             };
           }),
-          ...rows.filter((row) => cachedPrStack(row.owner, row.repo, row.number) === null && !owned.has(prKey(row)) && row.author !== own?.login).map((row) => ({
+          ...rows.filter((row) => prIsOpen(row.state) && cachedPrStack(row.owner, row.repo, row.number) === null && !owned.has(prKey(row)) && row.author !== own?.login).map((row) => ({
             id: row.id,
             owner: row.owner,
             repo: row.repo,
@@ -1524,7 +1551,7 @@ export default async function plugin(bb: BbPluginApi) {
             return ok(review, `Opened ${review.owner}/${review.repo}#${review.number} "${review.title}" as ${review.id} (${review.changedFiles} files, worktree ${review.worktree})`);
           }
           case "list": {
-            const rows = q.reviews.all().filter((r) => prIsOpen(r.state));
+            const rows = q.reviews.all().filter(reviewIsActive);
             return ok(rows.map(toReview), rows.length === 0 ? "No reviews." : rows.map((r) => `${r.id}  ${r.owner}/${r.repo}#${r.number}  ${r.title}  [${r.state}]`).join("\n"));
           }
           case "stack": {

@@ -15,9 +15,9 @@ bb review-desk list [--json]
 bb review-desk stack <reviewId> [--json]
 ```
 
-The repository host needs an authenticated `gh` CLI. Opening a PR creates a detached worktree for its diff. Stack metadata lists every layer; other layers open when selected. Comments and review submission belong to the selected PR.
+The repository host needs an authenticated `gh` CLI. Opening a PR creates a detached worktree for its diff. Stack navigation lists open layers; other open layers load when selected. Comments and review submission belong to the selected PR.
 
-Reviews automatically lists the authenticated account's open PRs across repositories, including drafts. Authored discovery and stack metadata poll every 15 seconds. Closed and merged PRs are excluded from automatic discovery. Existing tracked stacks retain all their layers. Explicitly removed PRs stay hidden until reopened, and discovery never deletes saved drafts or notes.
+Reviews automatically lists the authenticated account's open PRs across repositories, including drafts. Authored discovery and stack metadata poll every 15 seconds. Closed and merged PRs are hidden from the front page and stack navigation, and stacks with no open layers are hidden. Counts, positions, and totals include only open layers. Completed PRs and stacks cannot be opened. Hidden PRs retain saved drafts and notes. Explicitly removed PRs stay hidden until reopened.
 
 The UI supports replying to and resolving GitHub review threads, writing pending inline comments, and submitting a comment, approval or request for changes. Removing a review from Review Desk does not close it on GitHub.
 
