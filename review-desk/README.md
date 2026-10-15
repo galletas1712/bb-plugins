@@ -3,7 +3,9 @@
 Review GitHub pull requests inside bb with their original description, conversation, and diffs.
 
 - Open a PR URL, `owner/repo#123`, or `owner/repo/stack/N`.
-- Your authenticated GitHub account's open PRs appear automatically across all repositories, including drafts. Discovery checks every 15 seconds. Closed and merged PRs are hidden throughout Reviews and stack navigation. Stacks with no open PRs are hidden. Files load when you open a PR. Explicitly removed PRs stay hidden until reopened.
+- Your authenticated GitHub account's open PRs appear automatically across all repositories, including drafts. Discovery checks every 15 seconds. Closed and merged PRs are hidden throughout Reviews and stack navigation. Stacks with no open PRs are hidden. Explicitly removed PRs stay hidden until you open them again.
+- Open PRs are prefetched in the background every minute with two workers. Prefetch prepares the repository, changed-file list, metadata, comments, and conversation. Cached PRs open immediately while refreshing. A first visit can still wait if its Git preparation has not finished. Foreground and background requests share preparation, and unchanged refs reuse the Git and file caches.
+- A separate status scan runs every 15 seconds, including closed tracked PRs that can be reopened. It batches up to 50 PRs per GitHub request and updates visibility without waiting for Git fetches or conversation loading. Saved notes and drafts survive closing and reopening. Inaccessible PRs keep their last known state while other PRs continue updating.
 - The front page groups PRs by repository, ordered by the latest GitHub PR activity. Repositories have independent dropdowns with standalone PRs and collapsed stacks underneath. Phones show one column with space between repositories. Wider panels show a grid. Expanding a stack shows its PRs in order, with a single removal control for the stack.
 - Read the full conversation: issue comments, reviews, inline threads and replies, and timeline events. GitHub collections are paginated, including commits, checks, labels, assignees, and review requests.
 - Browse changed files in unified or side-by-side diff mode. Toggle the file explorer to choose files. Moved or renamed files appear at both their old and new locations. Deleted and old locations use a red D, and added and new locations use a green U. Current comments appear on their old/new diff lines. File comments, outdated threads, and comments outside the displayed hunks remain visible above the file. Threads on files no longer in the PR remain in Conversation.
@@ -21,6 +23,8 @@ Review GitHub pull requests inside bb with their original description, conversat
 Changes, Conversation, and Commits use a single main workspace, one view at a time. Submit review opens a dialog with pending comments and review controls, with checks and metadata in expandable sections. Reviews and tracked stacks refresh from GitHub in the background. Visible panels also poll every 15 seconds and refresh on focus or reconnect. Head and base-branch pushes refresh cached diffs. Manual refresh fetches Git again. Fetch errors are shown with a retry action.
 
 Requires an authenticated `gh` CLI on the machine holding the repository. Review Desk finds a local checkout or clones one, then creates a detached worktree for reading the diff.
+
+Review Desk currently uses polling rather than GitHub webhooks. Webhook delivery requires a reachable receiver and repository, organization, or GitHub App configuration. Repository work is serialized so background fetches do not compete over shared Git refs. The plugin never runs global worktree pruning on shared repositories.
 
 ## Develop
 

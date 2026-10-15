@@ -14,6 +14,11 @@ async function fixture() {
   let onStack: (() => Promise<void> | void) | undefined;
   let onDetails: (() => Promise<void> | void) | undefined;
   let onStatus: (() => Promise<void> | void) | undefined;
+  let onBatch: (() => Promise<void> | void) | undefined;
+  let batchError: string | null = null;
+  let onPrepare: ((number: number) => Promise<void> | void) | undefined;
+  let onThreads: (() => Promise<void> | void) | undefined;
+  let onConversation: (() => void) | undefined;
   let own: OwnPrs = { login: "viewer", prs: [] };
   let ownError: string | null = null;
   let onOwn: (() => void) | undefined;
@@ -23,6 +28,12 @@ async function fixture() {
     calls.push({ method, input });
     switch (method) {
       case "gh_own_prs": onOwn?.(); if (ownError) throw new Error(ownError); return own;
+      case "gh_pr_statuses": {
+        const prs = args.prs.map((ref: { owner: string; repo: string; number: number }) => ({ ...pr(ref.number), ...remotePrs.get(ref.number), owner: ref.owner, repo: ref.repo }));
+        await onBatch?.();
+        if (batchError) throw new Error(batchError);
+        return { prs };
+      }
       case "gh_pr": case "gh_pr_status": {
         const result = { ...pr(args.number), ...remotePrs.get(args.number) };
         if (method === "gh_pr_status") await onStatus?.();
@@ -30,11 +41,11 @@ async function fixture() {
       }
       case "gh_pr_details": await onDetails?.(); return { commits: [], labels: [], checks: [], reviewers: [], assignees: [] };
       case "repo_clone": return { repoPath: "/repo" };
-      case "repo_prepare": return { worktree: `/repo/${args.number}`, headSha: args.headSha, baseSha: remotePrs.get(args.number)?.baseRefOid ?? "base" };
+      case "repo_prepare": await onPrepare?.(args.number); return { worktree: `/repo/${args.number}`, headSha: args.headSha, baseSha: remotePrs.get(args.number)?.baseRefOid ?? "base" };
       case "repo_release": return { ok: true };
       case "git_files": return { files };
-      case "gh_threads": return { threads: [] };
-      case "gh_conversation": return { comments: [], reviews: [], events: [] };
+      case "gh_threads": await onThreads?.(); return { threads: [] };
+      case "gh_conversation": onConversation?.(); return { comments: [], reviews: [], events: [] };
       case "gh_stack": await onStack?.(); return { stack: args.stackNumber !== null || snapshot?.entries.some((entry) => entry.number === args.number) ? snapshot : null };
       default: throw new Error(`unexpected host call ${method}`);
     }
@@ -43,7 +54,7 @@ async function fixture() {
   const rpc = (method: string, input: unknown) => harness.behavior.callRpc(method, input);
   const open = async (number: number) => (await rpc("reviews_open", { ref: `o/r#${number}` }) as any).review;
   const list = async () => (await rpc("reviews_list", null) as { reviews: ReviewSummary[] }).reviews;
-  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; }, onDetails: (fn: typeof onDetails) => { onDetails = fn; }, onStatus: (fn: typeof onStatus) => { onStatus = fn; }, setOwn: (next: OwnPrs) => { own = next; }, setOwnError: (error: string | null) => { ownError = error; }, onOwn: (fn: typeof onOwn) => { onOwn = fn; } };
+  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; }, onDetails: (fn: typeof onDetails) => { onDetails = fn; }, onStatus: (fn: typeof onStatus) => { onStatus = fn; }, setOwn: (next: OwnPrs) => { own = next; }, setOwnError: (error: string | null) => { ownError = error; }, onOwn: (fn: typeof onOwn) => { onOwn = fn; }, onBatch: (fn: typeof onBatch) => { onBatch = fn; }, setBatchError: (error: string | null) => { batchError = error; }, onPrepare: (fn: typeof onPrepare) => { onPrepare = fn; }, onThreads: (fn: typeof onThreads) => { onThreads = fn; }, onConversation: (fn: typeof onConversation) => { onConversation = fn; } };
 }
 
 test("Recent includes unopened layers and refreshed metadata, preserves detached drafts, and survives reload", async () => {
@@ -204,6 +215,7 @@ test("base-tip pushes refresh the diff with an unchanged head and forced sync re
   const f = await fixture(); const now = Date.now;
   try {
     f.setFiles([{ path: "a.ts", oldPath: null, status: "modified", additions: 1, deletions: 0, binary: false }]);
+    f.setStack(stack([1]));
     const first = await f.open(1);
     f.setPr(1, { baseRefOid: "new-base", additions: 9 });
     f.setFiles([{ path: "a.ts", oldPath: null, status: "modified", additions: 9, deletions: 0, binary: false }]);
@@ -230,6 +242,7 @@ test("stack polling updates membership and counts while review details are block
   const f = await fixture(); const now = Date.now;
   let release!: () => void;
   try {
+    f.setStack(stack([1]));
     const first = await f.open(1);
     let entered!: () => void;
     const pending = new Promise<void>((resolve) => { entered = resolve; });
@@ -432,4 +445,161 @@ test("local merge status overrides stale authored and stack snapshots and standa
     await assert.rejects(f.open(10), /merged or closed/);
     assert.equal(f.calls.some((call) => call.method === "repo_prepare" && [9, 10].includes(call.input.number)), false);
   } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("minute prefetch warms files and conversation, and an unchanged head needs no further Git preparation", async () => {
+  const f = await fixture(); const now = Date.now;
+  let clock = now(); Date.now = () => clock;
+  const prefetch = async () => {
+    const service = f.harness.behavior.runService("sync-open-reviews");
+    f.onConversation(() => service.controller.abort());
+    await service.done; f.onConversation(undefined);
+  };
+  try {
+    f.setStack(null); f.setOwn({ login: "viewer", prs: [ownPr(10)] });
+    await prefetch();
+    const first = (await f.list())[0];
+    assert.ok(first.id);
+    assert.equal(f.calls.filter((c) => c.method === "repo_prepare").length, 1);
+    assert.equal(f.calls.filter((c) => c.method === "gh_pr_details").length, 1);
+    assert.equal(f.calls.filter((c) => c.method === "gh_pr_statuses").length, 1);
+    assert.equal(f.calls.filter((c) => c.method === "gh_pr_status").length, 0);
+    const before = f.calls.length;
+    const opened = await f.open(10);
+    const detail = await f.rpc("reviews_get", { reviewId: opened.id }) as any;
+    assert.equal(detail.review.id, first.id);
+    assert.deepEqual(detail.threads, []);
+    assert.equal(f.calls.length, before);
+    const db = f.bb.storage.database();
+    assert.ok(db.prepare("SELECT json FROM conversation_cache WHERE review_id = ?").get(first.id));
+    clock += 6 * 60_000;
+    await prefetch();
+    assert.equal(f.calls.filter((c) => c.method === "repo_prepare").length, 1);
+    assert.equal(f.calls.filter((c) => c.method === "git_files").length, 1);
+  } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("foreground opens share pending preparation and cached opens do not wait for heavy refreshes", { timeout: 8000 }, async () => {
+  const f = await fixture(); let releasePrepare!: () => void; let releaseDetails!: () => void;
+  let service: ReturnType<typeof f.harness.behavior.runService> | undefined;
+  try {
+    f.setStack(null); f.setOwn({ login: "viewer", prs: [ownPr(1)] });
+    let prepared!: () => void; const preparing = new Promise<void>((r) => { prepared = r; });
+    let loading!: () => void; const details = new Promise<void>((r) => { loading = r; });
+    f.onPrepare(() => new Promise<void>((r) => { releasePrepare = r; prepared(); }));
+    f.onDetails(() => new Promise<void>((r) => { releaseDetails = r; loading(); }));
+    service = f.harness.behavior.runService("sync-open-reviews");
+    await preparing;
+    const clicked = f.open(1);
+    await new Promise<void>((r) => setImmediate(r));
+    assert.equal(f.calls.filter((c) => c.method === "repo_prepare").length, 1);
+    releasePrepare();
+    const first = await clicked;
+    await details;
+    let returned = false;
+    const cached = f.open(1).then((r) => { returned = true; return r; });
+    await new Promise<void>((r) => setImmediate(r));
+    assert.equal(returned, true);
+    assert.equal((await cached).id, first.id);
+    service.controller.abort(); releaseDetails(); await service.done;
+  } finally { service?.controller.abort(); releasePrepare?.(); releaseDetails?.(); await f.harness.lifecycle.dispose(); }
+});
+
+test("removing an unopened PR during prefetch cannot recreate it", async () => {
+  const f = await fixture(); let release!: () => void;
+  let service: ReturnType<typeof f.harness.behavior.runService> | undefined;
+  try {
+    f.setStack(null); f.setOwn({ login: "viewer", prs: [ownPr(1)] });
+    let entered!: () => void; const pending = new Promise<void>((r) => { entered = r; });
+    f.onPrepare(() => new Promise<void>((r) => { release = r; entered(); }));
+    service = f.harness.behavior.runService("sync-open-reviews");
+    await pending;
+    await f.rpc("reviews_remove", { owner: "o", repo: "r", number: 1 });
+    service.controller.abort(); release(); await service.done;
+    assert.deepEqual(await f.list(), []);
+    assert.equal(f.calls.filter((c) => c.method === "repo_release").length, 1);
+    assert.equal(f.bb.storage.database().prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM reviews").get()?.n, 0);
+  } finally { service?.controller.abort(); release?.(); await f.harness.lifecycle.dispose(); }
+});
+
+test("independent status scans close and reopen PRs while Git preparation is blocked", async () => {
+  const f = await fixture(); let release!: () => void;
+  let prefetch: ReturnType<typeof f.harness.behavior.runService> | undefined;
+  const scan = async () => {
+    const service = f.harness.behavior.runService("scan-pr-status");
+    f.onBatch(() => service.controller.abort());
+    await service.done; f.onBatch(undefined);
+  };
+  try {
+    f.setStack(null);
+    const second = await f.open(2);
+    await f.rpc("pending_add", { reviewId: second.id, path: "a.ts", line: 1, side: "RIGHT", body: "Keep through reopening" });
+    f.setOwn({ login: "viewer", prs: [ownPr(1)] });
+    let entered!: () => void; const pending = new Promise<void>((r) => { entered = r; });
+    f.onPrepare((number) => number === 1 ? new Promise<void>((r) => { release = r; entered(); }) : undefined);
+    prefetch = f.harness.behavior.runService("sync-open-reviews");
+    await pending;
+    const before = f.calls.filter((c) => c.method === "repo_prepare").length;
+    f.setPr(2, { state: "CLOSED" }); await scan();
+    assert.equal((await f.list()).some((pr) => pr.number === 2), false);
+    f.setPr(2, { state: "OPEN", updatedAt: "2026-10-08T00:00:00Z" }); await scan();
+    assert.equal((await f.list()).find((pr) => pr.number === 2)?.id, second.id);
+    assert.equal(f.calls.filter((c) => c.method === "repo_prepare").length, before);
+    const db = f.bb.storage.database();
+    assert.equal(db.prepare<[string], { n: number }>("SELECT COUNT(*) AS n FROM pending WHERE review_id = ?").get(second.id)?.n, 1);
+    prefetch.controller.abort(); release(); await prefetch.done;
+  } finally { prefetch?.controller.abort(); release?.(); await f.harness.lifecycle.dispose(); }
+});
+
+test("a late heavy refresh cannot undo a closure learned by a status scan", async () => {
+  const f = await fixture(); let release!: () => void;
+  let prefetch: ReturnType<typeof f.harness.behavior.runService> | undefined;
+  try {
+    f.setStack(null); f.setOwn({ login: "viewer", prs: [ownPr(1)] });
+    let entered!: () => void; const pending = new Promise<void>((r) => { entered = r; });
+    f.onDetails(() => new Promise<void>((r) => { release = r; entered(); }));
+    prefetch = f.harness.behavior.runService("sync-open-reviews");
+    await pending;
+    f.setPr(1, { state: "CLOSED", updatedAt: "2026-10-08T00:00:00Z" });
+    const scan = f.harness.behavior.runService("scan-pr-status");
+    f.onBatch(() => scan.controller.abort()); await scan.done;
+    prefetch.controller.abort(); release(); await prefetch.done;
+    assert.deepEqual(await f.list(), []);
+    assert.equal(f.bb.storage.database().prepare<[], { state: string }>("SELECT state FROM reviews WHERE number = 1").get()?.state, "CLOSED");
+  } finally { prefetch?.controller.abort(); release?.(); await f.harness.lifecycle.dispose(); }
+});
+
+test("status scans batch tracked refs and retain last good state after an API failure", async () => {
+  const f = await fixture();
+  const scan = async () => {
+    const service = f.harness.behavior.runService("scan-pr-status");
+    f.onBatch(() => service.controller.abort());
+    await service.done; f.onBatch(undefined);
+  };
+  try {
+    f.setStack(null); f.setOwn({ login: "viewer", prs: Array.from({ length: 75 }, (_, i) => ownPr(i + 1)) });
+    await f.list(); await scan();
+    const batches = f.calls.filter((c) => c.method === "gh_pr_statuses");
+    assert.deepEqual(batches.map((c) => c.input.prs.length), [50, 25]);
+    f.setBatchError("GitHub unavailable"); await scan();
+    const failed = await f.rpc("reviews_list", null) as any;
+    assert.equal(failed.reviews.length, 75);
+    assert.equal(failed.discoveryError, "GitHub unavailable");
+    f.setBatchError(null); await scan();
+    assert.equal((await f.rpc("reviews_list", null) as any).discoveryError, null);
+  } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("standalone stack discovery is cached for a minute instead of repeating on every UI poll", async () => {
+  const f = await fixture(); const now = Date.now;
+  let clock = now(); Date.now = () => clock;
+  try {
+    f.setStack(null); await f.open(1);
+    const count = () => f.calls.filter((c) => c.method === "gh_stack").length;
+    assert.equal(count(), 1);
+    clock += 20_000; await f.list(); await new Promise<void>((r) => setImmediate(r));
+    assert.equal(count(), 1);
+    clock += 41_000; await f.list(); await new Promise<void>((r) => setImmediate(r));
+    assert.equal(count(), 2);
+  } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
 });

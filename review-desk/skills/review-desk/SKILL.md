@@ -19,6 +19,8 @@ The repository host needs an authenticated `gh` CLI. Opening a PR creates a deta
 
 Reviews automatically lists the authenticated account's open PRs across repositories, including drafts. Authored discovery and stack metadata poll every 15 seconds. Closed and merged PRs are hidden from the front page and stack navigation, and stacks with no open layers are hidden. Counts, positions, and totals include only open layers. Completed PRs and stacks cannot be opened. Hidden PRs retain saved drafts and notes. Explicitly removed PRs stay hidden until reopened.
 
+Open PRs are prefetched every minute with two workers, including Git preparation, file counts, comments and conversation. Cached opens return while refreshing, and repeated requests share preparation. Independent batched status scans every 15 seconds watch tracked closed PRs for reopening and hide completed PRs without waiting for heavy fetches. The plugin uses polling and does not configure GitHub webhooks.
+
 The UI supports replying to and resolving GitHub review threads, writing pending inline comments, and submitting a comment, approval or request for changes. Removing a review from Review Desk does not close it on GitHub.
 
 Markdown files offer rendered block comparisons alongside source diffs. Repository files remain read-only. Resolved and outdated threads share collapsed dropdowns in each file diff and in Conversation, with each thread expanded manually. Every comment and reply can be shown or hidden, with replies beneath their parent. The UI can edit PR descriptions when permitted by GitHub, and published comments, review summaries, or inline replies only when authored by the authenticated user.

@@ -157,9 +157,13 @@ export const ownPrsSchema = z.object({
   })),
 });
 export type OwnPrs = z.infer<typeof ownPrsSchema>;
+export const prRefSchema = z.object({ owner: z.string(), repo: z.string(), number: z.number().int().positive() });
+export const prStatusesSchema = z.object({ prs: z.array(ghPrStatusSchema.extend(prRefSchema.shape)), errors: z.array(z.string()).default([]) });
+export type PrStatus = z.infer<typeof ghPrStatusSchema>;
 
 export const hostContract = defineRpcContract({
   gh_own_prs: { input: z.null(), output: ownPrsSchema },
+  gh_pr_statuses: { input: z.object({ prs: z.array(prRefSchema).max(50) }), output: prStatusesSchema },
   /** Fetch the PR head and base, and keep a detached worktree at the head. */
   repo_prepare: {
     input: z.object({

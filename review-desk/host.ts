@@ -8,6 +8,7 @@ import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { hostContract, type ChangedFile, type GhPrStatus } from "./host-contract";
 import { fetchPullRequestStack } from "./stack-fetch";
 import { fetchOwnPullRequests } from "./own-prs";
+import { fetchPrStatuses } from "./pr-statuses";
 import { editBody, readDescription } from "./lib/github-edit";
 import { fetchConversation, fetchPrMetadata, fetchReviewThreads } from "./github-conversation";
 
@@ -16,7 +17,7 @@ const MAX_BUFFER = 64 * 1024 * 1024;
 
 async function run(cmd: string, args: string[], options: { cwd?: string; input?: string; allowFailure?: boolean } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
-    const child = execFileAsync(cmd, args, { cwd: options.cwd, maxBuffer: MAX_BUFFER, encoding: "utf8" });
+    const child = execFileAsync(cmd, args, { cwd: options.cwd, maxBuffer: MAX_BUFFER, encoding: "utf8", timeout: cmd === "gh" && args[0] !== "repo" ? 30_000 : 180_000 });
     if (options.input !== undefined && child.child.stdin) {
       child.child.stdin.end(options.input);
     }
@@ -32,6 +33,15 @@ async function run(cmd: string, args: string[], options: { cwd?: string; input?:
 }
 
 const git = (cwd: string, args: string[], allowFailure = false) => run("git", args, { cwd, allowFailure });
+
+const repositoryWork = new Map<string, Promise<unknown>>();
+async function inRepository<T>(repoPath: string, work: () => Promise<T>): Promise<T> {
+  const previous = repositoryWork.get(repoPath) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(work);
+  repositoryWork.set(repoPath, next);
+  try { return await next; }
+  finally { if (repositoryWork.get(repoPath) === next) repositoryWork.delete(repoPath); }
+}
 
 function ghJson<T>(text: string): T {
   return JSON.parse(text) as T;
@@ -163,38 +173,42 @@ export default experimental_defineHostEntry({
   handlers: {
     async repo_clone({ owner, repo, dest }, context) {
       const target = dest === "" ? path.join(context.experimental_paths.dataDir, "repos", `${owner}__${repo}`) : dest;
-      mkdirSync(path.dirname(target), { recursive: true });
-      if (!existsSync(path.join(target, ".git"))) {
-        await run("gh", ["repo", "clone", `${owner}/${repo}`, target, "--", "--filter=blob:none"]);
-      }
-      return { repoPath: target };
+      return inRepository(target, async () => {
+        mkdirSync(path.dirname(target), { recursive: true });
+        if (!existsSync(path.join(target, ".git"))) {
+          await run("gh", ["repo", "clone", `${owner}/${repo}`, target, "--", "--filter=blob:none"]);
+        }
+        return { repoPath: target };
+      });
     },
     async repo_prepare({ repoPath, number, headSha, baseRefName, worktreesDir, key }, context) {
-      await git(repoPath, ["fetch", "--quiet", "origin", `+refs/pull/${number}/head:refs/review-desk/pr-${number}`, `+refs/heads/${baseRefName}:refs/remotes/origin/${baseRefName}`]);
-      const dir = worktreesDir === "" ? path.join(context.experimental_paths.dataDir, "worktrees") : worktreesDir;
-      mkdirSync(dir, { recursive: true });
-      const worktree = path.join(dir, key);
-      const registered = (await git(repoPath, ["worktree", "list", "--porcelain"])).stdout.includes(`worktree ${worktree}\n`);
-      if (existsSync(worktree) && !registered) rmSync(worktree, { recursive: true, force: true });
-      if (!registered) {
-        await git(repoPath, ["worktree", "prune"]);
-        await git(repoPath, ["worktree", "add", "--detach", worktree, headSha]);
-      } else {
-        const current = (await git(worktree, ["rev-parse", "HEAD"])).stdout.trim();
-        if (current !== headSha) {
-          const dirty = (await git(worktree, ["status", "--porcelain"])).stdout.trim() !== "";
-          if (!dirty) await git(worktree, ["checkout", "--quiet", "--detach", headSha]);
+      return inRepository(repoPath, async () => {
+        await git(repoPath, ["fetch", "--quiet", "origin", `+refs/pull/${number}/head:refs/review-desk/pr-${number}`, `+refs/heads/${baseRefName}:refs/remotes/origin/${baseRefName}`]);
+        const dir = worktreesDir === "" ? path.join(context.experimental_paths.dataDir, "worktrees") : worktreesDir;
+        mkdirSync(dir, { recursive: true });
+        const worktree = path.join(dir, key);
+        const registered = (await git(repoPath, ["worktree", "list", "--porcelain"])).stdout.includes(`worktree ${worktree}\n`);
+        if (existsSync(worktree) && !registered) rmSync(worktree, { recursive: true, force: true });
+        if (!registered) {
+          await git(repoPath, ["worktree", "add", "--detach", worktree, headSha]);
+        } else {
+          const current = (await git(worktree, ["rev-parse", "HEAD"])).stdout.trim();
+          if (current !== headSha) {
+            const dirty = (await git(worktree, ["status", "--porcelain"])).stdout.trim() !== "";
+            if (!dirty) await git(worktree, ["checkout", "--quiet", "--detach", headSha]);
+          }
         }
-      }
-      const baseSha = (await git(worktree, ["merge-base", headSha, `refs/remotes/origin/${baseRefName}`])).stdout.trim();
-      return { worktree, headSha, baseSha };
+        const baseSha = (await git(worktree, ["merge-base", headSha, `refs/remotes/origin/${baseRefName}`])).stdout.trim();
+        return { worktree, headSha, baseSha };
+      });
     },
     async repo_release({ repoPath, worktree }) {
-      if (worktree === "") return { ok: true as const };
-      await git(repoPath, ["worktree", "remove", "--force", worktree], true);
-      if (existsSync(worktree)) rmSync(worktree, { recursive: true, force: true });
-      await git(repoPath, ["worktree", "prune"], true);
-      return { ok: true as const };
+      return inRepository(repoPath, async () => {
+        if (worktree === "") return { ok: true as const };
+        await git(repoPath, ["worktree", "remove", "--force", worktree], true);
+        if (existsSync(worktree)) rmSync(worktree, { recursive: true, force: true });
+        return { ok: true as const };
+      });
     },
     async git_files({ worktree, baseSha, headSha }) {
       return { files: await listFiles(worktree, baseSha, headSha) };
@@ -265,6 +279,7 @@ export default experimental_defineHostEntry({
       return { isDraft: draft };
     },
     gh_own_prs() { return fetchOwnPullRequests(run); },
+    gh_pr_statuses({ prs }) { return fetchPrStatuses(run, prs); },
     async gh_stack(input) {
       return { stack: await fetchPullRequestStack(run, input) };
     },

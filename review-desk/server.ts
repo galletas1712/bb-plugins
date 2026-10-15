@@ -23,6 +23,7 @@ import {
   type PrStack,
   type PrStackEntry,
   type OwnPrs,
+  type PrStatus,
 } from "./host-contract";
 
 // ---------------------------------------------------------------------------
@@ -404,7 +405,7 @@ function createStore(db: Database.Database) {
     setBaseRefSha: db.prepare<[string, string]>(`UPDATE reviews SET base_ref_sha = ? WHERE id = ?`),
     setDraft: db.prepare<[number, number, string]>(`UPDATE reviews SET is_draft = ?, updated_at = ? WHERE id = ?`),
     setBody: db.prepare<[string, number, string]>(`UPDATE reviews SET body = ?, updated_at = ? WHERE id = ?`),
-    setClosed: db.prepare<[string, number, string, string | null, string, number, number, string]>(
+    setStatus: db.prepare<[string, number, string, string | null, string, number, number, string]>(
       `UPDATE reviews SET state = ?, is_draft = ?, title = ?, review_decision = ?, gh_updated_at = ?, synced_at = ?, updated_at = ? WHERE id = ?`,
     ),
     deleteReview: db.prepare<[string]>(`DELETE FROM reviews WHERE id = ?`),
@@ -625,6 +626,7 @@ export default async function plugin(bb: BbPluginApi) {
   const host = bb.hosts.experimental_client({ contract: hostContract });
   const syncErrors = new Map<string, string>();
   const detailsRefreshedAt = new Map<string, number>();
+  const commitsRefreshedHead = new Map<string, string>();
 
   const publish = (reviewId: string, what: string) => bb.realtime.publish(REVIEW_CHANGED, { reviewId, what });
 
@@ -692,7 +694,7 @@ export default async function plugin(bb: BbPluginApi) {
     return prIsOpen(row.state) && (entry === undefined || reviewablePr(row.owner, row.repo, entry));
   }
 
-  function storeStack(owner: string, repo: string, number: number, stack: PrStack | null, hostId: string, previousKey?: string): void {
+  function storeStack(owner: string, repo: string, number: number, stack: PrStack | null, hostId: string, previousKey?: string, fetchedAt = Date.now()): void {
     const previous = previousKey === undefined ? stacks.forPr(owner, repo, number) : stacks.get(previousKey);
     if (stack !== null && previous) {
       stack = { ...stack, entries: stack.entries.map((entry) => {
@@ -704,12 +706,12 @@ export default async function plugin(bb: BbPluginApi) {
     if (stack === null) {
       if (previous) stacks.remove(previous.key);
     } else {
-      stacks.save(owner, repo, stack, hostId, previous?.key);
+      stacks.save(owner, repo, stack, hostId, previous?.key, fetchedAt);
     }
     const changed = JSON.stringify(previous?.stack ?? null) !== JSON.stringify(stack);
     // The old cache now records discovery times only. Clear legacy snapshots too.
     for (const n of new Set([number, ...(previous?.stack.entries.map((entry) => entry.number) ?? []), ...(stack?.entries.map((entry) => entry.number) ?? [])])) {
-      q.upsertStackCache.run(owner, repo, n, "null", Date.now());
+      q.upsertStackCache.run(owner, repo, n, "null", fetchedAt);
       const local = q.reviewByKey.get(owner, repo, n);
       if (changed && local) publish(local.id, "stack");
     }
@@ -751,6 +753,97 @@ export default async function plugin(bb: BbPluginApi) {
   const REVIEW_SWEEP_MS = 60_000;
   const DETAILS_EVERY_MS = 5 * 60_000;
 
+  const prKey = (pr: { owner: string; repo: string; number: number }) => `${pr.owner}/${pr.repo}#${pr.number}`;
+  const prStatuses = new Map<string, { pr: PrStatus; fetchedAt: number; request: number }>();
+  let statusRequest = 0;
+  let statusScan: Promise<void> | undefined;
+  let statusError: string | null = null;
+
+  function rememberStatus(owner: string, repo: string, pr: PrStatus, request: number): PrStatus {
+    const key = prKey({ owner, repo, number: pr.number });
+    const previous = prStatuses.get(key);
+    if (previous && (previous.pr.updatedAt > pr.updatedAt || previous.pr.updatedAt === pr.updatedAt && previous.request > request)) return previous.pr;
+    if (previous && JSON.stringify(previous.pr) === JSON.stringify(pr)) pr = previous.pr;
+    prStatuses.set(key, { pr, fetchedAt: Date.now(), request });
+    return pr;
+  }
+
+  async function readPrStatus(owner: string, repo: string, number: number, hostId: string, force = false): Promise<PrStatus> {
+    const cached = prStatuses.get(prKey({ owner, repo, number }));
+    if (!force && cached && Date.now() - cached.fetchedAt < SYNC_EVERY_MS) return cached.pr;
+    const request = ++statusRequest;
+    const pr = rememberStatus(owner, repo, await host.call("gh_pr_status", { owner, repo, number }, { hostId }), request);
+    reconcileStatus(owner, repo, pr);
+    patchStackStatuses(new Map([[prKey({ owner, repo, number }), pr]]));
+    return pr;
+  }
+
+  function reconcileStatus(owner: string, repo: string, pr: PrStatus): void {
+    const row = q.reviewByKey.get(owner, repo, pr.number);
+    if (!row) return;
+    if (row.state === pr.state && row.is_draft === Number(pr.isDraft) && row.title === pr.title && row.review_decision === pr.reviewDecision && row.gh_updated_at === pr.updatedAt) return;
+    q.setStatus.run(pr.state, Number(pr.isDraft), pr.title, pr.reviewDecision, pr.updatedAt, Date.now(), Date.now(), row.id);
+    detailsRefreshedAt.delete(row.id);
+    publish(row.id, !prIsOpen(pr.state) ? "closed" : !prIsOpen(row.state) ? "reopened" : "synced");
+  }
+
+  function patchStackStatuses(observed: Map<string, PrStatus>): void {
+    for (const tracked of stacks.list()) {
+      const next = { ...tracked.stack, entries: tracked.stack.entries.map((entry) => {
+        const pr = observed.get(prKey({ ...tracked, number: entry.number }));
+        return pr ? { ...entry, title: pr.title, state: pr.state, isDraft: pr.isDraft, merged: pr.state === "MERGED", reviewDecision: pr.reviewDecision,
+          headSha: pr.headRefOid, headRefName: pr.headRefName, baseRefName: pr.baseRefName, url: pr.url,
+          additions: pr.additions, deletions: pr.deletions, changedFiles: pr.changedFiles, files: entry.headSha === pr.headRefOid ? entry.files : [] } : entry;
+      }) };
+      if (JSON.stringify(next) !== JSON.stringify(tracked.stack)) storeStack(tracked.owner, tracked.repo, next.entries[0]?.number ?? 0, next, tracked.hostId, tracked.key, tracked.fetchedAt);
+    }
+  }
+
+  async function scanPrStatuses(): Promise<void> {
+    if (statusScan) return statusScan;
+    statusScan = (async () => {
+      try {
+        const errors: string[] = [];
+        const candidates = new Map<string, { owner: string; repo: string; number: number; hostId: string }>();
+        const own = cachedOwnPrs();
+        if (own?.prs.length) {
+          const hostId = await primaryHostId();
+          for (const pr of own.prs) candidates.set(prKey(pr), { owner: pr.owner, repo: pr.repo, number: pr.number, hostId });
+        }
+        for (const tracked of stacks.list()) for (const pr of tracked.stack.entries) {
+          if (!pr.merged && pr.state !== "MERGED") candidates.set(prKey({ ...tracked, number: pr.number }), { owner: tracked.owner, repo: tracked.repo, number: pr.number, hostId: tracked.hostId });
+        }
+        for (const row of q.reviews.all()) if (row.state !== "MERGED") candidates.set(prKey(row), { owner: row.owner, repo: row.repo, number: row.number, hostId: row.host_id });
+        const byHost = new Map<string, { owner: string; repo: string; number: number }[]>();
+        for (const pr of candidates.values()) {
+          if (q.dismissed.get(pr.owner, pr.repo, pr.number)) continue;
+          const group = byHost.get(pr.hostId) ?? [];
+          group.push({ owner: pr.owner, repo: pr.repo, number: pr.number });
+          byHost.set(pr.hostId, group);
+        }
+        for (const [hostId, refs] of byHost) for (let offset = 0; offset < refs.length; offset += 50) {
+          const request = ++statusRequest;
+          const result = await host.call("gh_pr_statuses", { prs: refs.slice(offset, offset + 50) }, { hostId });
+          errors.push(...result.errors);
+          const observed = new Map<string, PrStatus>();
+          for (const { owner, repo, ...status } of result.prs) {
+            const pr = rememberStatus(owner, repo, status, request);
+            observed.set(prKey({ owner, repo, number: pr.number }), pr);
+            reconcileStatus(owner, repo, pr);
+          }
+          patchStackStatuses(observed);
+        }
+        const error = errors.length ? errors.join("; ").slice(0, 600) : null;
+        if (statusError !== error) { statusError = error; publish("", "status"); }
+      } catch (cause) {
+        const error = errorMessage(cause);
+        if (statusError !== error) { statusError = error; publish("", "status"); }
+        throw cause;
+      } finally { statusScan = undefined; }
+    })();
+    return statusScan;
+  }
+
   let ownPrRefresh: Promise<void> | undefined;
   let ownPrAttemptAt = 0;
   let ownPrError: string | null = null;
@@ -785,7 +878,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   function stackFresh(owner: string, repo: string, number: number): boolean {
     const at = stackFetchedAt(owner, repo, number);
-    return at !== null && Date.now() - at < STACK_FRESH_MS;
+    const interval = stacks.forPr(owner, repo, number) ? STACK_FRESH_MS : REVIEW_SWEEP_MS;
+    return at !== null && Date.now() - at < interval;
   }
 
   async function refreshStack(row: ReviewRow, force = false): Promise<void> {
@@ -797,7 +891,7 @@ export default async function plugin(bb: BbPluginApi) {
     const key = tracked?.key ?? `${owner}/${repo}#${number}`;
     const failure = stackFailures.get(key);
     if (!force && failure && Date.now() - failure.at < SYNC_EVERY_MS) throw failure.error;
-    if (!force && !failure && Date.now() - (tracked?.fetchedAt ?? stackFetchedAt(owner, repo, number) ?? 0) < STACK_FRESH_MS) return;
+    if (!force && !failure && Date.now() - (tracked?.fetchedAt ?? stackFetchedAt(owner, repo, number) ?? 0) < (tracked ? STACK_FRESH_MS : REVIEW_SWEEP_MS)) return;
     const inflight = stackRefresh.get(key);
     if (inflight !== undefined) {
       if (!force || inflight.forced) return inflight.work;
@@ -856,6 +950,7 @@ export default async function plugin(bb: BbPluginApi) {
         const local = q.reviewByKey.get(row.owner, row.repo, entry.number);
         return {
           ...entry,
+          files: local?.head_sha === entry.headSha ? cachedFiles(local)?.map((file) => file.path) ?? entry.files : entry.files,
           ...stackEntryStats(local, entry),
           reviewId: local?.id ?? null,
           pendingCount: local === undefined ? 0 : q.pending.all(local.id).length,
@@ -928,17 +1023,30 @@ export default async function plugin(bb: BbPluginApi) {
     q.setBaseRefSha.run(pr.baseRefOid, row.id);
   }
 
-  async function openPr(owner: string, repo: string, number: number): Promise<Review> {
-    q.undismiss.run(owner, repo, number);
+  const preparingReviews = new Map<string, Promise<Review>>();
+  async function openPr(owner: string, repo: string, number: number, background = false): Promise<Review> {
+    if (!background) q.undismiss.run(owner, repo, number);
+    if (q.dismissed.get(owner, repo, number)) throw new Error("Review was removed");
+    const key = prKey({ owner, repo, number });
+    const existing = preparingReviews.get(key);
+    if (existing) return existing;
+    const work = preparePr(owner, repo, number);
+    preparingReviews.set(key, work);
+    try { return await work; }
+    finally { if (preparingReviews.get(key) === work) preparingReviews.delete(key); }
+  }
+
+  async function preparePr(owner: string, repo: string, number: number): Promise<Review> {
     const existing = q.reviewByKey.get(owner, repo, number);
     if (existing !== undefined) {
-      await syncReview(existing.id);
+      if (!reviewIsActive(existing)) await readPrStatus(owner, repo, number, existing.host_id, true);
       const row = requireReview(existing.id);
       if (!reviewIsActive(row)) throw new Error(`PR #${number} is already merged or closed`);
+      void syncReview(existing.id).catch(() => undefined);
       return toReview(row);
     }
     const located = await locateRepo(owner, repo);
-    const pr = await host.call("gh_pr", { owner, repo, number }, { hostId: located.hostId });
+    const pr = await readPrStatus(owner, repo, number, located.hostId);
     if (!prIsOpen(pr.state)) throw new Error(`PR #${number} is already merged or closed`);
     const key = `${owner}__${repo}__${number}`;
     const prepared = await host.call(
@@ -946,14 +1054,19 @@ export default async function plugin(bb: BbPluginApi) {
       { repoPath: located.repoPath, number, headSha: pr.headRefOid, baseRefName: pr.baseRefName, worktreesDir: "", key },
       { hostId: located.hostId },
     );
+    if (q.dismissed.get(owner, repo, number)) {
+      await host.call("repo_release", { repoPath: located.repoPath, worktree: prepared.worktree }, { hostId: located.hostId });
+      throw new Error("Review was removed");
+    }
     const id = newId();
     const now = Date.now();
     q.insertReview.run(id, owner, repo, number, pr.title, pr.url, prepared.worktree, located.hostId, located.repoPath, located.projectId, now, now, now);
-    applyPr(requireReview(id), pr, prepared);
-    detailsRefreshedAt.set(id, now);
+    applyPr(requireReview(id), { ...pr, checks: [], labels: [], reviewers: [], assignees: [], commits: [] }, prepared);
+    const latest = prStatuses.get(prKey({ owner, repo, number }))?.pr;
+    if (latest) reconcileStatus(owner, repo, latest);
     const row = requireReview(id);
     await refreshFiles(row);
-    await refreshStack(row, true);
+    await refreshStack(row);
     if (!reviewIsActive(row)) throw new Error(`PR #${number} is already merged or closed`);
     publish(id, "opened");
     return toReview(row);
@@ -966,7 +1079,7 @@ export default async function plugin(bb: BbPluginApi) {
       const located = await locateRepo(parsed.owner, parsed.repo);
       const result = await host.call(
         "gh_stack",
-        { owner: parsed.owner, repo: parsed.repo, number: null, stackNumber: parsed.stackNumber },
+        { owner: parsed.owner, repo: parsed.repo, number: null, stackNumber: parsed.stackNumber, metadataOnly: true },
         { hostId: located.hostId },
       );
       if (result.stack === null || result.stack.entries.length === 0) {
@@ -1006,15 +1119,17 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function syncReviewOnce(reviewId: string, force: boolean): Promise<{ review: Review; headChanged: boolean }> {
     const row = requireReview(reviewId);
-    if (!force && !syncErrors.has(reviewId) && detailsRefreshedAt.has(reviewId) && Date.now() - row.synced_at < SYNC_EVERY_MS && stackFresh(row.owner, row.repo, row.number)) {
+    const known = prStatuses.get(prKey(row))?.pr;
+    const changedRefs = known !== undefined && (known.headRefOid !== row.head_sha || known.baseRefOid !== row.base_ref_sha);
+    if (!force && !changedRefs && !syncErrors.has(reviewId) && detailsRefreshedAt.has(reviewId) && Date.now() - row.synced_at < SYNC_EVERY_MS && stackFresh(row.owner, row.repo, row.number)) {
       return { review: toReview(row), headChanged: false };
     }
-    const pr = await host.call("gh_pr_status", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row));
+    const pr = await readPrStatus(row.owner, row.repo, row.number, row.host_id, force);
     const wasOpen = prIsOpen(row.state);
     if (!prIsOpen(pr.state)) {
       const now = Date.now();
       if (pr.state !== row.state || pr.isDraft !== (row.is_draft === 1) || pr.title !== row.title || pr.reviewDecision !== row.review_decision || pr.updatedAt !== row.gh_updated_at) {
-        q.setClosed.run(pr.state, pr.isDraft ? 1 : 0, pr.title, pr.reviewDecision, pr.updatedAt, now, now, row.id);
+        q.setStatus.run(pr.state, pr.isDraft ? 1 : 0, pr.title, pr.reviewDecision, pr.updatedAt, now, now, row.id);
         publish(row.id, "synced");
       } else {
         q.setSyncedAt.run(now, row.id);
@@ -1040,6 +1155,7 @@ export default async function plugin(bb: BbPluginApi) {
           hostOptions(row),
         )
       : { worktree: row.worktree, headSha: pr.headRefOid, baseSha: row.base_sha };
+    if (prStatuses.get(prKey(row))?.pr !== pr) return { review: toReview(requireReview(reviewId)), headChanged: false };
     const retainedDetails = {
       labels: parseJson<Review["labels"]>(row.labels_json, []),
       checks: parseJson<Review["checks"]>(row.checks_json, []),
@@ -1054,10 +1170,12 @@ export default async function plugin(bb: BbPluginApi) {
     publish(reviewId, wasOpen ? "synced" : "reopened");
     const details = await host.call("gh_pr_details", {
       owner: row.owner, repo: row.repo, number: row.number,
-      includeCommits: force || headChanged || !detailsRefreshedAt.has(reviewId),
+      includeCommits: force || commitsRefreshedHead.get(reviewId) !== pr.headRefOid,
     }, hostOptions(row));
+    if (prStatuses.get(prKey(row))?.pr !== pr) return { review: toReview(requireReview(reviewId)), headChanged };
     applyPr(fresh, { ...pr, ...details, commits: details.commits ?? retainedDetails.commits }, prepared);
     detailsRefreshedAt.set(reviewId, Date.now());
+    if (details.commits !== null) commitsRefreshedHead.set(reviewId, pr.headRefOid);
     await refreshThreads(fresh);
     await reanchorNotes(fresh);
     await refreshConversation(fresh);
@@ -1300,60 +1418,61 @@ export default async function plugin(bb: BbPluginApi) {
 
   // -- RPC -------------------------------------------------------------------
 
-  bb.rpc.register(rpcContract, {
-    reviews_list: async () => {
-      const refreshing = refreshOwnPrs().catch(() => undefined);
-      if (cachedOwnPrs() === null) await refreshing;
-      const own = cachedOwnPrs();
-      const rows = q.reviews.all();
-      const prKey = (pr: { owner: string; repo: string; number: number }) => `${pr.owner}/${pr.repo}#${pr.number}`;
-      const owned = new Map(own?.prs.map((pr) => [prKey(pr), pr]));
-      discoverStacks(rows);
-      return {
-        discoveryError: ownPrError,
-        reviews: [
-          ...stacks.list().flatMap((tracked): ReviewSummary[] => {
-            const stack = activePrStack(tracked.owner, tracked.repo, tracked.stack);
-            return stack?.entries.map((entry) => {
-              const local = q.reviewByKey.get(tracked.owner, tracked.repo, entry.number);
-              const activity = owned.get(prKey({ owner: tracked.owner, repo: tracked.repo, number: entry.number }))?.updatedAt ?? local?.gh_updated_at;
-              return {
-                id: local?.id ?? null, owner: tracked.owner, repo: tracked.repo,
-                number: entry.number, title: entry.title, state: entry.state,
-                isDraft: entry.isDraft, reviewDecision: entry.reviewDecision, headSha: entry.headSha,
-                ...stackEntryStats(local, entry),
-                pendingCount: local ? q.pending.all(local.id).length : 0,
-                updatedAt: Date.parse(activity ?? "") || tracked.openedAt,
-                stack: { number: stack.number, position: entry.position, size: stack.entries.length, key: tracked.key },
-              };
-            }) ?? [];
-          }),
-          ...(own?.prs ?? []).filter((pr) => reviewablePr(pr.owner, pr.repo, pr) && cachedPrStack(pr.owner, pr.repo, pr.number) === null && !q.dismissed.get(pr.owner, pr.repo, pr.number)).map((pr): ReviewSummary => {
-            const local = q.reviewByKey.get(pr.owner, pr.repo, pr.number);
+  async function listReviews() {
+    const refreshing = refreshOwnPrs().catch(() => undefined);
+    if (cachedOwnPrs() === null) await refreshing;
+    const own = cachedOwnPrs();
+    const rows = q.reviews.all();
+    const owned = new Map(own?.prs.map((pr) => [prKey(pr), pr]));
+    discoverStacks(rows.filter((row) => prIsOpen(row.state)));
+    return {
+      discoveryError: ownPrError ?? statusError,
+      reviews: [
+        ...stacks.list().flatMap((tracked): ReviewSummary[] => {
+          const stack = activePrStack(tracked.owner, tracked.repo, tracked.stack);
+          return stack?.entries.map((entry) => {
+            const local = q.reviewByKey.get(tracked.owner, tracked.repo, entry.number);
+            const activity = owned.get(prKey({ owner: tracked.owner, repo: tracked.repo, number: entry.number }))?.updatedAt ?? local?.gh_updated_at;
             return {
-              ...pr, id: local?.id ?? null, ...stackEntryStats(local, pr),
+              id: local?.id ?? null, owner: tracked.owner, repo: tracked.repo,
+              number: entry.number, title: entry.title, state: entry.state,
+              isDraft: entry.isDraft, reviewDecision: entry.reviewDecision, headSha: entry.headSha,
+              ...stackEntryStats(local, entry),
               pendingCount: local ? q.pending.all(local.id).length : 0,
-              updatedAt: Date.parse(pr.updatedAt), stack: null,
+              updatedAt: Date.parse(activity ?? "") || tracked.openedAt,
+              stack: { number: stack.number, position: entry.position, size: stack.entries.length, key: tracked.key },
             };
-          }),
-          ...rows.filter((row) => prIsOpen(row.state) && cachedPrStack(row.owner, row.repo, row.number) === null && !owned.has(prKey(row)) && row.author !== own?.login).map((row) => ({
-            id: row.id,
-            owner: row.owner,
-            repo: row.repo,
-            number: row.number,
-            title: row.title,
-            state: row.state,
-            isDraft: row.is_draft === 1,
-            reviewDecision: row.review_decision,
-            headSha: row.head_sha,
-            ...reviewStats(row),
-            pendingCount: q.pending.all(row.id).length,
-            updatedAt: Date.parse(row.gh_updated_at) || row.created_at,
-            stack: null,
-          })),
-        ].sort((a, b) => b.updatedAt - a.updatedAt),
-      };
-    },
+          }) ?? [];
+        }),
+        ...(own?.prs ?? []).filter((pr) => reviewablePr(pr.owner, pr.repo, pr) && cachedPrStack(pr.owner, pr.repo, pr.number) === null && !q.dismissed.get(pr.owner, pr.repo, pr.number)).map((pr): ReviewSummary => {
+          const local = q.reviewByKey.get(pr.owner, pr.repo, pr.number);
+          return {
+            ...pr, id: local?.id ?? null, ...stackEntryStats(local, pr),
+            pendingCount: local ? q.pending.all(local.id).length : 0,
+            updatedAt: Date.parse(pr.updatedAt), stack: null,
+          };
+        }),
+        ...rows.filter((row) => prIsOpen(row.state) && cachedPrStack(row.owner, row.repo, row.number) === null && !owned.has(prKey(row)) && row.author !== own?.login).map((row) => ({
+          id: row.id,
+          owner: row.owner,
+          repo: row.repo,
+          number: row.number,
+          title: row.title,
+          state: row.state,
+          isDraft: row.is_draft === 1,
+          reviewDecision: row.review_decision,
+          headSha: row.head_sha,
+          ...reviewStats(row),
+          pendingCount: q.pending.all(row.id).length,
+          updatedAt: Date.parse(row.gh_updated_at) || row.created_at,
+          stack: null,
+        })),
+      ].sort((a, b) => b.updatedAt - a.updatedAt),
+    };
+  }
+
+  bb.rpc.register(rpcContract, {
+    reviews_list: listReviews,
     reviews_open: async ({ ref }) => ({ review: await openReview(ref) }),
     reviews_get: ({ reviewId }) => reviewDetail(reviewId),
     reviews_sync: ({ reviewId }) => syncReview(reviewId, true),
@@ -1579,13 +1698,17 @@ export default async function plugin(bb: BbPluginApi) {
     async start(signal) {
       while (!signal.aborted) {
         const started = Date.now();
-        const queue = q.reviews.all();
+        try { await refreshOwnPrs(); await scanPrStatuses(); }
+        catch (cause) { bb.log.warn(`prefetch discovery: ${errorMessage(cause)}`); }
+        const queue = (await listReviews()).reviews;
         await Promise.all(
-          Array.from({ length: 4 }, async () => {
+          Array.from({ length: 2 }, async () => {
             while (queue.length > 0 && !signal.aborted) {
-              const row = queue.shift()!;
-              try { await syncReview(row.id); }
-              catch (cause) { bb.log.warn(`sync ${row.owner}/${row.repo}#${row.number}: ${errorMessage(cause)}`); }
+              const ref = queue.shift()!;
+              try {
+                const review = await openPr(ref.owner, ref.repo, ref.number, true);
+                if (!signal.aborted) await syncReview(review.id);
+              } catch (cause) { bb.log.warn(`prefetch ${ref.owner}/${ref.repo}#${ref.number}: ${errorMessage(cause)}`); }
             }
           }),
         );
@@ -1605,7 +1728,7 @@ export default async function plugin(bb: BbPluginApi) {
             bb.log.warn(`sync stack ${tracked.key}: ${errorMessage(cause)}`);
           }
         }));
-        discoverStacks(q.reviews.all().filter((row) => stacks.forPr(row.owner, row.repo, row.number) === undefined));
+        discoverStacks(q.reviews.all().filter((row) => prIsOpen(row.state) && stacks.forPr(row.owner, row.repo, row.number) === undefined));
         await sleep(STACK_FRESH_MS, signal);
       }
     },
@@ -1616,6 +1739,16 @@ export default async function plugin(bb: BbPluginApi) {
       while (!signal.aborted) {
         try { await refreshOwnPrs(); }
         catch (cause) { bb.log.warn(`sync authored PRs: ${errorMessage(cause)}`); }
+        await sleep(SYNC_EVERY_MS, signal);
+      }
+    },
+  });
+
+  bb.background.service("scan-pr-status", {
+    async start(signal) {
+      while (!signal.aborted) {
+        try { await scanPrStatuses(); }
+        catch (cause) { bb.log.warn(`scan PR status: ${errorMessage(cause)}`); }
         await sleep(SYNC_EVERY_MS, signal);
       }
     },
