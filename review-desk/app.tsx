@@ -1780,7 +1780,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
   };
   return (
     <div className="h-full min-h-0 overflow-y-auto">
-      <div className="mx-auto w-full max-w-[100rem] px-4 py-8 sm:px-8 sm:py-12">
+      <div className="w-full px-4 py-8 sm:px-8 sm:py-12">
         <h1 className="text-2xl font-semibold tracking-tight">Reviews</h1>
         <form onSubmit={open} className="mt-6 flex max-w-2xl items-center gap-2">
           <Input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="owner/repo#123 or owner/repo/stack/7" className="h-10" aria-label="Pull request" />
