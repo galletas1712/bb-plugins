@@ -1283,20 +1283,21 @@ export default async function plugin(bb: BbPluginApi) {
       const own = cachedOwnPrs();
       const rows = q.reviews.all();
       const prKey = (pr: { owner: string; repo: string; number: number }) => `${pr.owner}/${pr.repo}#${pr.number}`;
-      const owned = new Set(own?.prs.map(prKey));
+      const owned = new Map(own?.prs.map((pr) => [prKey(pr), pr]));
       discoverStacks(rows);
       return {
         discoveryError: ownPrError,
         reviews: [
           ...stacks.list().flatMap((tracked): ReviewSummary[] => tracked.stack.entries.map((entry) => {
             const local = q.reviewByKey.get(tracked.owner, tracked.repo, entry.number);
+            const activity = owned.get(prKey({ owner: tracked.owner, repo: tracked.repo, number: entry.number }))?.updatedAt ?? local?.gh_updated_at;
             return {
               id: local?.id ?? null, owner: tracked.owner, repo: tracked.repo,
               number: entry.number, title: entry.title, state: entry.merged ? "MERGED" : entry.state,
               isDraft: entry.isDraft, reviewDecision: entry.reviewDecision, headSha: entry.headSha,
               ...stackEntryStats(local, entry),
               pendingCount: local ? q.pending.all(local.id).length : 0,
-              updatedAt: local?.updated_at ?? tracked.openedAt,
+              updatedAt: Date.parse(activity ?? "") || tracked.openedAt,
               stack: { number: tracked.stack.number, position: entry.position, size: tracked.stack.entries.length, key: tracked.key },
             };
           })),
@@ -1320,7 +1321,7 @@ export default async function plugin(bb: BbPluginApi) {
             headSha: row.head_sha,
             ...reviewStats(row),
             pendingCount: q.pending.all(row.id).length,
-            updatedAt: row.updated_at,
+            updatedAt: Date.parse(row.gh_updated_at) || row.created_at,
             stack: null,
           })),
         ].sort((a, b) => b.updatedAt - a.updatedAt),

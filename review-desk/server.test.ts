@@ -346,3 +346,21 @@ test("automatic discovery respects removal of unopened PRs and entire stacks, an
     assert.equal((await f.rpc("reviews_list", null) as any).discoveryError, null);
   } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
 });
+
+test("review activity comes from GitHub rather than opening or syncing the local review", async () => {
+  const f = await fixture(); const now = Date.now;
+  try {
+    const first = await f.open(1);
+    const manual = await f.open(9);
+    f.setOwn({ login: "viewer", prs: [{ ...ownPr(1), updatedAt: "2026-10-10T00:00:00Z" }, { ...ownPr(2), updatedAt: "2026-10-09T00:00:00Z" }] });
+    const before = await f.list();
+    assert.equal(before.find((pr) => pr.number === 1)?.updatedAt, Date.parse("2026-10-10T00:00:00Z"));
+    assert.equal(before.find((pr) => pr.number === 2)?.updatedAt, Date.parse("2026-10-09T00:00:00Z"));
+    assert.equal(before.find((pr) => pr.number === 9)?.updatedAt, Date.parse("2026-10-06T00:00:00Z"));
+    Date.now = () => now() + 60_000;
+    await f.rpc("reviews_sync", { reviewId: first.id });
+    await f.rpc("reviews_sync", { reviewId: manual.id });
+    const after = await f.list();
+    for (const number of [1, 2, 9]) assert.equal(after.find((pr) => pr.number === number)?.updatedAt, before.find((pr) => pr.number === number)?.updatedAt);
+  } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
+});

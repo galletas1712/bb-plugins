@@ -1702,6 +1702,19 @@ function ReviewForm({ reviewId, detail, rpc, refetch, onJump, onSubmitted }: {
 // Page
 // ---------------------------------------------------------------------------
 
+function groupRepositories(reviews: ReviewSummary[]) {
+  const repos = new Map<string, { key: string; updatedAt: number; items: ReviewSummary[] }>();
+  for (const review of reviews) {
+    const key = `${review.owner}/${review.repo}`;
+    const repo = repos.get(key) ?? { key, updatedAt: 0, items: [] };
+    repo.updatedAt = Math.max(repo.updatedAt, review.updatedAt);
+    repo.items.push(review);
+    repos.set(key, repo);
+  }
+  for (const repo of repos.values()) repo.items.sort((a, b) => b.updatedAt - a.updatedAt || a.number - b.number);
+  return [...repos.values()].sort((a, b) => b.updatedAt - a.updatedAt || a.key.localeCompare(b.key));
+}
+
 function groupReviews(reviews: ReviewSummary[]): { key: string; stack: ReviewSummary["stack"]; items: ReviewSummary[] }[] {
   const groups: { key: string; stack: ReviewSummary["stack"]; items: ReviewSummary[] }[] = [];
   const seen = new Set<ReviewSummary>();
@@ -1767,9 +1780,9 @@ function ReviewsPage({ subPath }: { subPath: string }) {
   };
   return (
     <div className="h-full min-h-0 overflow-y-auto">
-      <div className="mx-auto w-full max-w-2xl px-6 py-12">
+      <div className="mx-auto w-full max-w-[100rem] px-4 py-8 sm:px-8 sm:py-12">
         <h1 className="text-2xl font-semibold tracking-tight">Reviews</h1>
-        <form onSubmit={open} className="mt-6 flex items-center gap-2">
+        <form onSubmit={open} className="mt-6 flex max-w-2xl items-center gap-2">
           <Input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="owner/repo#123 or owner/repo/stack/7" className="h-10" aria-label="Pull request" />
           <Button type="submit" className="h-10" disabled={opening || ref.trim() === ""}>
             {opening ? <Icon name="Loading" className="size-4 animate-spin" /> : <Icon name="GitPullRequest" className="size-4" />}
@@ -1778,76 +1791,93 @@ function ReviewsPage({ subPath }: { subPath: string }) {
         </form>
         {openError ? <p className="mt-2 text-sm text-destructive">{openError}</p> : null}
         <div className="mt-10">
-          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Pull requests</div>
+          <div className="mb-4 text-xs font-medium uppercase tracking-wide text-muted-foreground">Repositories</div>
           {error ? <p className="mb-3 text-sm text-destructive">{error}</p> : null}
           {reviews === null ? <p className="text-sm text-muted-foreground">Loading…</p> : reviews.length === 0 ? <EmptyState>No reviews yet.</EmptyState> : (
-            <ul className="space-y-3">
-              {groupReviews(reviews).map((group) => {
-                if (group.stack === null) {
-                  const r = group.items[0];
-                  if (r === undefined) return null;
-                  return (
-                    <li key={group.key} className="overflow-hidden rounded-lg border border-border">
-                      <div className="flex items-center">
-                        <button type="button" disabled={opening} onClick={() => void openSummary(r)} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-state-hover">
-                          <PrMark state={r.state} reviewDecision={r.reviewDecision} isDraft={r.isDraft} className="size-4" />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm font-medium">{r.title}</span>
-                            <span className="flex items-center gap-2 truncate text-xs text-muted-foreground">
-                              <span className="truncate">{r.owner}/{r.repo} #{r.number}</span>
-                              <DiffStat additions={r.additions} deletions={r.deletions} />
-                              <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
-                            </span>
-                          </span>
-                          <span className="shrink-0 text-xs text-muted-foreground">{timeAgo(r.updatedAt)}</span>
-                        </button>
-                        <RemoveReviewButton label="Remove review" onClick={() => void drop(r)} />
-                      </div>
-                    </li>
-                  );
-                }
-                const stackInfo = group.stack;
-                const latest = [...group.items].sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? group.items[0];
-                if (latest === undefined) return null;
-                const layers = [...group.items].sort((a, b) => (a.stack?.position ?? 0) - (b.stack?.position ?? 0));
-                return (
-                  <li key={group.key} className="overflow-hidden rounded-lg border border-border">
-                    <div className="flex items-center">
-                      <button type="button" disabled={opening} onClick={() => void openSummary(latest)} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-state-hover">
-                        <PrMark state={latest.state} isDraft={latest.isDraft} reviewDecision={latest.reviewDecision} className="size-4" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm font-medium">{latest.title}</span>
-                          <span className="flex items-center gap-2 truncate text-xs text-muted-foreground">
-                            <span className="truncate">{latest.owner}/{latest.repo}</span>
-                            {stackInfo.number !== null ? <span className="font-mono" title={`GitHub stack #${stackInfo.number}`}>#{stackInfo.number}</span> : null}
-                            <span className="inline-flex items-center gap-1" title={`${stackInfo.size} pull requests in stack`}><Icon name="Layers" className="size-3.5" />{stackInfo.size} PRs</span>
-                            <DiffStat {...diffStats(group.items)} />
-                            <CountBadge count={group.items.reduce((n, r) => n + r.pendingCount, 0)} title="Pending comments" />
-                          </span>
-                        </span>
-                        <span className="shrink-0 text-xs text-muted-foreground">{timeAgo(latest.updatedAt)}</span>
-                      </button>
-                      <RemoveReviewButton label="Remove stack reviews" onClick={() => void drop(latest)} />
-                    </div>
-                    <ul className="divide-y divide-border/60 border-t border-border/60">
-                      {layers.map((r) => (
-                        <li key={r.number}>
-                          <div className="flex items-center">
-                            <button type="button" disabled={opening} onClick={() => void openSummary(r)} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-1.5 pl-11 text-left hover:bg-state-hover">
-                              <span className="w-8 shrink-0 font-mono text-[11px] text-muted-foreground">{r.stack?.position}/{stackInfo.size}</span>
-                              <span className="w-12 shrink-0 font-mono text-xs">#{r.number}</span>
-                              <span className="min-w-0 flex-1 truncate text-xs">{r.title}</span>
-                              <DiffStat additions={r.additions} deletions={r.deletions} />
-                              <PrMark state={r.state} reviewDecision={r.reviewDecision} isDraft={r.isDraft} />
-                              <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
-                            </button>
-                          </div>
-                        </li>
-                      ))}
+            <ul aria-label="Repositories" className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,28rem),1fr))] items-start gap-x-8 gap-y-10">
+              {groupRepositories(reviews).map((repository) => (
+                <li key={repository.key} className="min-w-0">
+                  <details open aria-label={`Repository ${repository.key}`} className="group/repository">
+                    <summary className="flex cursor-pointer list-none items-center gap-2 border-b border-border pb-3 [&::-webkit-details-marker]:hidden">
+                      <Icon name="ChevronRight" className="size-4 shrink-0 text-muted-foreground transition-transform group-open/repository:rotate-90" />
+                      <h2 className="min-w-0 flex-1 break-words text-base font-semibold">{repository.key}</h2>
+                      <span className="shrink-0 text-xs text-muted-foreground">{repository.items.length} PR{repository.items.length === 1 ? "" : "s"}</span>
+                      <span className="shrink-0 text-xs text-muted-foreground" title="Latest PR activity">{timeAgo(repository.updatedAt)}</span>
+                    </summary>
+                    <ul className="mt-3 space-y-2">
+                      {groupReviews(repository.items).map((group) => {
+                        if (group.stack === null) {
+                          const r = group.items[0];
+                          if (r === undefined) return null;
+                          return (
+                            <li key={group.key} className="overflow-hidden rounded-lg border border-border">
+                              <div className="flex items-center">
+                                <button type="button" disabled={opening} onClick={() => void openSummary(r)} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-state-hover">
+                                  <PrMark state={r.state} reviewDecision={r.reviewDecision} isDraft={r.isDraft} className="size-4" />
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block break-words text-sm font-medium">{r.title}</span>
+                                    <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                                      <span className="font-mono">#{r.number}</span>
+                                      <DiffStat additions={r.additions} deletions={r.deletions} />
+                                      <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
+                                    </span>
+                                  </span>
+                                  <span className="shrink-0 text-xs text-muted-foreground">{timeAgo(r.updatedAt)}</span>
+                                </button>
+                                <RemoveReviewButton label="Remove review" onClick={() => void drop(r)} />
+                              </div>
+                            </li>
+                          );
+                        }
+                        const stackInfo = group.stack;
+                        const latest = [...group.items].sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? group.items[0];
+                        if (latest === undefined) return null;
+                        const layers = [...group.items].sort((a, b) => (a.stack?.position ?? 0) - (b.stack?.position ?? 0));
+                        return (
+                          <li key={group.key} className="relative overflow-hidden rounded-lg border border-border">
+                            <details aria-label={`Stack ${stackInfo.number ?? "inferred"} in ${repository.key}`} className="group/stack">
+                              <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 px-3 py-2.5 pr-11 text-left hover:bg-state-hover [&::-webkit-details-marker]:hidden">
+                                <Icon name="ChevronRight" className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open/stack:rotate-90" />
+                                <PrMark state={latest.state} isDraft={latest.isDraft} reviewDecision={latest.reviewDecision} className="size-4" />
+                                <span className="min-w-0 flex-1">
+                                  <span className="block break-words text-sm font-medium">{latest.title}</span>
+                                  <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                                    <span className="font-mono">{stackInfo.number !== null ? `Stack #${stackInfo.number}` : "PR stack"}</span>
+                                    <span className="inline-flex items-center gap-1" title={`${stackInfo.size} pull requests in stack`}><Icon name="Layers" className="size-3.5" />{stackInfo.size} PRs</span>
+                                    <DiffStat {...diffStats(group.items)} />
+                                    <CountBadge count={group.items.reduce((n, r) => n + r.pendingCount, 0)} title="Pending comments" />
+                                  </span>
+                                </span>
+                              </summary>
+                              <ul className="divide-y divide-border/60 border-t border-border/60">
+                                {layers.map((r) => (
+                                  <li key={r.number}>
+                                    <div className="flex items-center">
+                                      <button type="button" disabled={opening} onClick={() => void openSummary(r)} className="flex min-w-0 flex-1 items-start gap-2 px-3 py-2 text-left hover:bg-state-hover">
+                                        <span className="w-7 shrink-0 pt-0.5 font-mono text-[11px] text-muted-foreground">{r.stack?.position}/{stackInfo.size}</span>
+                                        <span className="min-w-0 flex-1">
+                                          <span className="block break-words text-sm">{r.title}</span>
+                                          <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                                            <span className="font-mono">#{r.number}</span>
+                                            <DiffStat additions={r.additions} deletions={r.deletions} />
+                                          </span>
+                                        </span>
+                                        <PrMark state={r.state} reviewDecision={r.reviewDecision} isDraft={r.isDraft} />
+                                        <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
+                                      </button>
+                                    </div>
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                            <div className="absolute right-0 top-2"><RemoveReviewButton label="Remove stack reviews" onClick={() => void drop(latest)} /></div>
+                          </li>
+                        );
+                      })}
                     </ul>
-                  </li>
-                );
-              })}
+                  </details>
+                </li>
+              ))}
             </ul>
           )}
         </div>

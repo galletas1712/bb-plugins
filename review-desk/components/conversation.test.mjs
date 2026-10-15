@@ -282,3 +282,43 @@ test("unopened authored PRs can be opened or removed and discovery errors leave 
     assert.deepEqual(removed, { owner: "o", repo: "r", number: 4 });
   } finally { slot.lifecycle.unmount(); window.confirm = previousConfirm; }
 });
+
+test("repository groups sort by latest PR activity and nest stacks independently of standalone PRs", async () => {
+  const base = summaries[3];
+  let reviews = [
+    { ...base, owner: "same", repo: "shared", number: 10, title: "Older standalone", updatedAt: 100 },
+    { ...summaries[0], owner: "same", repo: "shared", title: "Stack bottom", updatedAt: 150, stack: { key: "gh:same/shared#7", number: 7, position: 1, size: 2 } },
+    { ...summaries[2], owner: "same", repo: "shared", title: "Stack top", updatedAt: 300, stack: { key: "gh:same/shared#7", number: 7, position: 2, size: 2 } },
+    { ...base, owner: "other", repo: "shared", number: 11, title: "Other owner's PR", updatedAt: 200 },
+  ];
+  const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { reviews_list: () => ({ reviews }) } });
+  try {
+    await slot.findByRole("heading", { name: "same/shared" });
+    assert.deepEqual(slot.getAllByRole("heading", { level: 2 }).map((el) => el.textContent), ["same/shared", "other/shared"]);
+    const repo = slot.getByLabelText("Repository same/shared");
+    const stack = slot.getByLabelText("Stack 7 in same/shared");
+    assert.equal(repo.open, true);
+    assert.equal(stack.open, false);
+    assert.equal(stack.closest("ul").parentElement, repo);
+    assert.equal(slot.getByText("Older standalone").closest("details"), repo);
+    assert.equal(slot.getByText("Stack bottom").closest("details"), stack);
+    assert.ok(stack.compareDocumentPosition(slot.getByText("Older standalone")) & Node.DOCUMENT_POSITION_FOLLOWING);
+    assert.ok(slot.getAllByLabelText("Diff: 40 additions, 8 deletions").length > 0);
+    fireEvent.click(stack.querySelector("summary"));
+    assert.equal(stack.open, true);
+    const layers = [...stack.querySelectorAll("ul button")];
+    assert.ok(layers[0].textContent.includes("Stack bottom"));
+    assert.ok(layers[1].textContent.includes("Stack top"));
+    assert.equal(stack.parentElement.querySelectorAll('button[aria-label="Remove stack reviews"]').length, 1);
+    assert.equal(stack.querySelector('button[aria-label^="Remove"]'), null);
+    fireEvent.click(repo.querySelector("summary"));
+    assert.equal(repo.open, false);
+    assert.equal(slot.getByLabelText("Repository other/shared").open, true);
+    reviews = reviews.map((pr) => pr.owner === "other" ? { ...pr, updatedAt: 400 } : pr);
+    await act(async () => { window.dispatchEvent(new window.Event("focus")); });
+    assert.deepEqual(slot.getAllByRole("heading", { level: 2 }).map((el) => el.textContent), ["other/shared", "same/shared"]);
+    assert.equal(slot.getByLabelText("Repository same/shared"), repo);
+    assert.equal(repo.open, false);
+    assert.equal(stack.open, true);
+  } finally { slot.lifecycle.unmount(); }
+});
