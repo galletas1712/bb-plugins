@@ -3,6 +3,7 @@
 // filesystem of the checkout goes through here.
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { mergeInputSchema, mergeOptionsSchema, mergeResultSchema } from "./merge-contract";
 
 export const changedFileSchema = z.object({
   path: z.string(),
@@ -162,6 +163,9 @@ export const prStatusesSchema = z.object({ prs: z.array(ghPrStatusSchema.extend(
 export type PrStatus = z.infer<typeof ghPrStatusSchema>;
 
 export const hostContract = defineRpcContract({
+  gh_merge_options: { input: prRefSchema, output: mergeOptionsSchema },
+  gh_merge: { input: prRefSchema.extend(mergeInputSchema.shape), output: mergeResultSchema },
+  gh_merge_result: { input: prRefSchema.extend({ requestId: z.string().uuid() }), output: mergeResultSchema },
   gh_own_prs: { input: z.null(), output: ownPrsSchema },
   gh_pr_statuses: { input: z.object({ prs: z.array(prRefSchema).max(50) }), output: prStatusesSchema },
   /** Fetch the PR head and base, and keep a detached worktree at the head. */

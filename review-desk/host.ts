@@ -10,6 +10,7 @@ import { fetchPullRequestStack } from "./stack-fetch";
 import { fetchOwnPullRequests } from "./own-prs";
 import { fetchPrStatuses } from "./pr-statuses";
 import { editBody, readDescription } from "./lib/github-edit";
+import { mergePr, readMergeOptions, readMergeResult } from "./lib/github-merge";
 import { fetchConversation, fetchPrMetadata, fetchReviewThreads } from "./github-conversation";
 
 const execFileAsync = promisify(execFile);
@@ -171,6 +172,9 @@ async function ghPrStatus(owner: string, repo: string, number: number): Promise<
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
+    gh_merge_options(input) { return readMergeOptions(run, input); },
+    gh_merge(input) { return mergePr(run, input); },
+    gh_merge_result(input) { return readMergeResult(run, input); },
     async repo_clone({ owner, repo, dest }, context) {
       const target = dest === "" ? path.join(context.experimental_paths.dataDir, "repos", `${owner}__${repo}`) : dest;
       return inRepository(target, async () => {

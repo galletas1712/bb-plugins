@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createFakePluginHost, makeHostResponse } from "@get-bb/plugin-sdk/testing";
 import plugin, { type ReviewSummary } from "./server";
 import type { ChangedFile, GhPr, PrStack, OwnPrs } from "./host-contract";
+import type { MergeResult } from "./merge-contract";
 
 const pr = (number: number): GhPr => ({ number, title: `PR ${number}`, body: "Body", state: "OPEN", isDraft: false, url: `https://github.com/o/r/pull/${number}`, author: { login: "me" }, baseRefName: "main", headRefName: `branch-${number}`, headRefOid: `head-${number}`, baseRefOid: "base", additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, mergeable: null, updatedAt: "2026-10-06T00:00:00Z", createdAt: "2026-10-05T00:00:00Z", checks: [], labels: [], reviewers: [], assignees: [], commits: [] });
 const stack = (numbers: number[]): PrStack => ({ number: 7, baseRefName: "main", source: "github", entries: numbers.map((number, i) => ({ position: i + 1, number, title: `PR ${number}`, state: "OPEN", isDraft: false, merged: false, url: pr(number).url, additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, headRefName: `branch-${number}`, headSha: `head-${number}`, baseRefName: "main", files: [] })) });
@@ -19,6 +20,7 @@ async function fixture() {
   let onPrepare: ((number: number) => Promise<void> | void) | undefined;
   let onThreads: (() => Promise<void> | void) | undefined;
   let onConversation: (() => void) | undefined;
+  let mergeResult: MergeResult = { status: "pending", requestId: "630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42", message: "Processing" };
   let own: OwnPrs = { login: "viewer", prs: [] };
   let ownError: string | null = null;
   let onOwn: (() => void) | undefined;
@@ -27,6 +29,8 @@ async function fixture() {
     const args = input as any;
     calls.push({ method, input });
     switch (method) {
+      case "gh_merge_options": return { methods: ["squash"], reason: null, headSha: `head-${args.number}`, baseRefName: "main", prs: [{ number: args.number, headSha: `head-${args.number}` }] };
+      case "gh_merge": case "gh_merge_result": return mergeResult;
       case "gh_own_prs": onOwn?.(); if (ownError) throw new Error(ownError); return own;
       case "gh_pr_statuses": {
         const prs = args.prs.map((ref: { owner: string; repo: string; number: number }) => ({ ...pr(ref.number), ...remotePrs.get(ref.number), owner: ref.owner, repo: ref.repo }));
@@ -54,8 +58,38 @@ async function fixture() {
   const rpc = (method: string, input: unknown) => harness.behavior.callRpc(method, input);
   const open = async (number: number) => (await rpc("reviews_open", { ref: `o/r#${number}` }) as any).review;
   const list = async () => (await rpc("reviews_list", null) as { reviews: ReviewSummary[] }).reviews;
-  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; }, onDetails: (fn: typeof onDetails) => { onDetails = fn; }, onStatus: (fn: typeof onStatus) => { onStatus = fn; }, setOwn: (next: OwnPrs) => { own = next; }, setOwnError: (error: string | null) => { ownError = error; }, onOwn: (fn: typeof onOwn) => { onOwn = fn; }, onBatch: (fn: typeof onBatch) => { onBatch = fn; }, setBatchError: (error: string | null) => { batchError = error; }, onPrepare: (fn: typeof onPrepare) => { onPrepare = fn; }, onThreads: (fn: typeof onThreads) => { onThreads = fn; }, onConversation: (fn: typeof onConversation) => { onConversation = fn; } };
+  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setMergeResult: (result: MergeResult) => { mergeResult = result; }, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; }, onDetails: (fn: typeof onDetails) => { onDetails = fn; }, onStatus: (fn: typeof onStatus) => { onStatus = fn; }, setOwn: (next: OwnPrs) => { own = next; }, setOwnError: (error: string | null) => { ownError = error; }, onOwn: (fn: typeof onOwn) => { onOwn = fn; }, onBatch: (fn: typeof onBatch) => { onBatch = fn; }, setBatchError: (error: string | null) => { batchError = error; }, onPrepare: (fn: typeof onPrepare) => { onPrepare = fn; }, onThreads: (fn: typeof onThreads) => { onThreads = fn; }, onConversation: (fn: typeof onConversation) => { onConversation = fn; } };
 }
+
+test("merge RPCs use the saved PR identity and only hide a review after confirmed GitHub success", async () => {
+  const f = await fixture();
+  try {
+    const review = await f.open(1);
+    await f.rpc("pending_add", { reviewId: review.id, path: "a.ts", line: 1, side: "RIGHT", body: "Retain this draft" });
+    const options = await f.rpc("review_merge_options", { reviewId: review.id }) as any;
+    const input = { reviewId: review.id, method: "squash", expected: { headSha: options.headSha, baseRefName: options.baseRefName, prs: options.prs } };
+    const pending = await f.rpc("review_merge", input) as MergeResult;
+    assert.equal(pending.status, "pending");
+    assert.ok((await f.list()).some((pr) => pr.number === 1));
+    assert.deepEqual(f.calls.find((call) => call.method === "gh_merge")?.input, { owner: "o", repo: "r", number: 1, method: "squash", expected: input.expected });
+    f.setMergeResult({ status: "failed", requestId: null, message: "Required reviews missing" });
+    assert.equal((await f.rpc("review_merge_result", { reviewId: review.id, requestId: pending.requestId }) as MergeResult).status, "failed");
+    assert.ok((await f.list()).some((pr) => pr.number === 1));
+    f.setMergeResult({ status: "merged", requestId: null, message: "Merged" });
+    await f.rpc("review_merge_result", { reviewId: review.id, requestId: pending.requestId });
+    assert.equal((await f.list()).some((pr) => pr.number === 1), false);
+    assert.equal(f.bb.storage.database().prepare<[string], { state: string }>("SELECT state FROM reviews WHERE id = ?").get(review.id)?.state, "MERGED");
+    assert.equal(f.bb.storage.database().prepare<[string], { n: number }>("SELECT count(*) AS n FROM pending WHERE review_id = ?").get(review.id)?.n, 1);
+    // Even stale OPEN metadata, including scans after reload, cannot undo a merge.
+    await f.reload();
+    const service = f.harness.behavior.runService("scan-pr-status");
+    f.onBatch(() => service.controller.abort());
+    await service.done;
+    assert.equal((await f.list()).some((pr) => pr.number === 1), false);
+    await assert.rejects(f.rpc("review_merge", { ...input, reviewId: "missing" }), /not found/);
+    await assert.rejects(f.rpc("review_merge", { ...input, method: "admin" }));
+  } finally { await f.harness.lifecycle.dispose(); }
+});
 
 test("Recent includes unopened layers and refreshed metadata, preserves detached drafts, and survives reload", async () => {
   const f = await fixture();

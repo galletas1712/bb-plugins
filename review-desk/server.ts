@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { mergeInputSchema, mergeOptionsSchema, mergeResultSchema } from "./merge-contract";
 import { createStackStore, type TrackedStack } from "./stack-store";
 import { diffStats } from "./lib/diff-stats";
 import { hunkLineNumbers } from "./diff-lines";
@@ -180,6 +181,9 @@ export const rpcContract = defineRpcContract({
   review_threads_refresh: { input: reviewIdSchema, output: z.object({ threads: z.array(ghThreadSchema) }) },
   review_description: { input: reviewIdSchema, output: z.object({ body: z.string(), canEdit: z.boolean() }) },
   review_edit_body: { input: ghBodyEditSchema.extend({ reviewId: z.string() }), output: z.object({ body: z.string() }) },
+  review_merge_options: { input: reviewIdSchema, output: mergeOptionsSchema },
+  review_merge: { input: mergeInputSchema.extend({ reviewId: z.string() }), output: mergeResultSchema },
+  review_merge_result: { input: reviewIdSchema.extend({ requestId: z.string().uuid() }), output: mergeResultSchema },
   viewed_set: { input: z.object({ reviewId: z.string(), path: z.string(), viewed: z.boolean() }), output: okSchema },
   pending_add: {
     input: z.object({
@@ -760,6 +764,8 @@ export default async function plugin(bb: BbPluginApi) {
   let statusError: string | null = null;
 
   function rememberStatus(owner: string, repo: string, pr: PrStatus, request: number): PrStatus {
+    // A completed merge is permanent, including while an older scan is in flight.
+    if (q.reviewByKey.get(owner, repo, pr.number)?.state === "MERGED" && pr.state !== "MERGED") pr = { ...pr, state: "MERGED" };
     const key = prKey({ owner, repo, number: pr.number });
     const previous = prStatuses.get(key);
     if (previous && (previous.pr.updatedAt > pr.updatedAt || previous.pr.updatedAt === pr.updatedAt && previous.request > request)) return previous.pr;
@@ -842,6 +848,14 @@ export default async function plugin(bb: BbPluginApi) {
       } finally { statusScan = undefined; }
     })();
     return statusScan;
+  }
+
+  function mergedReview(row: ReviewRow): void {
+    const now = Date.now();
+    q.setStatus.run("MERGED", 0, row.title, row.review_decision, new Date(now).toISOString(), now, now, row.id);
+    prStatuses.delete(prKey(row));
+    publish(row.id, "closed");
+    void scanPrStatuses().catch(() => undefined);
   }
 
   let ownPrRefresh: Promise<void> | undefined;
@@ -1517,6 +1531,22 @@ export default async function plugin(bb: BbPluginApi) {
     review_description: ({ reviewId }) => {
       const row = requireReview(reviewId);
       return host.call("gh_description", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row));
+    },
+    review_merge_options: ({ reviewId }) => {
+      const row = requireReview(reviewId);
+      return host.call("gh_merge_options", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row));
+    },
+    review_merge: async ({ reviewId, ...input }) => {
+      const row = requireReview(reviewId);
+      const result = await host.call("gh_merge", { owner: row.owner, repo: row.repo, number: row.number, ...input }, hostOptions(row));
+      if (result.status === "merged") mergedReview(row);
+      return result;
+    },
+    review_merge_result: async ({ reviewId, requestId }) => {
+      const row = requireReview(reviewId);
+      const result = await host.call("gh_merge_result", { owner: row.owner, repo: row.repo, number: row.number, requestId }, hostOptions(row));
+      if (result.status === "merged") mergedReview(row);
+      return result;
     },
     review_edit_body: async ({ reviewId, ...input }) => {
       const row = requireReview(reviewId);

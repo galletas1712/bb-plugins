@@ -19,6 +19,7 @@ import type { CommitInfo, FileEntry, Note, PendingComment, Review, ReviewSummary
 import type { ChangedFile } from "./host-contract";
 import type { GhThread, GhIssueComment, GhReview, GhEvent } from "./host-contract";
 import { EditableBody } from "./components/editable-body";
+import { MergePr } from "./components/merge-pr";
 import { MarkdownDiff } from "./components/markdown-diff";
 import { diffStats } from "./lib/diff-stats";
 import { orderThreadComments } from "./lib/thread-comments";
@@ -530,7 +531,7 @@ function AuthorChip({ login, when }: { login: string; when?: string }) {
 /** GitHub comment Markdown: HTML comments dropped, `<details>` rendered as real collapsibles. */
 function CommentBody({ body, className }: { body: string; className?: string }) {
   const cleaned = body.replace(/<!--[\s\S]*?-->/g, "");
-  if (cleaned.trim() === "") return <p className={cn("text-xs text-muted-foreground", className)}>No message.</p>;
+  if (cleaned.trim() === "") return null;
   const parts: ReactNode[] = [];
   const re = /<details[^>]*>\s*(?:<summary[^>]*>([\s\S]*?)<\/summary>)?([\s\S]*?)<\/details>/gi;
   let last = 0;
@@ -931,6 +932,11 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
       <span className="min-w-0 whitespace-pre-wrap break-words">{item.event.replace(/_/g, " ")}{item.body ? ": " + item.body : ""}</span>
       {item.when ? <time dateTime={item.when} className="ml-auto shrink-0">{timeAgo(item.when)}</time> : null}
       {item.url ? <UrlLink href={item.url} className="hover:underline">GitHub</UrlLink> : null}
+    </div> : item.body.replace(/<!--[\s\S]*?-->/g, "").trim() === "" ? <div key={item.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+      <span className="font-medium text-foreground">{item.author}</span>
+      <span className={item.state ? reviewStateTone(item.state) : undefined}>{item.state === "APPROVED" ? "approved these changes" : item.state === "CHANGES_REQUESTED" ? "requested changes" : item.state === "DISMISSED" ? "had their review dismissed" : item.state ? "reviewed" : "commented"}</span>
+      {item.when ? <time dateTime={item.when}>{timeAgo(item.when)}</time> : null}
+      <UrlLink href={item.url} className="hover:underline">{item.state ? "View reviewed changes" : "GitHub"}</UrlLink>
     </div> : <article key={item.key} className="border-b border-border pb-5 last:border-0">
       <CommentDetails header={<>
         <AuthorChip login={item.author} when={item.when} />
@@ -1249,6 +1255,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
         {review.author ? <span>{review.author}</span> : null}
         <span className="font-mono">{review.headRefName} → {review.baseRefName}</span>
       </div>
+      <MergePr key={reviewId} review={review} />
       <nav className="flex flex-wrap items-center gap-1" aria-label="Pull request">
         {stack ? <Button variant={stackSidebar.open ? "secondary" : "ghost"} size="sm" aria-label={stackSidebar.open ? "Hide stack sidebar" : "Show stack sidebar"} aria-pressed={stackSidebar.open} onClick={stackSidebar.toggle}><Icon name="Layers" className="size-3.5" />Stack</Button> : null}
         <Button variant={tab === "conversation" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("conversation")}>Conversation</Button>

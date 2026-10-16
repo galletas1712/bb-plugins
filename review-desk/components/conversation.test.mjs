@@ -19,13 +19,108 @@ const resize = async (width) => act(() => {
   }
 });
 const { fireEvent, act } = await import("@testing-library/react");
-const { loadPluginApp, renderSlot } = await import("@get-bb/plugin-sdk/testing/app");
+const { loadPluginApp, renderSlot: sdkRenderSlot } = await import("@get-bb/plugin-sdk/testing/app");
+const mergeOptions = { methods: ["squash"], reason: null, headSha: "head", baseRefName: "main", prs: [{ number: 1, headSha: "head" }] };
+const renderSlot = (slot, props, options) => sdkRenderSlot(slot, props, { ...options, rpc: { review_merge_options: () => mergeOptions, ...options?.rpc } });
 const app = await loadPluginApp(() => import("../app.tsx"));
 
 const comment = (id, author, body, replyToId = null) => ({ id, author, body, replyToId, databaseId: 1, createdAt: "2026-10-05T00:00:00Z", url: null, canEdit: author === "me" });
 const thread = (id, comments, isResolved = false) => ({ id, comments, isResolved, isOutdated: false, path: "file.ts", line: 1, originalLine: 1, startLine: null, originalStartLine: null, startSide: null, subjectType: "LINE", side: "RIGHT" });
 const review = { id: "review", owner: "o", repo: "r", number: 1, title: "Review", body: "Description", state: "OPEN", isDraft: false, url: "https://github.com/o/r/pull/1", author: "me", baseRefName: "main", headRefName: "branch", headSha: "head", baseSha: "base", additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, mergeable: null, labels: [], checks: [], reviewers: [], assignees: [], commits: [], createdAt: "2026-10-05T00:00:00Z", worktree: "/repo", environmentId: null, hostId: "host", syncedAt: 0, ghUpdatedAt: "2026-10-05T00:00:00Z" };
 const detail = { review, files: [], pending: [], notes: [], seen: { prevHead: null, seenHead: null }, stack: null, syncError: null, threads: [thread("active", [comment("reply", "me", "Reply body", "original"), comment("original", "other", "Original body")]), thread("resolved", [comment("hidden", "other", "Resolved body")], true)] };
+
+test("squash-only repositories name the action and require confirmation before merging the reviewed head", async () => {
+  let merged = null;
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => detail, review_seen: () => ({ ok: true }),
+    review_merge: (input) => { merged = input; return { status: "merged", requestId: null, message: "Merged" }; },
+  } });
+  try {
+    const button = await slot.findByRole("button", { name: "Squash and merge", exact: true });
+    assert.equal(button.disabled, false);
+    assert.equal(slot.queryByRole("combobox", { name: "Merge method" }), null);
+    await act(async () => { fireEvent.click(button); });
+    assert.equal(merged, null);
+    assert.ok(slot.getByRole("region", { name: "Confirm merge" }).textContent.includes("#1 into main"));
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Confirm squash and merge" })); });
+    assert.deepEqual(merged, { reviewId: "review", method: "squash", expected: { headSha: "head", baseRefName: "main", prs: [{ number: 1, headSha: "head" }] } });
+    assert.equal(slot.inspection.navigateCalls.length, 1);
+    assert.equal(slot.inspection.navigateCalls[0].options?.subPath, undefined);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test("merge method selection and confirmation show every native downstack PR affected", async () => {
+  let merges = 0;
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => detail, review_seen: () => ({ ok: true }),
+    review_merge_options: () => ({ ...mergeOptions, methods: ["merge", "squash", "rebase"], prs: [{ number: 2, headSha: "h2" }, { number: 1, headSha: "head" }] }),
+    review_merge: () => { merges++; throw new Error("GitHub branch rules rejected this merge"); },
+  } });
+  try {
+    fireEvent.change(await slot.findByRole("combobox", { name: "Merge method" }), { target: { value: "rebase" } });
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Rebase and merge 2 PRs" })); });
+    const panel = slot.getByRole("region", { name: "Confirm merge" });
+    assert.ok(panel.textContent.includes("#2, #1 into main"));
+    assert.ok(panel.textContent.includes("2 open PRs"));
+    fireEvent.click(slot.getByRole("button", { name: "Cancel", exact: true }));
+    assert.equal(merges, 0);
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Rebase and merge 2 PRs" })); });
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Confirm rebase and merge" })); });
+    assert.ok(slot.getByRole("alert").textContent.includes("branch rules rejected"));
+    assert.equal(slot.inspection.navigateCalls.length, 0);
+    assert.equal(merges, 1);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test("merge stays disabled for blockers or a head that has not been reviewed", async () => {
+  for (const options of [{ ...mergeOptions, reason: "Mark draft pull requests ready before merging." }, { ...mergeOptions, headSha: "new-head" }]) {
+    const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+      reviews_list: () => ({ reviews: [] }), reviews_get: () => detail, review_seen: () => ({ ok: true }), review_merge_options: () => options,
+    } });
+    try {
+      assert.equal((await slot.findByRole("button", { name: "Squash and merge", exact: true })).disabled, true);
+      assert.ok(slot.getByText(options.reason ?? "Refresh the PR to review its latest changes before merging."));
+    } finally { slot.lifecycle.unmount(); }
+  }
+});
+
+test("async merges stay pending until GitHub reports success or a failure", async () => {
+  const requestId = "630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42";
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => detail, review_seen: () => ({ ok: true }),
+    review_merge: () => ({ status: "pending", requestId, message: "Merge request enqueued." }),
+    review_merge_result: (input) => { assert.deepEqual(input, { reviewId: "review", requestId }); return { status: "failed", requestId: null, message: "Required checks failed." }; },
+  } });
+  try {
+    const button = await slot.findByRole("button", { name: "Squash and merge", exact: true });
+    await act(async () => { fireEvent.click(button); });
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Confirm squash and merge" })); });
+    assert.equal(slot.getByRole("button", { name: "Merging…" }).disabled, true);
+    assert.equal(slot.inspection.navigateCalls.length, 0);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1700)); });
+    assert.ok(slot.getByRole("alert").textContent.includes("Required checks failed."));
+    assert.equal(slot.inspection.navigateCalls.length, 0);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test("empty and HTML-comment-only review summaries are activity rows while real comments keep their disclosures", async () => {
+  const states = ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"];
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => detail, review_seen: () => ({ ok: true }), review_description: () => ({ body: review.body, canEdit: false }),
+    review_conversation: () => ({ comments: [], reviews: [
+      ...states.map((state, index) => ({ id: index, nodeId: `empty-${index}`, state, body: index % 2 ? "<!-- metadata -->\n " : " ", author: `reviewer-${index}`, submittedAt: review.createdAt, canEdit: false, url: review.url })),
+      { id: 5, nodeId: "with-text", state: "COMMENTED", body: "Real summary", author: "summary-author", submittedAt: review.createdAt, canEdit: true, url: review.url },
+    ], events: [], fetchedAt: 0 }),
+  } });
+  try {
+    fireEvent.click(await slot.findByRole("button", { name: "Conversation", exact: true }));
+    await slot.findByText("Real summary");
+    for (const text of ["approved these changes", "requested changes", "reviewed", "had their review dismissed"]) assert.equal(slot.getByText(text).closest("details"), null);
+    assert.ok(slot.getByText("Real summary").closest("details"));
+    assert.equal(slot.queryByText("No message."), null);
+    assert.ok(slot.getByRole("button", { name: "Edit comment by summary-author" }));
+  } finally { slot.lifecycle.unmount(); }
+});
 
 test("conversation shows each comment, independently toggles bodies, and keeps replies under their original", async () => {
   const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
@@ -44,7 +139,8 @@ test("conversation shows each comment, independently toggles bodies, and keeps r
     assert.ok(reply.closest(".border-l-2"));
     assert.equal(slot.queryByRole("button", { name: "Edit comment by other" }), null);
     assert.ok(slot.getByRole("button", { name: "Edit comment by me" }));
-    assert.ok(slot.getByText("No message."));
+    assert.equal(slot.queryByText("No message."), null);
+    assert.equal(slot.getByText("approved these changes").closest("details"), null);
     assert.equal(slot.queryByText("Resolved body"), null);
     const resolved = slot.getByText("Resolved threads (1)").closest("details");
     assert.equal(resolved.open, false);
