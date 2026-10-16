@@ -4,6 +4,7 @@ import type { z } from "zod";
 type Run = (cmd: string, args: string[], options?: { input?: string }) => Promise<{ stdout: string }>;
 interface PrRef { owner: string; repo: string; number: number }
 interface Pr { number: number; state: string; isDraft: boolean; headRefOid: string }
+interface BranchRule { type: string; parameters?: { allowed_merge_methods?: string[]; merge_method?: string } }
 interface Repository {
   mergeCommitAllowed: boolean; squashMergeAllowed: boolean; rebaseMergeAllowed: boolean; viewerPermission: string;
   pullRequest: (Pr & {
@@ -36,19 +37,28 @@ export async function readMergeOptions(run: Run, ref: PrRef): Promise<MergeOptio
   const position = entries?.nodes.find((entry) => entry.pullRequest.number === ref.number)?.position;
   if (entries?.pageInfo.hasNextPage || entries && position === undefined) throw new Error("Cannot determine the complete merge scope. Open this pull request on GitHub to merge it.");
   const affected = entries ? entries.nodes.filter((entry) => entry.position <= position!).sort((a, b) => a.position - b.position).map((entry) => entry.pullRequest).filter((pr) => pr.state === "OPEN") : [pr];
-  const methods: MergeOptions["methods"] = [];
+  let methods: MergeOptions["methods"] = [];
   if (repo.mergeCommitAllowed) methods.push("merge");
   if (repo.squashMergeAllowed) methods.push("squash");
   if (repo.rebaseMergeAllowed) methods.push("rebase");
+  const baseRefName = pr.stack?.baseRefName ?? pr.baseRefName;
+  const rules = (JSON.parse((await run("gh", ["api", "--paginate", "--slurp", "-H", "X-GitHub-Api-Version: 2026-03-10", `repos/${ref.owner}/${ref.repo}/rules/branches/${encodeURIComponent(baseRefName)}?per_page=100`])).stdout) as BranchRule[][]).flat();
+  for (const rule of rules) {
+    const allowed = rule.type === "pull_request" ? rule.parameters?.allowed_merge_methods
+      : rule.type === "required_linear_history" ? ["squash", "rebase"]
+      : rule.type === "merge_queue" && rule.parameters?.merge_method ? [rule.parameters.merge_method.toLowerCase()] : undefined;
+    if (allowed) methods = methods.filter((method) => allowed.includes(method));
+  }
   const reason = pr.state !== "OPEN" ? "This pull request is already closed or merged."
     : !["WRITE", "MAINTAIN", "ADMIN"].includes(repo.viewerPermission) ? "Your GitHub account does not have permission to merge."
     : affected.some((pr) => pr.isDraft) ? "Mark draft pull requests ready before merging."
-    : methods.length === 0 ? "This repository does not allow a merge method."
+    : rules.some((rule) => rule.type === "merge_queue") ? "This branch requires a merge queue. Merge it on GitHub."
+    : methods.length === 0 ? "The repository and branch rules do not allow a common merge method."
     : pr.mergeable === "CONFLICTING" ? "Resolve merge conflicts before merging."
     : ["BLOCKED", "BEHIND", "DRAFT"].includes(pr.mergeStateStatus) ? "GitHub merge requirements have not been met."
     : pr.mergeable === "UNKNOWN" || pr.mergeStateStatus === "UNKNOWN" ? "GitHub is checking whether this pull request can be merged."
     : null;
-  return { methods, reason, headSha: pr.headRefOid, baseRefName: pr.stack?.baseRefName ?? pr.baseRefName, prs: affected.map((pr) => ({ number: pr.number, headSha: pr.headRefOid })) };
+  return { methods, reason, headSha: pr.headRefOid, baseRefName, prs: affected.map((pr) => ({ number: pr.number, headSha: pr.headRefOid })) };
 }
 
 interface ApiResult { status: MergeResult["status"]; details?: { uuid?: string; message?: string } }
