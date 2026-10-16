@@ -4,12 +4,13 @@ import { toast } from "sonner";
 import type { Review, rpcContract } from "../server";
 import type { MergeOptions, MergeResult } from "../merge-contract";
 import { Button } from "./ui/button";
+import { Icon } from "./ui/icon";
 
 type Method = MergeOptions["methods"][number];
 const mergeMethodLabels = { merge: "Create a merge commit", squash: "Squash and merge", rebase: "Rebase and merge" };
 const message = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 
-export function MergePr({ review }: { review: Review }) {
+export function MergePr({ review, compact = false }: { review: Review; compact?: boolean }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const [options, setOptions] = useState<MergeOptions | null>(null);
@@ -82,16 +83,18 @@ export function MergePr({ review }: { review: Review }) {
     } catch (cause) { setError(message(cause)); setConfirmation(null); }
     finally { setBusy(false); }
   };
-  return <div className="flex flex-wrap items-center gap-2" aria-label="Merge pull request">
-    {options && options.methods.length > 1 ? <select aria-label="Merge method" value={method} disabled={busy || pending || confirmation !== null} onChange={(event) => { setMethod(event.target.value as Method); setConfirmation(null); }} className="h-8 max-w-full rounded-md border border-input bg-background px-2 text-xs">
-      {options.methods.map((method) => <option key={method} value={method}>{mergeMethodLabels[method]}</option>)}
-    </select> : null}
-    <Button size="sm" className="bg-emerald-700 text-white hover:bg-emerald-800" disabled={!options || Boolean(reason) || busy || pending || confirmation !== null || result?.status === "enqueued"} title={reason ?? undefined} onClick={() => void prepare()}>{pending ? "Merging…" : options ? label : "Loading merge options…"}{!pending && options && options.prs.length > 1 ? ` ${options.prs.length} PRs` : ""}</Button>
-    {reason ? <span className="text-xs text-muted-foreground">{reason} <button type="button" className="underline" onClick={() => void load().catch((cause) => setError(message(cause)))}>Refresh merge options</button></span> : null}
-    {error ? <span role="alert" className="text-xs text-destructive">{error} {!pending ? <button type="button" className="underline" onClick={() => void load().catch((cause) => setError(message(cause)))}>Refresh merge options</button> : null}</span> : null}
-    {result?.status === "failed" ? <span role="alert" className="text-xs text-destructive">{result.message || "GitHub could not merge this pull request."}</span> : null}
-    {result?.status === "enqueued" ? <span className="text-xs text-muted-foreground">Queued on GitHub. Waiting to merge.</span> : null}
-    {confirmation ? <section aria-label="Confirm merge" className="basis-full space-y-2 rounded-md border border-border bg-card p-3 text-xs">
+  return <div className="relative flex items-center gap-px" aria-label="Merge pull request" title={reason ?? undefined}>
+    <Button size="sm" className="bg-emerald-700 text-white hover:bg-emerald-800" disabled={!options || Boolean(reason) || busy || pending || confirmation !== null || result?.status === "enqueued"} title={reason ?? undefined} onClick={() => void prepare()}>{pending ? "Merging…" : options ? label : "Merge…"}{!compact && !pending && options && options.prs.length > 1 ? ` ${options.prs.length} PRs` : ""}</Button>
+    {options && options.methods.length > 1 ? <span className="relative">
+      <select aria-label="Merge method" title="Choose merge method" value={method} disabled={busy || pending || confirmation !== null} onChange={(event) => { setMethod(event.target.value as Method); setConfirmation(null); }} className="h-8 w-7 cursor-pointer appearance-none rounded-md bg-emerald-700 text-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        {options.methods.map((method) => <option key={method} value={method} className="bg-background text-foreground">{mergeMethodLabels[method]}</option>)}
+      </select><Icon name="ChevronDown" className="pointer-events-none absolute left-1.5 top-2 size-3.5 text-white" />
+    </span> : null}
+    {error || result?.status === "failed" || result?.status === "enqueued" ? <div role={result?.status === "enqueued" ? "status" : "alert"} className="absolute right-0 top-full z-50 mt-2 w-[min(24rem,calc(100vw-2rem))] rounded-md border border-border bg-card p-3 text-xs shadow-lg">
+      {error ?? (result?.status === "enqueued" ? "Queued on GitHub. Waiting to merge." : result?.message || "GitHub could not merge this pull request.")}
+      {!pending ? <button type="button" className="ml-2 underline" onClick={() => { setResult(null); void load().catch((cause) => setError(message(cause))); }}>Refresh</button> : null}
+    </div> : null}
+    {confirmation ? <section aria-label="Confirm merge" className="absolute right-0 top-full z-50 mt-2 w-[min(26rem,calc(100vw-2rem))] space-y-2 rounded-md border border-border bg-card p-3 text-xs shadow-lg">
       <p>{mergeMethodLabels[confirmation.method]} {confirmation.options.prs.map((pr) => "#" + pr.number).join(", ")} into <strong>{confirmation.options.baseRefName}</strong>.</p>
       {confirmation.options.prs.length > 1 ? <p>This includes {confirmation.options.prs.length} open PRs through this layer of the stack.</p> : null}
       <div className="flex gap-2"><Button size="sm" disabled={busy} onClick={() => void merge()}>Confirm {mergeMethodLabels[confirmation.method].toLowerCase()}</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirmation(null)}>Cancel</Button><UrlLink href={review.url} className="self-center text-muted-foreground underline">View on GitHub</UrlLink></div>

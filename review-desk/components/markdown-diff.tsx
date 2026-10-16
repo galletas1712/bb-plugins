@@ -15,17 +15,14 @@ export function MarkdownDiff({ oldContent, newContent, diffStyle, className, onS
   const changes = useMemo(() => diffMarkdown(oldContent, newContent), [oldContent, newContent]);
   const split = diffStyle === "split";
   const renderBlocks = (blocks: MarkdownBlock[], side: "deletions" | "additions", changed: boolean) => (
-    <div className={cn("min-w-0", changed && (side === "deletions" ? "bg-destructive/10" : "bg-primary/10"))}>
+    <div className="min-w-0">
       {blocks.map((block, index) => (
-        <div key={index} className="px-4 py-3">
-          <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-            <span className={cn(changed && (side === "deletions" ? "text-destructive" : "text-primary"))}>
-              {changed ? side === "deletions" ? "− Removed" : "+ Added" : "Unchanged"}
-            </span>
-            <button type="button" className="font-mono hover:underline" onClick={() => onSource(side, block)} aria-label={`Open ${side === "deletions" ? "old" : "new"} source lines ${block.startLine} to ${block.endLine}`}>
+        <div key={index} data-source-side={side} data-source-start={block.startLine} data-source-end={block.endLine}
+          aria-label={changed ? side === "deletions" ? "Removed content" : "Added content" : undefined}
+          className={cn("group relative px-4 py-2", changed && (side === "deletions" ? "border-l-2 border-red-500/60 bg-red-500/10" : "border-l-2 border-green-500/60 bg-green-500/10"))}>
+            <button type="button" className="absolute right-1 top-1 z-10 rounded bg-background/90 px-1 font-mono text-[10px] text-muted-foreground opacity-0 hover:underline focus-visible:opacity-100 group-hover:opacity-100" onClick={() => onSource(side, block)} aria-label={`Open ${side === "deletions" ? "old" : "new"} source lines ${block.startLine} to ${block.endLine}`}>
               L{block.startLine}{block.endLine !== block.startLine ? `–${block.endLine}` : ""}
             </button>
-          </div>
           <Markdown content={block.content} className={cn(className, "text-sm")} />
         </div>
       ))}

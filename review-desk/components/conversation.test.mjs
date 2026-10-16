@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { JSDOM } from "jsdom";
 
-const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
-for (const name of ["window", "document", "HTMLElement", "Node", "MutationObserver", "customElements"]) globalThis[name] = dom.window[name];
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost", pretendToBeVisual: true });
+for (const name of ["window", "document", "HTMLElement", "Element", "Node", "DOMRect", "MutationObserver", "customElements", "localStorage"]) globalThis[name] = dom.window[name];
+globalThis.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
+globalThis.requestAnimationFrame = dom.window.requestAnimationFrame.bind(dom.window);
+globalThis.cancelAnimationFrame = dom.window.cancelAnimationFrame.bind(dom.window);
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
 const observers = new Set();
@@ -12,10 +15,11 @@ globalThis.ResizeObserver = class {
   observe(element) { this.element = element; observers.add(this); }
   disconnect() { observers.delete(this); }
 };
+window.ResizeObserver = globalThis.ResizeObserver;
 const resize = async (width) => act(() => {
   for (const observer of observers) {
     observer.element.getBoundingClientRect = () => ({ width });
-    observer.callback();
+    observer.callback([{ target: observer.element, contentRect: { width, height: 600 }, borderBoxSize: [{ inlineSize: width, blockSize: 600 }] }]);
   }
 });
 const { fireEvent, act } = await import("@testing-library/react");
@@ -28,6 +32,44 @@ const comment = (id, author, body, replyToId = null) => ({ id, author, body, rep
 const thread = (id, comments, isResolved = false) => ({ id, comments, isResolved, isOutdated: false, path: "file.ts", line: 1, originalLine: 1, startLine: null, originalStartLine: null, startSide: null, subjectType: "LINE", side: "RIGHT" });
 const review = { id: "review", owner: "o", repo: "r", number: 1, title: "Review", body: "Description", state: "OPEN", isDraft: false, url: "https://github.com/o/r/pull/1", author: "me", baseRefName: "main", headRefName: "branch", headSha: "head", baseSha: "base", additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, mergeable: null, labels: [], checks: [], reviewers: [], assignees: [], commits: [], createdAt: "2026-10-05T00:00:00Z", worktree: "/repo", environmentId: null, hostId: "host", syncedAt: 0, ghUpdatedAt: "2026-10-05T00:00:00Z" };
 const detail = { review, files: [], pending: [], notes: [], seen: { prevHead: null, seenHead: null }, stack: null, syncError: null, threads: [thread("active", [comment("reply", "me", "Reply body", "original"), comment("original", "other", "Original body")]), thread("resolved", [comment("hidden", "other", "Resolved body")], true)] };
+
+test("compact Markdown toolbar offers three icon modes, keeps source coordinates, and restores the wide view", async () => {
+  window.localStorage.clear();
+  const file = { path: "readme.md", oldPath: null, status: "modified", additions: 1, deletions: 1, binary: false, viewed: false, threadCount: 0, unresolvedCount: 0, pendingCount: 0 };
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => ({ ...detail, files: [file], threads: [] }), review_seen: () => ({ ok: true }),
+    review_patch: () => ({ patch: "", file }),
+    commit_file: ({ sha }) => ({ content: sha === "base" ? "# Before\n\nOld paragraph.\n" : "# After\n\nNew paragraph.\n", binary: false }),
+  } });
+  try {
+    await slot.findByRole("group", { name: "Markdown diff view" });
+    await slot.findByText("No textual diff.");
+    const header = slot.getByRole("heading", { level: 1 }).closest("header");
+    assert.equal(header.querySelectorAll('a[href="https://github.com/o/r/pull/1"]').length, 1);
+    assert.ok(header.querySelector('[aria-label="Merge pull request"]'));
+    assert.equal(slot.queryByRole("combobox", { name: "Diff style" }), null);
+    assert.equal(slot.queryByRole("button", { name: "Synchronize scrolling" }), null);
+    assert.equal(slot.queryByRole("button", { name: "Display settings" }), null);
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Rendered diff", exact: true })); });
+    await slot.findAllByLabelText("Added content");
+    assert.equal(slot.queryByText("+ Added"), null);
+    assert.equal(slot.queryByText("− Removed"), null);
+    assert.equal(slot.queryByText("Unchanged"), null);
+    const old = slot.getByRole("button", { name: "Open old source lines 1 to 1" });
+    assert.equal(old.parentElement.dataset.sourceSide, "deletions");
+    assert.equal(old.parentElement.dataset.sourceStart, "1");
+    await act(async () => { fireEvent.click(old); });
+    assert.equal(slot.getByRole("button", { name: "Source diff", exact: true }).getAttribute("aria-pressed"), "true");
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Source and rendered", exact: true })); });
+    assert.ok(slot.getByRole("separator", { name: "Resize source and rendered panes" }));
+    await resize(420);
+    assert.equal(slot.getByRole("button", { name: "Source diff", exact: true }).getAttribute("aria-pressed"), "true");
+    assert.equal(slot.getByRole("button", { name: "Source and rendered", exact: true }).disabled, true);
+    await resize(1200);
+    assert.equal(slot.getByRole("button", { name: "Source and rendered", exact: true }).getAttribute("aria-pressed"), "true");
+    assert.ok(slot.getByRole("separator", { name: "Resize source and rendered panes" }));
+  } finally { slot.lifecycle.unmount(); window.localStorage.clear(); }
+});
 
 test("squash-only repositories name the action and require confirmation before merging the reviewed head", async () => {
   let merged = null;
@@ -79,7 +121,8 @@ test("merge stays disabled for blockers or a head that has not been reviewed", a
     } });
     try {
       assert.equal((await slot.findByRole("button", { name: "Squash and merge", exact: true })).disabled, true);
-      assert.ok(slot.getByText(options.reason ?? "Refresh the PR to review its latest changes before merging."));
+      assert.ok(slot.getByRole("button", { name: "Squash and merge", exact: true }).title.includes(options.reason ?? "Refresh the PR to review its latest changes before merging."));
+      assert.equal(slot.queryByText("Refresh merge options"), null);
     } finally { slot.lifecycle.unmount(); }
   }
 });
@@ -204,8 +247,8 @@ test("the PR header and stack navigation share status precedence and the menu re
     review_seen: () => ({ ok: true }),
   } });
   try {
-    await slot.findByText("Approved");
-    assert.ok(slot.getByRole("img", { name: "Approved" }));
+    await slot.findAllByRole("img", { name: "Approved" });
+    assert.equal(slot.getAllByRole("img", { name: "Approved" }).length, 2);
     assert.ok(slot.getByRole("img", { name: "Merged" }));
     assert.ok(slot.getByRole("img", { name: "Draft" }));
     assert.ok(slot.getByRole("button", { name: "Remove stack" }));

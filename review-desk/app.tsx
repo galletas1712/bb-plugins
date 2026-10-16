@@ -13,14 +13,14 @@ import {
   experimental_FileLink as FileLink,
   experimental_useCodeTheme as useCodeTheme,
 } from "@get-bb/plugin-sdk/app";
-import { FileDiff, type FileDiffMetadata, type SelectedLineRange } from "@pierre/diffs/react";
+import type { FileDiffMetadata, SelectedLineRange } from "@pierre/diffs";
 import { parsePatchFiles } from "@pierre/diffs";
 import type { CommitInfo, FileEntry, Note, PendingComment, Review, ReviewSummary, StackView, rpcContract } from "./server";
 import type { ChangedFile } from "./host-contract";
 import type { GhThread, GhIssueComment, GhReview, GhEvent } from "./host-contract";
 import { EditableBody } from "./components/editable-body";
 import { MergePr } from "./components/merge-pr";
-import { MarkdownDiff } from "./components/markdown-diff";
+import { DiffViewer, type MarkdownView, type SourceTarget } from "./components/diff-viewer";
 import { diffStats } from "./lib/diff-stats";
 import { orderThreadComments } from "./lib/thread-comments";
 import { Button } from "@/components/ui/button";
@@ -121,24 +121,6 @@ function shortSha(sha: string): string {
   return sha.slice(0, 7);
 }
 
-function settleDiffLine(container: HTMLElement | null, path: string, line: number | null): () => void {
-  const wanted = line === null ? null : String(line);
-  let tries = 0;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const tick = () => {
-    const card = Array.from(container?.querySelectorAll<HTMLElement>("[data-review-file]") ?? []).find((element) => element.dataset.reviewFile === path);
-    const host = card ? Array.from(card.querySelectorAll("*")).find((el) => el.shadowRoot !== null) : undefined;
-    const cell = wanted !== null && host?.shadowRoot ? Array.from(host.shadowRoot.querySelectorAll("[data-line-number-content]")).find((el) => el.textContent?.trim() === wanted) : undefined;
-    if (cell) {
-      cell.scrollIntoView({ block: "center" });
-      return;
-    }
-    card?.scrollIntoView({ block: "start" });
-    if (++tries < 10) timer = setTimeout(tick, tries < 4 ? 300 : 600);
-  };
-  tick();
-  return () => clearTimeout(timer);
-}
 
 function asFileEntry(file: ChangedFile): FileEntry {
   return { ...file, viewed: false, threadCount: 0, unresolvedCount: 0, pendingCount: 0 };
@@ -712,20 +694,21 @@ interface FileCardProps {
   onSelect(selection: Selection | null): void;
   onOpenComposer(path: string, range: SelectedLineRange): void;
   diffStyle: "unified" | "split";
+  wrap: boolean;
+  mode: MarkdownView;
+  onMode(mode: MarkdownView): void;
+  target: SourceTarget | null;
   theme: { dark: string; light: string; mode: "dark" | "light" };
   actions: AnnoActions;
   rpc: ReturnType<typeof useRpc<Contract>>;
 }
 
-function FileCard({ review, file, source = { kind: "pr" }, threads, pending, notes, composer, selection, onSelect, onOpenComposer, diffStyle, theme, actions, rpc }: FileCardProps) {
+function FileCard({ review, file, source = { kind: "pr" }, threads, pending, notes, composer, selection, onSelect, onOpenComposer, diffStyle, wrap, mode, onMode, target, theme, actions, rpc }: FileCardProps) {
   const inCommit = source.kind === "range";
   const [patch, setPatch] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<"source" | "rendered">("source");
   const [contents, setContents] = useState<{ oldContent: string; newContent: string } | null>(null);
   const [contentError, setContentError] = useState<string | null>(null);
-  const [sourceLine, setSourceLine] = useState<number | null>(null);
-  const ref = useRef<HTMLDivElement | null>(null);
   const markdown = /\.(md|markdown)$/i.test(file.path) && !file.binary;
   const base = source.kind === "range" ? source.base : null;
   const head = source.kind === "range" ? source.head : review.headSha;
@@ -753,35 +736,27 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
     return placeAnnotations(fileDiff, comments);
   }, [fileDiff, threads, pending, notes, composer]);
   const selected = selection?.path === file.path ? selection.range : null;
-  const loadContents = useCallback(async () => {
-    const [oldSide, newSide] = await Promise.all([
+  const contentRequest = useMemo(() => ({ work: null as Promise<{ oldContent: string; newContent: string }> | null }), [rpc, review.id, review.baseSha, file.path, file.oldPath, base, head]);
+  const loadContents = useCallback(() => {
+    return contentRequest.work ??= Promise.all([
       rpc.call("commit_file", { reviewId: review.id, sha: base ?? review.baseSha, path: file.oldPath ?? file.path }),
       rpc.call("commit_file", { reviewId: review.id, sha: head, path: file.path }),
-    ]);
-    return { oldContent: oldSide.content ?? "", newContent: newSide.content ?? "" };
-  }, [rpc, review.id, review.baseSha, file.path, file.oldPath, base, head]);
+    ]).then(([oldSide, newSide]) => ({ oldContent: oldSide.content ?? "", newContent: newSide.content ?? "" }), (cause) => { contentRequest.work = null; throw cause; });
+  }, [contentRequest, rpc, review.id, review.baseSha, file.path, file.oldPath, base, head]);
   const loadDiffFiles = useCallback(async (meta: FileDiffMetadata) => {
     const { oldContent, newContent } = await loadContents();
     return { oldFile: { name: meta.prevName ?? meta.name, contents: oldContent }, newFile: { name: meta.name, contents: newContent } };
   }, [loadContents]);
+  const showRendered = markdown && mode !== "source";
   useEffect(() => {
     setContents(null);
     setContentError(null);
-    if (!markdown || mode !== "rendered") return;
+    if (!showRendered) return;
     let cancelled = false;
     loadContents().then((result) => { if (!cancelled) setContents(result); }, (cause: unknown) => { if (!cancelled) setContentError(describeError(cause)); });
     return () => { cancelled = true; };
-  }, [loadContents, markdown, mode]);
-  useEffect(() => {
-    if (mode !== "source" || sourceLine === null) return;
-    let cancel: (() => void) | undefined;
-    const timer = window.setTimeout(() => { cancel = settleDiffLine(ref.current?.parentElement ?? null, file.path, sourceLine); }, 250);
-    return () => { window.clearTimeout(timer); cancel?.(); };
-  }, [mode, sourceLine, file.path]);
-  return <div ref={ref} data-review-file={file.path} className="min-w-0 scroll-mt-3 rounded-lg border border-border bg-card">
-    {markdown ? <div className="flex items-center gap-1 border-b border-border px-3 py-2" role="group" aria-label="Markdown diff view">
-      {(["source", "rendered"] as const).map((view) => <Button key={view} type="button" variant={mode === view ? "outline" : "ghost"} size="sm" className="h-7 text-xs" aria-pressed={mode === view} onClick={() => setMode(view)}>{view === "source" ? "Source" : "Rendered"}</Button>)}
-    </div> : null}
+  }, [loadContents, showRendered]);
+  const header = <>
     {selected ? <div className="flex items-center gap-3 border-b border-border px-3 py-2 text-xs">
       <span className="font-mono text-muted-foreground">Line {Math.min(selected.start, selected.end)}{selected.start !== selected.end ? "–" + Math.max(selected.start, selected.end) : ""}</span>
       <Button type="button" size="sm" onClick={() => onOpenComposer(file.path, selected)}>{inCommit ? "Comment at head" : "Comment"}</Button>
@@ -795,23 +770,19 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
       <ThreadGroup label="Resolved" threads={resolvedThreads} actions={actions} />
       <ThreadGroup label="Outdated" threads={outdatedThreads} actions={actions} />
     </div> : null}
-    {file.binary ? <p className="p-3 text-sm text-muted-foreground">Binary file.</p>
-      : markdown && mode === "rendered" ? contentError !== null ? <p role="alert" className="p-3 text-sm text-destructive">{contentError}</p>
-        : contents === null ? <p className="p-3 text-sm text-muted-foreground">Loading rendered diff…</p>
-        : <MarkdownDiff {...contents} diffStyle={diffStyle} className={PROSE} onSource={(side, block) => { setMode("source"); setSourceLine(block.startLine); onSelect({ path: file.path, range: { start: block.startLine, end: block.endLine, side } }); }} />
-      : error ? <p role="alert" className="p-3 text-sm text-destructive">{error}</p>
-      : patch === null ? <p className="p-3 text-sm text-muted-foreground">Loading diff…</p>
-      : fileDiff === null ? <p className="p-3 text-sm text-muted-foreground">No textual diff.</p>
-      : <FileDiff<Anno[]>
-          fileDiff={fileDiff}
+  </>;
+  return <div data-review-file={file.path} className="h-full min-h-0 min-w-0 bg-card">
+    {file.binary ? <div className="h-full overflow-y-auto">{header}<p className="p-3 text-sm text-muted-foreground">Binary file.</p></div>
+      : error ? <div className="h-full overflow-y-auto">{header}<p role="alert" className="p-3 text-sm text-destructive">{error}</p></div>
+      : patch === null ? <div className="h-full overflow-y-auto">{header}<p className="p-3 text-sm text-muted-foreground">Loading diff…</p></div>
+      : <DiffViewer<Anno[]> fileDiff={fileDiff} annotations={annotations.inline} contents={contents} contentError={contentError}
+          mode={mode} onMode={onMode} prose={PROSE} target={target} header={header}
           options={{ diffStyle, theme: { dark: theme.dark, light: theme.light }, themeType: theme.mode,
-            disableFileHeader: true, enableLineSelection: true, controlledSelection: true,
+            disableFileHeader: true, enableLineSelection: true,
             lineHoverHighlight: "both", enableGutterUtility: true,
-            onLineSelected: (range) => onSelect(range === null ? null : { path: file.path, range }),
             onGutterUtilityClick: (range) => onOpenComposer(file.path, range),
-            loadDiffFiles, hunkSeparators: "line-info", overflow: "scroll" }}
-          selectedLines={selected}
-          lineAnnotations={annotations.inline}
+            loadDiffFiles, hunkSeparators: "line-info", overflow: wrap ? "wrap" : "scroll" }}
+          selected={selected} onSelect={(range) => onSelect(range ? { path: file.path, range } : null)}
           renderAnnotation={(annotation) => <div className="w-full min-w-0 whitespace-normal px-3 py-1 font-sans">
             {annotation.metadata.map((anno, index) => <Annotation key={annotationKey(anno, index)} anno={anno} actions={actions} />)}
           </div>}
@@ -1155,6 +1126,7 @@ function StackSelector({ review, stack, narrow, opening, onOpen, onClose }: {
 }
 
 type Tab = "conversation" | "commits" | "changes";
+interface DiffDisplay { style: "unified" | "split"; wrap: boolean }
 
 function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarget | null }) {
   const { rpc, detail, error, refetch } = useReview(reviewId);
@@ -1162,6 +1134,9 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
   const [tab, setTab] = useState<Tab>(commit ? "commits" : "changes");
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const narrowStack = useNarrow(container, 960);
+  const narrowHeader = useNarrow(container);
+  const [display, setDisplay] = useState<DiffDisplay>(() => ({ style: readStorage<string>("review-desk:diff-style") === "split" ? "split" : "unified", wrap: readStorage<boolean>("review-desk:wrap") === true }));
+  const changeDisplay = (next: DiffDisplay) => { setDisplay(next); writeStorage("review-desk:diff-style", next.style); writeStorage("review-desk:wrap", next.wrap); };
   const stackSidebar = useSidebar(STACK_KEY, narrowStack);
   const [diffJump, setDiffJump] = useState<DiffJump | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -1217,7 +1192,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
     <p className="text-destructive">{error}</p><Button variant="outline" size="sm" onClick={refetch}>Retry</Button>
   </div>}</div>;
   const { review, threads, pending, stack } = detail;
-  const diffProps = { detail, rpc, refetch, commit, onOpenPrDiff: openPrDiff };
+  const diffProps = { detail, rpc, refetch, commit, display, onOpenPrDiff: openPrDiff };
   const content = <div className="flex h-full min-h-0 flex-col">
     <div className={cn("min-h-0 flex-1", tab !== "changes" && "hidden")}>
       <DiffPane {...diffProps} jump={diffJump} />
@@ -1232,17 +1207,23 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
     </div> : null}
   </div>;
   return <div ref={setContainer} aria-label="Pull request review" className="flex h-full min-h-0 flex-col">
-    <header className="shrink-0 space-y-3 border-b border-border px-5 py-4">
-      <div className="flex flex-wrap items-center gap-3 text-xs">
-        <button type="button" className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground" onClick={() => navigate.toPluginPanel(PANEL_PATH)}><Icon name="ChevronLeft" className="size-3.5" />Reviews</button>
-        <span className="text-muted-foreground">{review.owner}/{review.repo} #{review.number}</span>
-        <StatePill state={review.state} reviewDecision={review.reviewDecision} isDraft={review.isDraft} />
-        <DiffStat additions={review.additions} deletions={review.deletions} />
-        <div className="ml-auto flex items-center gap-2">
-          <Button size="sm" onClick={() => { setReviewOpened(true); setReviewOpen(true); }}>Submit review{pending.length > 0 ? " (" + pending.length + ")" : ""}</Button>
+    <header className="shrink-0 border-b border-border">
+      <div className="flex min-h-11 items-center gap-2 px-3 py-1 text-xs">
+        <button type="button" aria-label="Reviews" title="Reviews" className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground" onClick={() => navigate.toPluginPanel(PANEL_PATH)}><Icon name="ChevronLeft" className="size-3.5" /></button>
+        <UrlLink href={review.url} className="flex min-w-0 shrink items-center gap-1 text-muted-foreground hover:underline"><span className="truncate" title={`${review.owner}/${review.repo}`}>{narrowHeader ? review.repo : `${review.owner}/${review.repo}`}</span><span className="shrink-0">#{review.number}</span></UrlLink>
+        <h1 className={cn("min-w-0 flex-1 truncate text-sm font-semibold", narrowHeader && "sr-only")} title={review.title}>{review.title}</h1>
+        {!narrowHeader ? <><PrMark state={review.state} reviewDecision={review.reviewDecision} isDraft={review.isDraft} /><DiffStat additions={review.additions} deletions={review.deletions} /></> : null}
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          <Button variant="outline" size="sm" aria-label={`Submit review${pending.length > 0 ? " (" + pending.length + ")" : ""}`} onClick={() => { setReviewOpened(true); setReviewOpen(true); }}>Review{pending.length > 0 ? " (" + pending.length + ")" : ""}</Button>
+          <MergePr key={reviewId} review={review} compact={narrowHeader} />
           <details className="relative">
             <summary className="flex cursor-pointer list-none rounded p-2 hover:bg-state-hover" aria-label="Review actions"><Icon name="MoreHorizontal" className="size-4" /></summary>
-            <div className="absolute right-0 z-30 mt-2 w-48 rounded-md border border-border bg-card p-1 shadow-lg">
+            <div className="absolute right-0 z-40 mt-2 w-64 rounded-md border border-border bg-card p-1 text-xs shadow-lg">
+              {narrowHeader ? <div className="space-y-1 border-b border-border px-3 py-2"><p className="break-words font-medium">{review.title}</p><StatePill state={review.state} reviewDecision={review.reviewDecision} isDraft={review.isDraft} /><DiffStat additions={review.additions} deletions={review.deletions} /><p className="break-all text-muted-foreground">{review.author} · {review.headRefName} → {review.baseRefName}</p></div> : null}
+              <fieldset className="space-y-1 border-b border-border px-3 py-2"><legend className="pt-2 text-muted-foreground">Diff display</legend>
+                {(["unified", "split"] as const).map((style) => <label key={style} className="flex items-center gap-2 py-1"><input type="radio" name="diff-style" value={style} checked={display.style === style} onChange={() => changeDisplay({ ...display, style })} />{style === "unified" ? "Unified diff" : "Old and new columns"}</label>)}
+                <label className="flex items-center gap-2 py-1"><input type="checkbox" checked={display.wrap} onChange={(event) => changeDisplay({ ...display, wrap: event.target.checked })} />Wrap source lines</label>
+              </fieldset>
               <button type="button" disabled={busy} className="w-full rounded px-3 py-2 text-left hover:bg-state-hover" onClick={() => void run(() => rpc.call("reviews_sync", { reviewId }))}>Refresh from GitHub</button>
               <button type="button" disabled={busy} className="w-full rounded px-3 py-2 text-left hover:bg-state-hover" onClick={() => void run(() => rpc.call("review_set_draft", { reviewId, draft: !review.isDraft }))}>{review.isDraft ? "Mark ready" : "Convert to draft"}</button>
               <button type="button" disabled={busy} className="w-full rounded px-3 py-2 text-left text-destructive hover:bg-state-hover" onClick={() => { if (confirmRemoveReview(stack !== null)) void run(async () => { await rpc.call("reviews_remove", { reviewId }); navigate.toPluginPanel(PANEL_PATH); }); }}>{stack ? "Remove stack" : "Remove review"}</button>
@@ -1250,17 +1231,12 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
           </details>
         </div>
       </div>
-      <h1 className="text-xl font-semibold leading-tight"><UrlLink href={review.url} className="hover:underline">{review.title}</UrlLink></h1>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-        {review.author ? <span>{review.author}</span> : null}
-        <span className="font-mono">{review.headRefName} → {review.baseRefName}</span>
-      </div>
-      <MergePr key={reviewId} review={review} />
-      <nav className="flex flex-wrap items-center gap-1" aria-label="Pull request">
-        {stack ? <Button variant={stackSidebar.open ? "secondary" : "ghost"} size="sm" aria-label={stackSidebar.open ? "Hide stack sidebar" : "Show stack sidebar"} aria-pressed={stackSidebar.open} onClick={stackSidebar.toggle}><Icon name="Layers" className="size-3.5" />Stack</Button> : null}
-        <Button variant={tab === "conversation" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("conversation")}>Conversation</Button>
+      <nav className="flex min-h-9 items-center gap-1 border-t border-border px-3" aria-label="Pull request">
         <Button variant={tab === "changes" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("changes")}>Changes</Button>
+        <Button variant={tab === "conversation" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("conversation")}>Conversation</Button>
         <Button variant={tab === "commits" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("commits")}>Commits</Button>
+        {!narrowHeader ? <span className="ml-auto min-w-0 truncate font-mono text-[11px] text-muted-foreground" title={`${review.author ?? ""} · ${review.headRefName} → ${review.baseRefName}`}>{review.headRefName} → {review.baseRefName}</span> : null}
+        {stack ? <Button variant={stackSidebar.open ? "secondary" : "ghost"} size="sm" className={cn("h-7 w-7 shrink-0 px-0", narrowHeader && "ml-auto")} aria-label={stackSidebar.open ? "Hide stack sidebar" : "Show stack sidebar"} title={stackSidebar.open ? "Hide stack sidebar" : "Show stack sidebar"} aria-pressed={stackSidebar.open} onClick={stackSidebar.toggle}><Icon name="Layers" className="size-3.5" /></Button> : null}
       </nav>
     </header>
     {error ? <div role="alert" className="flex items-center gap-3 border-b border-border px-4 py-3 text-sm">
@@ -1389,12 +1365,13 @@ function FileTree({
   );
 }
 
-function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
+function DiffPane({ detail, rpc, refetch, commit, jump, display, onOpenPrDiff }: {
   detail: ReviewDetail;
   rpc: ReturnType<typeof useRpc<Contract>>;
   refetch(): void;
   commit: CommitTarget | null;
   jump: DiffJump | null;
+  display: DiffDisplay;
   onOpenPrDiff(jump?: DiffJump): void;
 }) {
   const reviewId = detail.review.id;
@@ -1406,11 +1383,17 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
   const { open: showTree, setOpen: setShowTree, toggle: toggleTree } = useSidebar(TREE_KEY, narrow);
   const [picked, setPicked] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
-  const [diffStyle, setDiffStyle] = useState<"unified" | "split">("unified");
+  const diffStyle = display.style;
+  const [preferredView, setPreferredView] = useState<MarkdownView>(() => {
+    const stored = readStorage<string>("review-desk:markdown-view");
+    return stored === "rendered" || stored === "paired" ? stored : "source";
+  });
+  const [viewerElement, setViewerElement] = useState<HTMLDivElement | null>(null);
+  const narrowViewer = useNarrow(viewerElement);
+  const setView = (view: MarkdownView) => { setPreferredView(view); writeStorage("review-desk:markdown-view", view); };
   const [selection, setSelectionState] = useState<Selection | null>(null);
   const [composer, setComposer] = useState<Extract<Anno, { kind: "composer" }> | null>(null);
   const appliedJump = useRef<DiffJump | null>(null);
-  const scrolledJump = useRef<DiffJump | null>(null);
   const [commitData, setCommitData] = useState<CommitData | null>(null);
   const [commitError, setCommitError] = useState<string | null>(null);
 
@@ -1468,6 +1451,7 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
     if (jump !== null && jumpPath !== null && commit === null && appliedJump.current !== jump) {
       appliedJump.current = jump;
       setPicked(jumpPath);
+      setPreferredView((view) => view === "rendered" ? "source" : view);
       writeStorage(fileSelKey(reviewId, scope), jumpPath);
     }
   }, [jump, jumpPath, reviewId, scope]);
@@ -1476,15 +1460,8 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
   const selectedPath = files.some((f) => f.path === picked) ? picked : (files[0]?.path ?? null);
   const selectedFile = files.find((f) => f.path === selectedPath) ?? null;
 
-  useEffect(() => {
-    if (!container || !jump || jumpPath === null || commit !== null || selectedPath !== jumpPath || scrolledJump.current === jump) return;
-    let cancel: (() => void) | undefined;
-    const timer = window.setTimeout(() => {
-      scrolledJump.current = jump;
-      cancel = settleDiffLine(container, jumpPath, jump.line);
-    }, 250);
-    return () => { window.clearTimeout(timer); cancel?.(); };
-  }, [container, jump, jumpPath, scope, selectedPath]);
+  const target = useMemo<SourceTarget | null>(() => jump && jumpPath === selectedPath && jump.line !== null && !commit
+    ? { start: jump.line, end: jump.line, side: jump.side === "old" ? "deletions" : "additions" } : null, [jump, jumpPath, selectedPath, commit]);
 
   const selectFile = (path: string) => {
     setPicked(path);
@@ -1498,6 +1475,8 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
   const { review, threads, pending, notes } = detail;
   const inCommit = commit !== null;
   const file = selectedFile;
+  const markdown = file !== null && /\.(md|markdown)$/i.test(file.path) && !file.binary;
+  const mode = markdown && !(preferredView === "paired" && narrowViewer) ? preferredView : "source";
   const livePaths = new Set(files.flatMap((entry) => entry.oldPath === null ? [entry.path] : [entry.path, entry.oldPath]));
   const lostPending = inCommit ? [] : pending.filter((p) => !livePaths.has(p.path));
   const pendingOnFile = (path: string) => {
@@ -1531,13 +1510,13 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
     <div ref={setContainer} className="relative flex h-full min-h-0 text-xs" aria-label="File diff">
       {narrow && showTree ? <button type="button" className="absolute inset-0 z-20 bg-background/60" aria-label="Close file list" onClick={() => setShowTree(false)} /> : null}
       {tree}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div ref={setViewerElement} className="flex min-h-0 min-w-0 flex-1 flex-col">
         {commit ? <div className="flex items-center gap-3 border-b border-border px-3 py-2 text-xs">
           <span className="font-mono">{commit.from ? shortSha(commit.from) + "…" : ""}{shortSha(commit.to)}</span>
           <button type="button" className="text-muted-foreground hover:underline" onClick={() => onOpenPrDiff()}>All PR changes</button>
         </div> : null}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-2 py-1.5">
-          <div className="flex min-w-0 flex-1 basis-48 items-center gap-2">
+        <div className="flex min-h-9 items-center gap-2 border-b border-border bg-muted/20 px-2 py-1">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             <Button
               variant={showTree ? "outline" : "ghost"}
               size="sm"
@@ -1549,20 +1528,18 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
             >
               <Icon name="PanelLeft" className="size-3.5" />
             </Button>
-            <span className="min-w-0 flex-1 truncate font-mono" title={selectedPath ?? undefined}>{selectedPath ?? "No files"}</span>
+            <span className="min-w-0 flex-1 truncate font-mono" title={selectedPath ?? undefined}>{file ? <FileLink target={{ kind: "host", hostId: review.hostId, path: review.worktree + "/" + file.path }} className="block truncate hover:underline">{file.path}<span className="sr-only"> · Open file</span></FileLink> : "No files"}</span>
           </div>
-          {file ? <div className="ml-auto flex items-center gap-3">
-            <span className="font-mono"><span className="text-primary">+{file.additions}</span> <span className="text-destructive">−{file.deletions}</span></span>
-            <select value={diffStyle} onChange={(e) => setDiffStyle(e.target.value as "unified" | "split")} className="h-7 rounded-md border border-input bg-background px-1.5 text-xs" aria-label="Diff style">
-              <option value="unified">Unified</option>
-              <option value="split">Split</option>
-            </select>
-            <FileLink target={{ kind: "host", hostId: review.hostId, path: review.worktree + "/" + file.path }} className="text-muted-foreground hover:underline">Open file</FileLink>
+          {file ? <div className="ml-auto flex shrink-0 items-center gap-2">
+            {!narrowViewer ? <DiffStat additions={file.additions} deletions={file.deletions} /> : null}
+            {markdown ? <div className="flex items-center rounded-md border border-border" role="group" aria-label="Markdown diff view">
+              {([{ view: "source", icon: "Code", label: "Source diff" }, { view: "rendered", icon: "Eye", label: "Rendered diff" }, { view: "paired", icon: "Columns", label: "Source and rendered" }] as const).map(({ view, icon, label }) => <Button key={view} type="button" variant={mode === view ? "secondary" : "ghost"} size="sm" className="h-7 w-7 rounded-none px-0 first:rounded-l-md last:rounded-r-md" aria-label={label} title={view === "paired" && narrowViewer ? "Source and rendered needs a wider view" : label} aria-pressed={mode === view} disabled={view === "paired" && narrowViewer} onClick={() => setView(view)}><Icon name={icon} className="size-3.5" /></Button>)}
+            </div> : null}
           </div> : null}
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {lostPending.length > 0 ? (
-            <div className="mb-2 space-y-1 rounded-lg border border-dashed border-foreground/40 p-2">
+            <div className="max-h-40 shrink-0 space-y-1 overflow-y-auto border-b border-border p-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-muted-foreground">Pending comments on files that left this diff</span>
                 <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs text-destructive" onClick={() => void rpc.call("pending_clear", { reviewId, staleOnly: true }).then((r) => { refetch(); toast.success(`Removed ${r.removed} stale comment${r.removed === 1 ? "" : "s"}`); }, (cause: unknown) => toast.error(describeError(cause)))}>Remove stale</Button>
@@ -1604,6 +1581,10 @@ function DiffPane({ detail, rpc, refetch, commit, jump, onOpenPrDiff }: {
                 setComposer({ kind: "composer", path, ...anchor, initial: "" });
               }}
               diffStyle={diffStyle}
+              wrap={display.wrap}
+              mode={mode}
+              onMode={setView}
+              target={target}
               theme={theme}
               actions={actions}
               rpc={rpc}

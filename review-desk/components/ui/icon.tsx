@@ -17,10 +17,13 @@ import {
   GitPullRequestIcon,
   Layers01Icon,
   LinkSquare02Icon,
+  LayoutTwoColumnIcon,
   Loading03Icon,
   MoreHorizontalIcon,
   SidebarLeftIcon,
+  SourceCodeIcon,
   Tick02Icon,
+  ViewIcon,
 } from "@hugeicons/core-free-icons";
 
 const icons = {
@@ -38,6 +41,9 @@ const icons = {
   GitPullRequestClosed: GitPullRequestClosedIcon,
   GitPullRequestDraft: GitPullRequestDraftIcon,
   Layers: Layers01Icon,
+  Columns: LayoutTwoColumnIcon,
+  Code: SourceCodeIcon,
+  Eye: ViewIcon,
   Loading: Loading03Icon,
   MessageSquare: BubbleChatIcon,
   MoreHorizontal: MoreHorizontalIcon,
