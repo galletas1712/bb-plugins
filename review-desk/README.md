@@ -29,6 +29,10 @@ Requires an authenticated `gh` CLI on the machine holding the repository. Review
 
 Review Desk currently uses polling rather than GitHub webhooks. Webhook delivery requires a reachable receiver and repository, organization, or GitHub App configuration. Repository work is serialized so background fetches do not compete over shared Git refs. The plugin never runs global worktree pruning on shared repositories.
 
+Background polling continues while the page is closed. Authored PR discovery, batched PR status scans, and tracked stack membership run every 15 seconds. Full review details and diff prefetch run roughly every minute with two workers. Visible pages refresh from BB every 15 seconds and on focus or reconnect. Those reads use the server cache, but can trigger stale GitHub reads, including merge options (15-second freshness). Patches and file content at fixed commit SHAs use local Git and persistent caching.
+
+GitHub rate limits pause all `gh` commands in the affected host worker. The delay doubles from one minute to a maximum of 15 minutes, with jitter, and never retries before `Retry-After` or an exhausted primary quota's reset time. The worker allows one request to test recovery before resuming other requests. Concurrent failures share one backoff step. Cached reads remain available, and polling resumes after the pause. Mutations are never queued or automatically replayed. Cooldown state resets when the host worker restarts.
+
 ## Develop
 
 ```
@@ -55,6 +59,7 @@ bb review-desk stack <reviewId>
 - `app.tsx`: conversation, diff, and review submission UI.
 - `server.ts`: SQLite storage, caching, pending comments, private notes, RPC and CLI.
 - `host.ts`, `host-contract.ts`: repository operations and GitHub RPC contracts.
+- `github-rate-limit.ts`: shared GitHub cooldown, response headers, and exponential backoff.
 - `github-conversation.ts`: paginated GitHub history and metadata.
 - `stack-fetch.ts`, `stack-store.ts`: stack discovery, persistent tracking, and branch-based fallback.
 - `components/pr-status.tsx`: shared status icons and labels.

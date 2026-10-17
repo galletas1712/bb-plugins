@@ -12,11 +12,12 @@ import { fetchPrStatuses } from "./pr-statuses";
 import { editBody, readDescription } from "./lib/github-edit";
 import { mergePr, readMergeOptions, readMergeResult } from "./lib/github-merge";
 import { fetchConversation, fetchPrMetadata, fetchReviewThreads } from "./github-conversation";
+import { withGitHubBackoff } from "./github-rate-limit";
 
 const execFileAsync = promisify(execFile);
 const MAX_BUFFER = 64 * 1024 * 1024;
 
-async function run(cmd: string, args: string[], options: { cwd?: string; input?: string; allowFailure?: boolean } = {}): Promise<{ stdout: string; stderr: string; code: number }> {
+const run = withGitHubBackoff(async (cmd, args, options = {}) => {
   try {
     const child = execFileAsync(cmd, args, { cwd: options.cwd, maxBuffer: MAX_BUFFER, encoding: "utf8", timeout: cmd === "gh" && args[0] !== "repo" ? 30_000 : 180_000 });
     if (options.input !== undefined && child.child.stdin) {
@@ -31,7 +32,7 @@ async function run(cmd: string, args: string[], options: { cwd?: string; input?:
     }
     throw new Error(`${cmd} ${args.slice(0, 4).join(" ")}… failed: ${(err.stderr || err.message || "").trim().slice(0, 600)}`);
   }
-}
+});
 
 const git = (cwd: string, args: string[], allowFailure = false) => run("git", args, { cwd, allowFailure });
 
