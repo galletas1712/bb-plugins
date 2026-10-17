@@ -29,8 +29,8 @@ export class Recall {
       JSON.stringify({
         collections: {
           knowledge: {
-            path: path.join(this.library.root, "search"),
-            pattern: "*.md",
+            path: path.join(this.library.root, "records"),
+            pattern: "**/body.md",
           },
         },
       }),
@@ -72,10 +72,9 @@ export class Recall {
 
   private async refresh(force = false, embed = false) {
     const signature = JSON.stringify(
-      this.library.all().map((r) => [r.id, r.version]),
+      this.library.all().map((r) => [r.id, r.updatedAt]),
     );
     if (force || signature !== this.indexedSignature) {
-      this.library.rebuildSearch();
       await this.run(["update"]);
       this.indexedSignature = signature;
     }
@@ -114,7 +113,7 @@ export class Recall {
             .map((row) => {
               const url = new URL(row.file);
               return url.protocol === "qmd:" && url.hostname === "knowledge"
-                ? /^\/([a-zA-Z0-9_-]+)\.md$/.exec(url.pathname)?.[1]
+                ? /^\/([a-zA-Z0-9_-]+)\/body\.md$/.exec(url.pathname)?.[1]
                 : undefined;
             })
             .filter((id): id is string => !!id),

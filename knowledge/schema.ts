@@ -8,7 +8,6 @@ const text = z.string().trim().min(1).max(200);
 export const saveSchema = z
   .object({
     id: idSchema,
-    expectedVersion: z.number().int().min(0),
     title: text,
     body: z.string().trim().min(1).max(60000),
     threadId: idSchema.optional(),
@@ -57,11 +56,13 @@ export const artifactSchema = z.object({
   sourcePath: z.string(),
   hostId: z.string(),
 });
+export type Artifact = z.infer<typeof artifactSchema>;
+
+/** A record is a folder: body.md (frontmatter + Markdown) plus artifacts/.
+ * There are no versions and no HEAD pointer. The body file is canonical and
+ * agents edit it directly; updatedAt comes from the file's mtime. */
 export const recordSchema = z.object({
-  schemaVersion: z.literal(2),
   id: idSchema,
-  version: z.number().int().min(1),
-  requestHash: z.string(),
   title: text,
   body: z.string(),
   projectId: z.string().nullable(),
@@ -84,6 +85,10 @@ export const searchSchema = z
   .strict();
 export type SearchInput = z.infer<typeof searchSchema>;
 export const summarySchema = recordSchema
-  .omit({ body: true, requestHash: true, artifacts: true })
-  .extend({ snippet: z.string(), artifactCount: z.number() });
+  .omit({ body: true, artifacts: true })
+  .extend({
+    snippet: z.string(),
+    artifactCount: z.number(),
+    path: z.string().describe("Absolute path of the record's body.md"),
+  });
 export type RecordSummary = z.infer<typeof summarySchema>;
