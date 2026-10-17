@@ -481,6 +481,34 @@ test("a manually added own PR stays cached and refreshed without discovery membe
   } finally { prefetch?.controller.abort(); Date.now = original; await f.harness.lifecycle.dispose(); }
 });
 
+test("personally requested PRs are cached and prefetched without opening them, and removal persists", async () => {
+  const f = await fixture(); const original = Date.now; let clock = original(); Date.now = () => clock;
+  let prefetch: ReturnType<typeof f.harness.behavior.runService> | undefined;
+  try {
+    f.setStack(null);
+    f.setPr(4, { author: { login: "someone-else" } });
+    f.setOwn({ login: "viewer", prs: [ownPr(4)] });
+    f.setFiles([{ path: "a.md", oldPath: null, status: "modified", additions: 1, deletions: 1, binary: false }]);
+    assert.equal((await f.list())[0].id, null, "discovery lists the PR before preparing its worktree");
+    assert.equal(f.calls.some((call) => call.method === "repo_prepare"), false);
+    f.onRead((method) => { if (method === "git_patch") prefetch!.controller.abort(); return undefined; });
+    prefetch = f.harness.behavior.runService("sync-open-reviews"); await prefetch.done; f.onRead(undefined);
+    const review = (await f.list())[0];
+    assert.ok(review.id, "the regular background sweep saves the requested PR");
+    await f.reload();
+    const calls = f.calls.length;
+    const cached = await f.rpc("reviews_get", { reviewId: review.id, path: "a.md", prefetch: true }) as any;
+    assert.ok(cached.mergeOptions); assert.ok(cached.description); assert.ok(cached.conversation); assert.ok(cached.initialPatch);
+    assert.equal(f.calls.length, calls, "requested PRs hydrate from persistent component caches");
+    await f.rpc("reviews_remove", { owner: "o", repo: "r", number: 4 });
+    clock += 61_000;
+    const discovery = f.harness.behavior.runService("sync-own-prs");
+    f.onOwn(() => discovery.controller.abort()); await discovery.done; f.onOwn(undefined);
+    await f.reload();
+    assert.deepEqual(await f.list(), [], "a personal review request does not undo explicit removal");
+  } finally { prefetch?.controller.abort(); Date.now = original; await f.harness.lifecycle.dispose(); }
+});
+
 test("automatic discovery respects removal of unopened PRs and entire stacks, and retains data on failure", async () => {
   const f = await fixture(); const now = Date.now;
   let clock = now(); Date.now = () => clock;
