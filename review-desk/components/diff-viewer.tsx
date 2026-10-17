@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CodeView, type CodeViewHandle, type CodeViewProps } from "@pierre/diffs/react";
-import type { DiffLineAnnotation, FileDiffMetadata, SelectedLineRange } from "@pierre/diffs";
+import { DEFAULT_CODE_VIEW_FILE_METRICS, type DiffLineAnnotation, type FileDiffMetadata, type SelectedLineRange } from "@pierre/diffs";
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { MarkdownDiff } from "./markdown-diff";
 import { mapScroll, type ScrollAnchor } from "../lib/scroll-map";
@@ -26,6 +26,23 @@ const panelStorage = {
   getItem(key: string) { try { return window.localStorage.getItem(key); } catch { return null; } },
   setItem(key: string, value: string) { try { window.localStorage.setItem(key, value); } catch { /* Storage is optional. */ } },
 };
+
+// Keep Pierre's expansion controls and match its virtual row measurements.
+const sourceCSS = `
+  [data-code] { padding-top: 0; }
+  [data-separator] { height: var(--diffs-line-height, 20px); }
+  [data-gutter] [data-separator-wrapper], [data-content] [data-separator-wrapper] {
+    display: flex; background: var(--diffs-bg-separator);
+  }
+  [data-content] [data-expand-button], [data-gutter] [data-separator-content],
+  [data-expand-button] [data-icon] { display: none; }
+  [data-separator-wrapper]:has([data-expand-all-button]) [data-expand-button]:not([data-expand-all-button]) { display: none; }
+  [data-gutter] [data-expand-button] {
+    display: flex; width: 100%; min-width: 0; border: 0; font-size: 0;
+  }
+  [data-gutter] [data-expand-button]::before { content: ">"; font-size: var(--diffs-font-size, 13px); }
+  [data-gutter] [data-expand-button]:focus-visible { outline: 1px solid currentColor; outline-offset: -1px; }
+`;
 
 /** Own the two scroll surfaces and their correspondence, including annotation heights. */
 export function DiffViewer<T>({ fileDiff, annotations, options, selected, onSelect, renderAnnotation, mode, onMode, contents, contentError, prose, target, header }: Props<T>) {
@@ -86,6 +103,17 @@ export function DiffViewer<T>({ fileDiff, annotations, options, selected, onSele
     cancelAnimationFrame(frame.current);
     frame.current = requestAnimationFrame(() => syncRef.current());
   }, []);
+  const onPostRender: NonNullable<NonNullable<Props<T>["options"]>["onPostRender"]> = useCallback((node, _instance, phase) => {
+    if (phase === "unmount") return;
+    for (const button of Array.from((node.shadowRoot ?? node).querySelectorAll<HTMLElement>("[data-gutter] [data-expand-button]"))) {
+      button.tabIndex = 0;
+      button.setAttribute("aria-label", "Expand unchanged lines");
+      button.onkeydown = (event) => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); button.click(); }
+      };
+    }
+    scheduleSync();
+  }, [scheduleSync]);
   useEffect(() => {
     if (!sourceElement || !previewContent.current || mode !== "paired") return;
     const observer = new ResizeObserver(() => { measured.current = null; scheduleSync(); });
@@ -123,8 +151,8 @@ export function DiffViewer<T>({ fileDiff, annotations, options, selected, onSele
     {fileDiff ? <CodeView<T>
       ref={code} containerRef={mountSource} className="h-full overflow-auto" style={{ height: "100%" }} items={items}
       options={{ ...options, diffIndicators: "none", diffStyle: mode === "paired" ? "unified" : options?.diffStyle,
-        expandUnchanged: mode === "paired" || revealSource.current || jump !== null || target != null, onPostRender: scheduleSync, stickyHeaders: false,
-        itemMetrics: { paddingTop: 0 }, unsafeCSS: "[data-code] { padding-top: 0; }",
+        expandUnchanged: mode === "paired" || revealSource.current || jump !== null || target != null, onPostRender, stickyHeaders: false,
+        hunkSeparators: "line-info-basic", itemMetrics: { paddingTop: 0, hunkSeparatorHeight: DEFAULT_CODE_VIEW_FILE_METRICS.lineHeight }, unsafeCSS: sourceCSS,
         layout: { paddingTop: 0, paddingBottom: 0, gap: 0 } }}
       selectedLines={selected ? { id: "file", range: selected } : null}
       onSelectedLinesChange={(selection) => onSelect(selection?.range ?? null)}

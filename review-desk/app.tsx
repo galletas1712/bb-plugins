@@ -787,7 +787,7 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
             disableFileHeader: true, enableLineSelection: true,
             lineHoverHighlight: "both", enableGutterUtility: true,
             onGutterUtilityClick: (range) => onOpenComposer(file.path, range),
-            loadDiffFiles, hunkSeparators: "line-info", overflow: wrap ? "wrap" : "scroll" }}
+            loadDiffFiles, overflow: wrap ? "wrap" : "scroll" }}
           selected={selected} onSelect={(range) => onSelect(range ? { path: file.path, range } : null)}
           renderAnnotation={(annotation) => <div className="w-full min-w-0 whitespace-normal px-3 py-1 font-sans">
             {annotation.metadata.map((anno, index) => <Annotation key={annotationKey(anno, index)} anno={anno} actions={actions} />)}
