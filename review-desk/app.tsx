@@ -1791,7 +1791,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                             <details aria-label={`Stack ${stackInfo.number ?? "inferred"} in ${repository.key}`} className="group/stack">
                               <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 px-3 py-2.5 pr-11 text-left hover:bg-state-hover [&::-webkit-details-marker]:hidden">
                                 <Icon name="ChevronRight" className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open/stack:rotate-90" />
-                                <PrMark state={latest.state} isDraft={latest.isDraft} reviewDecision={latest.reviewDecision} className="size-4" />
+                                <PrMark state="OPEN" isDraft={layers.some((pr) => pr.isDraft)} reviewDecision={stackInfo.mergeReady ? "APPROVED" : null} label={stackInfo.mergeReady ? "Stack ready to merge" : "Stack not ready to merge"} className="size-4" />
                                 <span className="min-w-0 flex-1">
                                   <span className="block break-words text-sm font-medium">{latest.title}</span>
                                   <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">

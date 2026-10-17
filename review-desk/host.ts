@@ -136,12 +136,13 @@ interface GhPrView {
   changedFiles: number;
   reviewDecision: string | null;
   mergeable: string | null;
+  mergeStateStatus: string | null;
   updatedAt: string;
   createdAt: string;
 }
 
 async function ghPrStatus(owner: string, repo: string, number: number): Promise<GhPrStatus> {
-  const fields = "number,title,body,state,isDraft,url,author,baseRefName,headRefName,headRefOid,baseRefOid,additions,deletions,changedFiles,reviewDecision,mergeable,updatedAt,createdAt";
+  const fields = "number,title,body,state,isDraft,url,author,baseRefName,headRefName,headRefOid,baseRefOid,additions,deletions,changedFiles,reviewDecision,mergeable,mergeStateStatus,updatedAt,createdAt";
   const result = await run("gh", ["pr", "view", String(number), "--repo", `${owner}/${repo}`, "--json", fields]);
   const view = ghJson<GhPrView>(result.stdout);
   return {
@@ -162,6 +163,7 @@ async function ghPrStatus(owner: string, repo: string, number: number): Promise<
     changedFiles: view.changedFiles,
     reviewDecision: view.reviewDecision ?? null,
     mergeable: view.mergeable ?? null,
+    mergeStateStatus: view.mergeStateStatus ?? null,
     updatedAt: view.updatedAt,
 
   };

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fetchPrStatuses } from "./pr-statuses";
 
-const status = (number: number) => ({ number, title: `PR ${number}`, body: "Description", state: "OPEN", isDraft: false, url: `https://github.com/o/r/pull/${number}`, author: { login: "me" }, baseRefName: "main", headRefName: `branch-${number}`, headRefOid: `head-${number}`, baseRefOid: "base", additions: 1, deletions: 0, changedFiles: 1, reviewDecision: null, mergeable: "MERGEABLE", updatedAt: "2026-10-15T00:00:00Z", createdAt: "2026-10-01T00:00:00Z" });
+const status = (number: number) => ({ number, title: `PR ${number}`, body: "Description", state: "OPEN", isDraft: false, url: `https://github.com/o/r/pull/${number}`, author: { login: "me" }, baseRefName: "main", headRefName: `branch-${number}`, headRefOid: `head-${number}`, baseRefOid: "base", additions: 1, deletions: 0, changedFiles: 1, reviewDecision: null, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", updatedAt: "2026-10-15T00:00:00Z", createdAt: "2026-10-01T00:00:00Z" });
 
 test("one scalar query scans a batch across repositories and retains closed and reopened states", async () => {
   const refs = Array.from({ length: 50 }, (_, i) => ({ owner: "o", repo: i % 2 ? "other" : "r", number: i + 1 }));
@@ -11,10 +11,12 @@ test("one scalar query scans a batch across repositories and retains closed and 
     calls++; assert.equal(cmd, "gh"); assert.ok(args.includes("graphql"));
     const query = args.find((arg) => arg.startsWith("query="))!;
     assert.equal((query.match(/pullRequest\(number:/g) ?? []).length, 50);
+    assert.match(query, /mergeStateStatus/);
     assert.ok(!query.includes("commits(") && !query.includes("files("));
     return { stdout: JSON.stringify({ data: Object.fromEntries(refs.map((pr, i) => [`r${i}`, { pullRequest: { ...status(pr.number), state: i === 0 ? "CLOSED" : i === 1 ? "MERGED" : "OPEN" } }])) }), stderr: "", code: 0 };
   }, refs);
   assert.equal(calls, 1);
+  assert.equal(result.prs[0].mergeStateStatus, "CLEAN");
   assert.equal(result.prs[0].state, "CLOSED"); assert.equal(result.prs[1].state, "MERGED");
   assert.equal(result.prs[2].state, "OPEN"); assert.equal(result.prs[1].repo, "other");
 });

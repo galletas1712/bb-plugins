@@ -10,8 +10,9 @@ function status({ state, isDraft, merged, reviewDecision }: PrStatusProps): { la
   return { label: reviewDecision === "APPROVED" ? "Approved" : "Open", icon: reviewDecision === "APPROVED" ? "Check" : "GitPullRequest", tone: "text-emerald-600 dark:text-emerald-400" };
 }
 
-export function PrMark(props: PrStatusProps) {
-  const { label, icon, tone } = status(props);
+export function PrMark(props: PrStatusProps & { label?: string }) {
+  const { label: statusLabel, icon, tone } = status(props);
+  const label = props.label ?? statusLabel;
   return <span role="img" aria-label={label} title={label} className={cn("inline-flex shrink-0", tone)}><Icon name={icon} className={cn("size-3.5", props.className)} /></span>;
 }
 

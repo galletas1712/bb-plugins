@@ -8,6 +8,7 @@ const variable = (args: string[], name: string) => args.find((arg) => arg.starts
 const pr = (number: number) => ({
   number, title: `PR ${number}`, state: "OPEN", isDraft: false, url: `https://github.com/o/r/pull/${number}`,
   additions: 1, deletions: 0, changedFiles: 1, reviewDecision: null as string | null,
+  mergeable: "MERGEABLE", mergeStateStatus: "CLEAN",
   headRefName: `branch-${number}`, headRefOid: `sha-${number}`, baseRefName: number === 1 ? "main" : `branch-${number - 1}`, mergedAt: null,
   files: { pageInfo: pageInfo(), nodes: [{ path: `file-${number}.ts` }] },
 });
@@ -40,6 +41,8 @@ test("native stacks fetch beyond five pages and paginate files inside each layer
   const stack = await fetchPullRequestStack(run, input);
   assert.deepEqual(stack?.entries.map((entry) => entry.number), [1, 2, 3, 4, 5, 6]);
   assert.equal(stack?.entries[0].files.length, 101);
+  assert.equal(stack?.entries[0].mergeable, "MERGEABLE");
+  assert.equal(stack?.entries[0].mergeStateStatus, "CLEAN");
   assert.equal(stack?.entries[0].files.at(-1), "file-101.ts");
 });
 

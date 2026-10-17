@@ -34,6 +34,7 @@ export const ghPrSchema = z.object({
   changedFiles: z.number(),
   reviewDecision: z.string().nullable(),
   mergeable: z.string().nullable(),
+  mergeStateStatus: z.string().nullable().optional(),
   updatedAt: z.string(),
   checks: z.array(z.object({ name: z.string(), status: z.string(), conclusion: z.string().nullable(), url: z.string().nullable() })),
   labels: z.array(z.string()),
@@ -134,6 +135,8 @@ export const prStackEntrySchema = z.object({
   headRefName: z.string(),
   headSha: z.string(),
   baseRefName: z.string(),
+  mergeable: z.string().nullable().optional(),
+  mergeStateStatus: z.string().nullable().optional(),
   /** Changed paths in this layer, used to mark files that also change in other layers. */
   files: z.array(z.string()),
 });

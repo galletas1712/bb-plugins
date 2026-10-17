@@ -5,7 +5,7 @@ import type { GhRun } from "./stack-fetch";
 export async function fetchPrStatuses(run: GhRun, prs: { owner: string; repo: string; number: number }[]) {
   if (prs.length === 0) return { prs: [], errors: [] };
   const fields = `number title body state isDraft url author { login } baseRefName headRefName
-    headRefOid baseRefOid additions deletions changedFiles reviewDecision mergeable updatedAt createdAt`;
+    headRefOid baseRefOid additions deletions changedFiles reviewDecision mergeable mergeStateStatus updatedAt createdAt`;
   const query = `query { ${prs.map((pr, index) => `r${index}: repository(owner: ${JSON.stringify(pr.owner)}, name: ${JSON.stringify(pr.repo)}) {
     pullRequest(number: ${pr.number}) { ${fields} }
   }`).join("\n")} }`;

@@ -90,6 +90,7 @@ const reviewSummarySchema = z.object({
     position: z.number(),
     size: z.number(),
     key: z.string(),
+    mergeReady: z.boolean().default(false),
   }).nullable(),
 });
 export type ReviewSummary = z.infer<typeof reviewSummarySchema>;
@@ -817,6 +818,7 @@ export default async function plugin(bb: BbPluginApi) {
       const next = { ...tracked.stack, entries: tracked.stack.entries.map((entry) => {
         const pr = observed.get(prKey({ ...tracked, number: entry.number }));
         return pr ? { ...entry, title: pr.title, state: pr.state, isDraft: pr.isDraft, merged: pr.state === "MERGED", reviewDecision: pr.reviewDecision,
+          mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus ?? null,
           headSha: pr.headRefOid, headRefName: pr.headRefName, baseRefName: pr.baseRefName, url: pr.url,
           additions: pr.additions, deletions: pr.deletions, changedFiles: pr.changedFiles, files: entry.headSha === pr.headRefOid ? entry.files : [] } : entry;
       }) };
@@ -1530,6 +1532,10 @@ export default async function plugin(bb: BbPluginApi) {
       reviews: [
         ...stacks.list().flatMap((tracked): ReviewSummary[] => {
           const stack = activePrStack(tracked.owner, tracked.repo, tracked.stack);
+          // Match gh's immediately mergeable states, including nonblocking check failures.
+          const mergeReady = stack !== null && stack.entries.every((entry) => !entry.isDraft
+            && (entry.reviewDecision === "APPROVED" || entry.reviewDecision === null)
+            && entry.mergeable === "MERGEABLE" && ["CLEAN", "HAS_HOOKS", "UNSTABLE"].includes(entry.mergeStateStatus ?? ""));
           return stack?.entries.map((entry) => {
             const local = q.reviewByKey.get(tracked.owner, tracked.repo, entry.number);
             const activity = owned.get(prKey({ owner: tracked.owner, repo: tracked.repo, number: entry.number }))?.updatedAt ?? local?.gh_updated_at;
@@ -1540,7 +1546,7 @@ export default async function plugin(bb: BbPluginApi) {
               ...stackEntryStats(local, entry),
               pendingCount: local ? q.pending.all(local.id).length : 0,
               updatedAt: Date.parse(activity ?? "") || tracked.openedAt,
-              stack: { number: stack.number, position: entry.position, size: stack.entries.length, key: tracked.key },
+              stack: { number: stack.number, position: entry.position, size: stack.entries.length, key: tracked.key, mergeReady },
             };
           }) ?? [];
         }),

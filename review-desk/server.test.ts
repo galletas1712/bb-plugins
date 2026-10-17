@@ -399,6 +399,44 @@ test("a manual refresh waits for a normal sync and then fetches the latest push"
 
 const ownPr = (number: number, repo = "r"): OwnPrs["prs"][number] => ({ owner: "o", repo, number, title: `Own PR ${number}`, state: "OPEN", isDraft: false, headSha: `head-${number}`, additions: number, deletions: 0, reviewDecision: null, updatedAt: "2026-10-07T00:00:00Z" });
 
+test("a stack is ready only when every open layer meets GitHub merge requirements, including status-only updates", async () => {
+  const f = await fixture(); const original = Date.now; let clock = original(); Date.now = () => clock;
+  const ready = { reviewDecision: "APPROVED", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
+  const scan = async () => {
+    clock += 16_000;
+    const service = f.harness.behavior.runService("scan-pr-status");
+    f.onBatch(() => service.controller.abort()); await service.done; f.onBatch(undefined);
+  };
+  const assertReady = async (expected: boolean) => {
+    const entries = (await f.list()).filter((pr) => pr.stack !== null);
+    assert.ok(entries.length > 0);
+    assert.ok(entries.every((pr) => pr.stack?.mergeReady === expected));
+  };
+  try {
+    f.setStack(stack([1, 2]));
+    await f.open(1);
+    await assertReady(false); // Older cached stacks lack merge-readiness information.
+    f.setPr(1, ready); f.setPr(2, { ...ready, reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED" });
+    await scan(); await assertReady(false);
+    f.setPr(2, ready); await scan(); await assertReady(true);
+    await f.reload(); await assertReady(true);
+    for (const blocker of [
+      { reviewDecision: "REVIEW_REQUIRED" }, { reviewDecision: "CHANGES_REQUESTED" }, { isDraft: true },
+      { mergeable: "CONFLICTING" }, { mergeable: "UNKNOWN" },
+      ...["BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"].map((mergeStateStatus) => ({ mergeStateStatus })),
+      { mergeStateStatus: null },
+    ]) {
+      f.setPr(2, { ...ready, ...blocker }); await scan(); await assertReady(false);
+    }
+    for (const mergeStateStatus of ["CLEAN", "HAS_HOOKS", "UNSTABLE"]) {
+      f.setPr(2, { ...ready, reviewDecision: null, mergeStateStatus }); await scan(); await assertReady(true);
+    }
+    f.setPr(2, { ...ready, state: "CLOSED", mergeStateStatus: "BLOCKED" }); await scan(); await assertReady(true);
+    f.setPr(2, { ...ready, mergeStateStatus: "BLOCKED" }); await scan(); await assertReady(false);
+    f.setPr(2, { ...ready, state: "MERGED", mergeStateStatus: "BLOCKED" }); await scan(); await assertReady(true);
+  } finally { Date.now = original; await f.harness.lifecycle.dispose(); }
+});
+
 test("all authored open PRs appear lazily, deduplicate stacks and local reviews, survive reload, and retire without losing drafts", async () => {
   const f = await fixture(); const now = Date.now;
   let clock = now();
@@ -574,7 +612,7 @@ test("merged layers and completed stacks disappear from every read model without
     const visible = await f.list();
     assert.deepEqual(visible.map((pr) => pr.number), [2]);
     assert.equal(visible[0].additions, 7);
-    assert.deepEqual(visible[0].stack, { number: 7, position: 1, size: 1, key: "gh:o/r#7" });
+    assert.deepEqual(visible[0].stack, { number: 7, position: 1, size: 1, key: "gh:o/r#7", mergeReady: false });
     const detail = await f.rpc("reviews_get", { reviewId: second.id }) as any;
     assert.deepEqual(detail.stack.entries.map((pr: any) => pr.number), [2]);
     assert.equal(detail.stack.entries[0].additions, 7);

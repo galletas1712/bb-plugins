@@ -33,6 +33,8 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
               deletions
               changedFiles
               reviewDecision
+              mergeable
+              mergeStateStatus
               headRefName
               headRefOid
               baseRefName
@@ -71,6 +73,8 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
               deletions
               changedFiles
               reviewDecision
+              mergeable
+              mergeStateStatus
               headRefName
               headRefOid
               baseRefName
@@ -98,6 +102,8 @@ interface GqlPr {
   deletions?: number | null;
   changedFiles?: number | null;
   reviewDecision?: string | null;
+  mergeable?: string | null;
+  mergeStateStatus?: string | null;
   headRefName?: string | null;
   headRefOid?: string | null;
   baseRefName?: string | null;
@@ -149,6 +155,8 @@ interface PrView {
   deletions: number;
   changedFiles: number;
   reviewDecision: string | null;
+  mergeable?: string | null;
+  mergeStateStatus?: string | null;
   headRefName: string;
   headRefOid: string;
   baseRefName: string;
@@ -236,6 +244,8 @@ function entryFromGql(node: { position: number; pullRequest: GqlPr | null }): Pr
     deletions: pr.deletions ?? 0,
     changedFiles: pr.changedFiles ?? files.length,
     reviewDecision: pr.reviewDecision ?? null,
+    mergeable: pr.mergeable ?? null,
+    mergeStateStatus: pr.mergeStateStatus ?? null,
     headRefName: pr.headRefName ?? "",
     headSha: pr.headRefOid ?? "",
     baseRefName: pr.baseRefName ?? "",
@@ -331,7 +341,7 @@ async function restStackByNumber(run: GhRun, owner: string, repo: string, stackN
 async function prView(run: GhRun, owner: string, repo: string, number: number): Promise<PrView | null> {
   const result = await run(
     "gh",
-    ["pr", "view", String(number), "--repo", `${owner}/${repo}`, "--json", "number,title,state,isDraft,url,additions,deletions,changedFiles,reviewDecision,headRefName,headRefOid,baseRefName,mergedAt"],
+    ["pr", "view", String(number), "--repo", `${owner}/${repo}`, "--json", "number,title,state,isDraft,url,additions,deletions,changedFiles,reviewDecision,mergeable,mergeStateStatus,headRefName,headRefOid,baseRefName,mergedAt"],
     { allowFailure: true },
   );
   if (result.code !== 0) return null;
@@ -377,6 +387,8 @@ function mergeView(entry: PrStackEntry, view: PrView | null, files: string[]): P
     deletions: view?.deletions ?? entry.deletions,
     changedFiles: view?.changedFiles ?? entry.changedFiles,
     reviewDecision: view !== null ? view.reviewDecision : entry.reviewDecision,
+    mergeable: view !== null ? view.mergeable ?? null : entry.mergeable,
+    mergeStateStatus: view !== null ? view.mergeStateStatus ?? null : entry.mergeStateStatus,
     headRefName: view?.headRefName || entry.headRefName,
     headSha: view?.headRefOid || entry.headSha,
     baseRefName: view?.baseRefName || entry.baseRefName,
@@ -415,7 +427,7 @@ async function relatedPr(run: GhRun, owner: string, repo: string, ref: string, f
           orderBy: { field: CREATED_AT, direction: DESC }) {
           pageInfo { hasNextPage endCursor }
           nodes {
-            number title state isDraft url additions deletions changedFiles reviewDecision
+            number title state isDraft url additions deletions changedFiles reviewDecision mergeable mergeStateStatus
             headRefName headRefOid baseRefName mergedAt
           }
         }
@@ -448,6 +460,8 @@ function viewToEntry(view: PrView, position: number): PrStackEntry {
     deletions: view.deletions,
     changedFiles: view.changedFiles,
     reviewDecision: view.reviewDecision,
+    mergeable: view.mergeable ?? null,
+    mergeStateStatus: view.mergeStateStatus ?? null,
     headRefName: view.headRefName,
     headSha: view.headRefOid,
     baseRefName: view.baseRefName,

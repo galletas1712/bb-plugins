@@ -335,7 +335,8 @@ test("Recent uses one status per PR, only offers stack-level removal, and opens 
   } });
   try {
     await slot.findAllByText("Approved layer");
-    for (const label of ["Approved", "Merged", "Draft", "Open", "Closed"]) assert.equal(slot.getAllByRole("img", { name: label }).length, label === "Approved" ? 2 : 1);
+    for (const label of ["Approved", "Merged", "Draft", "Open", "Closed"]) assert.equal(slot.getAllByRole("img", { name: label }).length, 1);
+    assert.ok(slot.getByRole("img", { name: "Stack not ready to merge" }));
     assert.ok(slot.getAllByRole("img", { name: "Approved" }).every((mark) => mark.className.includes("text-emerald-600")));
     assert.ok(slot.getByRole("img", { name: "Merged" }).className.includes("text-purple-600"));
     assert.ok(slot.getByLabelText("Diff: 60 additions, 12 deletions"));
@@ -350,6 +351,22 @@ test("Recent uses one status per PR, only offers stack-level removal, and opens 
     await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Remove stack reviews" })); });
     assert.deepEqual(removed, { key: "gh:o/r#7" });
   } finally { slot.lifecycle.unmount(); window.confirm = previousConfirm; }
+});
+
+test("stack checkmarks use full-stack readiness rather than the most recently active approved PR", async () => {
+  const prs = [
+    ...summaries.slice(0, 2).map((pr) => ({ ...pr, state: "OPEN", reviewDecision: pr.number === 1 ? "APPROVED" : "REVIEW_REQUIRED", stack: { ...pr.stack, size: 2, mergeReady: false } })),
+    ...[6, 7].map((number) => ({ ...summaries[0], number, title: `Ready layer ${number}`, stack: { key: "gh:o/r#8", number: 8, position: number - 5, size: 2, mergeReady: true } })),
+  ];
+  const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { reviews_list: () => ({ reviews: prs }) } });
+  try {
+    await slot.findByRole("img", { name: "Stack ready to merge" });
+    const blocked = slot.getByRole("group", { name: "Stack 7 in o/r" }).querySelector("summary");
+    const ready = slot.getByRole("group", { name: "Stack 8 in o/r" }).querySelector("summary");
+    assert.ok(blocked.querySelector('[aria-label="Stack not ready to merge"]'));
+    assert.equal(blocked.querySelector('[aria-label="Approved"]'), null);
+    assert.ok(ready.querySelector('[aria-label="Stack ready to merge"]'));
+  } finally { slot.lifecycle.unmount(); }
 });
 
 test("the PR header and stack navigation share status precedence and the menu removes the whole stack", async () => {
