@@ -102,10 +102,38 @@ export class Library {
     return path.join(this.directory(id), "body.md");
   }
 
+  /** The artifacts folder is canonical. artifacts.json carries provenance,
+   * but files copied directly onto disk are picked up too: their hash comes
+   * from the filename prefix when present, otherwise from the bytes. */
   private readArtifacts(dir: string): Artifact[] {
     const file = path.join(dir, "artifacts.json");
-    if (!fs.existsSync(file)) return [];
-    return artifactSchema.array().parse(JSON.parse(fs.readFileSync(file, "utf8")));
+    const listed: Artifact[] = fs.existsSync(file)
+      ? artifactSchema
+          .array()
+          .parse(JSON.parse(fs.readFileSync(file, "utf8")))
+      : [];
+    const artifactsDir = path.join(dir, "artifacts");
+    const seen = new Set(listed.map((a) => a.file));
+    const derived: Artifact[] = [];
+    if (fs.existsSync(artifactsDir)) {
+      for (const name of fs.readdirSync(artifactsDir)) {
+        if (name.startsWith(".")) continue;
+        const rel = `artifacts/${name}`;
+        if (seen.has(rel)) continue;
+        const full = path.join(artifactsDir, name);
+        if (!fs.statSync(full).isFile()) continue;
+        const match = /^([a-f0-9]{64})-(.+)$/.exec(name);
+        derived.push({
+          name: match ? match[2] : name,
+          file: rel,
+          sha256: match ? match[1] : hash(fs.readFileSync(full)),
+          bytes: fs.statSync(full).size,
+          sourcePath: "unknown (copied directly into artifacts/)",
+          hostId: "unknown",
+        });
+      }
+    }
+    return [...listed, ...derived];
   }
 
   read(id: string): KnowledgeRecord {

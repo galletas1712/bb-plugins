@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 import { cliCommand, defineCli, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -188,18 +189,32 @@ export default async function plugin(bb: BbPluginApi) {
             json,
             input: {
               type: "string",
-              required: true,
               stdin: true,
               description:
-                "Capture JSON. Use --input-stdin < capture.json to avoid shell quoting",
+                "Capture JSON on stdin, one line, capped at 16 KiB",
+            },
+            inputFile: {
+              type: "string",
+              description:
+                "Read capture JSON from this file instead of stdin. No size cap",
             },
           },
+          constraints: [
+            { kind: "at-most-one", options: ["input", "input-file"] },
+          ],
           async run({ options }, context) {
+            const raw = options.inputFile
+              ? fs.readFileSync(options.inputFile, "utf8")
+              : options.input;
+            if (!raw)
+              throw new Error(
+                "Provide --input-stdin or --input-file. Bodies over 16 KiB need --input-file.",
+              );
             return reply(
               await saveRecord(
                 bb,
                 library,
-                saveSchema.parse(JSON.parse(options.input)),
+                saveSchema.parse(JSON.parse(raw)),
                 context.threadId,
               ),
             );
