@@ -1449,7 +1449,7 @@ function DiffPane({ detail, rpc, refetch, commit, jump, display, onOpenPrDiff }:
       "flex flex-col border-r border-border bg-card",
       narrow ? "absolute inset-y-0 left-0 z-30 w-[min(18rem,85%)] shadow-lg" : "w-60 shrink-0",
     )}>
-      <div className="flex items-center gap-1 border-b border-border p-2">
+      <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border px-2">
         <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files…" className="h-7 min-w-0 flex-1 text-xs" aria-label="Filter files" />
         {narrow ? (
           <Button variant="ghost" size="sm" className="h-7 w-7 shrink-0 px-0" onClick={() => setShowTree(false)} aria-label="Close file list">
@@ -1464,15 +1464,16 @@ function DiffPane({ detail, rpc, refetch, commit, jump, display, onOpenPrDiff }:
   ) : null;
 
   return (
-    <div ref={setContainer} className="relative flex h-full min-h-0 text-xs" aria-label="File diff">
+    <div ref={setContainer} className="relative flex h-full min-h-0 flex-col text-xs" aria-label="File diff">
+      {commit ? <div className="flex shrink-0 items-center gap-3 border-b border-border px-3 py-2 text-xs">
+        <span className="font-mono">{commit.from ? shortSha(commit.from) + "…" : ""}{shortSha(commit.to)}</span>
+        <button type="button" className="text-muted-foreground hover:underline" onClick={() => onOpenPrDiff()}>All PR changes</button>
+      </div> : null}
+      <div className="relative flex min-h-0 flex-1">
       {narrow && showTree ? <button type="button" className="absolute inset-0 z-20 bg-background/60" aria-label="Close file list" onClick={() => setShowTree(false)} /> : null}
       {tree}
       <div ref={setViewerElement} className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {commit ? <div className="flex items-center gap-3 border-b border-border px-3 py-2 text-xs">
-          <span className="font-mono">{commit.from ? shortSha(commit.from) + "…" : ""}{shortSha(commit.to)}</span>
-          <button type="button" className="text-muted-foreground hover:underline" onClick={() => onOpenPrDiff()}>All PR changes</button>
-        </div> : null}
-        <div className="flex min-h-9 items-center gap-2 border-b border-border bg-muted/20 px-2 py-1">
+        <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-card px-2">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <Button
               variant={showTree ? "outline" : "ghost"}
@@ -1548,6 +1549,7 @@ function DiffPane({ detail, rpc, refetch, commit, jump, display, onOpenPrDiff }:
             />
           )}
         </div>
+      </div>
       </div>
     </div>
   );

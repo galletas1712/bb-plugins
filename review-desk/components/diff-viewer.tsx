@@ -124,6 +124,7 @@ export function DiffViewer<T>({ fileDiff, annotations, options, selected, onSele
       ref={code} containerRef={mountSource} className="h-full overflow-auto" style={{ height: "100%" }} items={items}
       options={{ ...options, diffIndicators: "none", diffStyle: mode === "paired" ? "unified" : options?.diffStyle,
         expandUnchanged: mode === "paired" || revealSource.current || jump !== null || target != null, onPostRender: scheduleSync, stickyHeaders: false,
+        itemMetrics: { paddingTop: 0 }, unsafeCSS: "[data-code] { padding-top: 0; }",
         layout: { paddingTop: 0, paddingBottom: 0, gap: 0 } }}
       selectedLines={selected ? { id: "file", range: selected } : null}
       onSelectedLinesChange={(selection) => onSelect(selection?.range ?? null)}
