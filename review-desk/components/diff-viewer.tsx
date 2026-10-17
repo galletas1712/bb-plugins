@@ -10,10 +10,10 @@ export interface SourceTarget { side: "additions" | "deletions"; start: number; 
 interface Props<T> {
   fileDiff: FileDiffMetadata | null;
   annotations: DiffLineAnnotation<T>[];
-  options: CodeViewProps<T, undefined>["options"];
+  options: CodeViewProps<T>["options"];
   selected: SelectedLineRange | null;
   onSelect(range: SelectedLineRange | null): void;
-  renderAnnotation: CodeViewProps<T, undefined>["renderAnnotation"];
+  renderAnnotation: CodeViewProps<T>["renderAnnotation"];
   mode: MarkdownView;
   onMode(mode: MarkdownView): void;
   contents: { oldContent: string; newContent: string } | null;
@@ -47,7 +47,7 @@ const sourceCSS = `
 
 /** Own the two scroll surfaces and their correspondence, including annotation heights. */
 export function DiffViewer<T>({ fileDiff, annotations, options, selected, onSelect, renderAnnotation, mode, onMode, contents, contentError, prose, target, header }: Props<T>) {
-  const code = useRef<CodeViewHandle<T, undefined>>(null);
+  const code = useRef<CodeViewHandle<T>>(null);
   const [sourceElement, setSourceElement] = useState<HTMLDivElement | null>(null);
   const mountSource = useCallback((element: HTMLDivElement | null) => { if (element) element.tabIndex = 0; setSourceElement(element); }, []);
   const preview = useRef<HTMLDivElement>(null);
@@ -159,14 +159,14 @@ export function DiffViewer<T>({ fileDiff, annotations, options, selected, onSele
   const source = <div className="h-full min-h-0" aria-label="Source diff" onWheelCapture={() => { active.current = "source"; }} onPointerDownCapture={() => { active.current = "source"; }} onKeyDownCapture={() => { active.current = "source"; }}>
     {fileDiff ? <CodeView<T>
       ref={code} containerRef={mountSource} className="h-full overflow-auto" style={{ height: "100%" }} items={items}
-      options={{ ...options, diffIndicators: "none", diffStyle: mode === "paired" ? "unified" : options?.diffStyle,
+      options={{ ...options, disableFileHeader: header ? false : options?.disableFileHeader, diffIndicators: "none", diffStyle: mode === "paired" ? "unified" : options?.diffStyle,
         expandUnchanged: mode === "paired" || revealSource.current || jump !== null || target != null, onPostRender, stickyHeaders: false,
         hunkSeparators: "line-info-basic", itemMetrics: { paddingTop: 0, hunkSeparatorHeight: DEFAULT_CODE_VIEW_FILE_METRICS.lineHeight }, unsafeCSS: sourceCSS,
         layout: { paddingTop: 0, paddingBottom: 0, gap: 0 } }}
       selectedLines={selected ? { id: "file", range: selected } : null}
       onSelectedLinesChange={(selection) => onSelect(selection?.range ?? null)}
       renderAnnotation={renderAnnotation}
-      renderCodeViewHeader={header ? () => header : undefined}
+      renderCustomHeader={header ? () => header : undefined}
       onScroll={(top, viewer) => {
         const item = viewer.getRenderedItems().find((item) => item.type === "diff");
         if (!restoring.current && item?.type === "diff") {

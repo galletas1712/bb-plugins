@@ -16,7 +16,7 @@ import {
   experimental_useCodeTheme as useCodeTheme,
 } from "@get-bb/plugin-sdk/app";
 import type { FileDiffMetadata, SelectedLineRange } from "@pierre/diffs";
-import { parsePatchFiles } from "@pierre/diffs";
+import { parseDiffFromFile, parsePatchFiles } from "@pierre/diffs";
 import type { CommitInfo, FileEntry, Note, PendingComment, Review, ReviewSummary, StackView, rpcContract } from "./server";
 import type { ChangedFile } from "./host-contract";
 import type { GhThread } from "./host-contract";
@@ -735,7 +735,26 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
   });
   const patch = patchQuery.data?.patch ?? null;
   const error = patchQuery.error ? describeError(patchQuery.error) : null;
-  const fileDiff = useMemo(() => patch === null ? null : pickFileDiff(patch, file.path, file.oldPath), [patch, file.path, file.oldPath]);
+  const patchDiff = useMemo(() => patch === null ? null : pickFileDiff(patch, file.path, file.oldPath), [patch, file.path, file.oldPath]);
+  const loadContents = useCallback(() => Promise.all([
+    queryClient.fetchQuery({ queryKey: reviewKey(review.id, "file", base ?? review.baseSha, file.oldPath ?? file.path), staleTime: Infinity,
+      queryFn: () => rpc.call("commit_file", { reviewId: review.id, sha: base ?? review.baseSha, path: file.oldPath ?? file.path }) }),
+    queryClient.fetchQuery({ queryKey: reviewKey(review.id, "file", head, file.path), staleTime: Infinity,
+      queryFn: () => rpc.call("commit_file", { reviewId: review.id, sha: head, path: file.path }) }),
+  ]).then(([oldSide, newSide]) => ({ oldContent: oldSide.content ?? "", newContent: newSide.content ?? "" })), [rpc, review.id, review.baseSha, file.path, file.oldPath, base, head]);
+  const contentQuery = useQuery({ queryKey: reviewKey(review.id, "contents", base ?? review.baseSha, head, file.path),
+    queryFn: loadContents, enabled: patchDiff?.isPartial === true || (markdown && mode !== "source"), staleTime: Infinity });
+  const contents = contentQuery.data ?? null;
+  const contentError = contentQuery.error ? describeError(contentQuery.error) : null;
+  // BB's shared diff runtime needs full file contents to expose expansion controls.
+  const fileDiff = useMemo(() => patchDiff === null || contents === null ? patchDiff : {
+    ...parseDiffFromFile(
+      { name: patchDiff.prevName ?? patchDiff.name, contents: contents.oldContent },
+      { name: patchDiff.name, contents: contents.newContent },
+      { context: 3 },
+    ),
+    type: patchDiff.type, prevName: patchDiff.prevName,
+  }, [patchDiff, contents]);
   const outdatedThreads = threads.filter((thread) => thread.isOutdated);
   const resolvedThreads = threads.filter((thread) => thread.isResolved && !thread.isOutdated);
   const annotations = useMemo(() => {
@@ -748,21 +767,8 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
     return placeAnnotations(fileDiff, comments);
   }, [fileDiff, threads, pending, notes, composer]);
   const selected = selection?.path === file.path ? selection.range : null;
-  const loadContents = useCallback(() => Promise.all([
-    queryClient.fetchQuery({ queryKey: reviewKey(review.id, "file", base ?? review.baseSha, file.oldPath ?? file.path), staleTime: Infinity,
-      queryFn: () => rpc.call("commit_file", { reviewId: review.id, sha: base ?? review.baseSha, path: file.oldPath ?? file.path }) }),
-    queryClient.fetchQuery({ queryKey: reviewKey(review.id, "file", head, file.path), staleTime: Infinity,
-      queryFn: () => rpc.call("commit_file", { reviewId: review.id, sha: head, path: file.path }) }),
-  ]).then(([oldSide, newSide]) => ({ oldContent: oldSide.content ?? "", newContent: newSide.content ?? "" })), [rpc, review.id, review.baseSha, file.path, file.oldPath, base, head]);
-  const loadDiffFiles = useCallback(async (meta: FileDiffMetadata) => {
-    const { oldContent, newContent } = await loadContents();
-    return { oldFile: { name: meta.prevName ?? meta.name, contents: oldContent }, newFile: { name: meta.name, contents: newContent } };
-  }, [loadContents]);
-  const contentQuery = useQuery({ queryKey: reviewKey(review.id, "contents", base ?? review.baseSha, head, file.path),
-    queryFn: loadContents, enabled: markdown && mode !== "source", staleTime: Infinity });
-  const contents = contentQuery.data ?? null;
-  const contentError = contentQuery.error ? describeError(contentQuery.error) : null;
-  const header = <>
+  const header = selected || contentError || annotations.detached.length > 0 || outdatedThreads.length > 0 || resolvedThreads.length > 0 ? <>
+    {contentError && mode === "source" ? <p role="alert" className="p-3 text-sm text-destructive">Could not load unchanged lines: {contentError}</p> : null}
     {selected ? <div className="flex items-center gap-3 border-b border-border px-3 py-2 text-xs">
       <span className="font-mono text-muted-foreground">Line {Math.min(selected.start, selected.end)}{selected.start !== selected.end ? "–" + Math.max(selected.start, selected.end) : ""}</span>
       <Button type="button" size="sm" onClick={() => onOpenComposer(file.path, selected)}>{inCommit ? "Comment at head" : "Comment"}</Button>
@@ -776,7 +782,7 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
       <ThreadGroup label="Resolved" threads={resolvedThreads} actions={actions} />
       <ThreadGroup label="Outdated" threads={outdatedThreads} actions={actions} />
     </div> : null}
-  </>;
+  </> : undefined;
   return <div data-review-file={file.path} className="h-full min-h-0 min-w-0 bg-card">
     {file.binary ? <div className="h-full overflow-y-auto">{header}<p className="p-3 text-sm text-muted-foreground">Binary file.</p></div>
       : error ? <div className="h-full overflow-y-auto">{header}<p role="alert" className="p-3 text-sm text-destructive">{error}</p></div>
@@ -787,7 +793,7 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
             disableFileHeader: true, enableLineSelection: true,
             lineHoverHighlight: "both", enableGutterUtility: true,
             onGutterUtilityClick: (range) => onOpenComposer(file.path, range),
-            loadDiffFiles, overflow: wrap ? "wrap" : "scroll" }}
+            overflow: wrap ? "wrap" : "scroll" }}
           selected={selected} onSelect={(range) => onSelect(range ? { path: file.path, range } : null)}
           renderAnnotation={(annotation) => <div className="w-full min-w-0 whitespace-normal px-3 py-1 font-sans">
             {annotation.metadata.map((anno, index) => <Annotation key={annotationKey(anno, index)} anno={anno} actions={actions} />)}
