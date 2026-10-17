@@ -25,7 +25,7 @@ The UI supports replying to and resolving GitHub review threads, writing pending
 
 The merge button names the selected allowed method, such as Squash and merge. Confirmation lists the destination branch and affected PRs. Native GitHub stack merges include open downstack PRs. Fresh GitHub checks validate permissions, methods, head and stack scope before submitting an asynchronous direct merge with repository rules enforced. The UI tracks pending, failed and successful outcomes. It does not enable automatic merging or bypass merge queues. Review summaries without visible text appear as compact activity rows instead of empty comments.
 
-Collapsed unchanged context uses one code-height row, with a gutter chevron that expands the original file context. Expansion keeps line numbers and comments aligned and supports mouse, Enter and Space.
+Collapsed unchanged context uses one code-height row, with a gutter chevron that expands the original file context. Tap or click anywhere on the row to expand it. Expansion keeps line numbers and comments aligned and supports touch, mouse, Enter and Space.
 
 Conversation keeps the PR description above the latest 20 activity items in chronological order. See earlier activity reveals 20 older items at a time between the description and the current activity. New replies bring older threads into the recent activity while preserving each original comment and its replies together. Expanded history, unsaved edits and scroll position are preserved while loading earlier activity and refreshing. Earlier pages use the existing cached conversation without extra GitHub requests.
 

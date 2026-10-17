@@ -31,6 +31,7 @@ const panelStorage = {
 const sourceCSS = `
   [data-code] { padding-top: 0; }
   [data-separator] { height: var(--diffs-line-height, 20px); }
+  [data-separator][data-expand-index] { cursor: pointer; touch-action: manipulation; }
   [data-gutter] [data-separator-wrapper], [data-content] [data-separator-wrapper] {
     display: flex; background: var(--diffs-bg-separator);
   }
@@ -103,9 +104,17 @@ export function DiffViewer<T>({ fileDiff, annotations, options, selected, onSele
     cancelAnimationFrame(frame.current);
     frame.current = requestAnimationFrame(() => syncRef.current());
   }, []);
-  const onPostRender: NonNullable<NonNullable<Props<T>["options"]>["onPostRender"]> = useCallback((node, _instance, phase) => {
+  const onPostRender: NonNullable<NonNullable<Props<T>["options"]>["onPostRender"]> = useCallback((node, instance, phase) => {
     if (phase === "unmount") return;
-    for (const button of Array.from((node.shadowRoot ?? node).querySelectorAll<HTMLElement>("[data-gutter] [data-expand-button]"))) {
+    const root = node.shadowRoot ?? node;
+    // A direct click handler makes the entire row a tap target, including on iOS.
+    for (const separator of Array.from(root.querySelectorAll<HTMLElement>("[data-separator][data-expand-index]"))) {
+      separator.onclick = (event) => {
+        event.stopPropagation();
+        if ("expandHunk" in instance) instance.expandHunk(Number(separator.dataset.expandIndex), "both", Infinity);
+      };
+    }
+    for (const button of Array.from(root.querySelectorAll<HTMLElement>("[data-gutter] [data-expand-button]"))) {
       button.tabIndex = 0;
       button.setAttribute("aria-label", "Expand unchanged lines");
       button.onkeydown = (event) => {
