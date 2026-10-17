@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  artifactSchema,
   idSchema,
-  recordSchema,
+  type Artifact,
   type KnowledgeRecord,
   type SaveInput,
   type SearchInput,
@@ -30,75 +31,101 @@ function atomicWrite(file: string, data: string | Buffer) {
   }
 }
 
-export function markdown(record: KnowledgeRecord) {
+const FRONTMATTER_KEYS = [
+  "id",
+  "title",
+  "project",
+  "created",
+  "source_thread",
+  "source_sequence",
+] as const;
+
+/** The canonical record file: JSON-valued frontmatter lines between ---
+ * fences, then the Markdown body. Agents edit this file directly. */
+function serialize(record: KnowledgeRecord) {
   const metadata = {
     id: record.id,
     title: record.title,
     project: record.projectId,
-    updated: record.updatedAt,
+    created: record.createdAt,
+    source_thread: record.source.threadId,
+    source_sequence: record.source.sequence,
   };
   const frontmatter = Object.entries(metadata)
     .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
     .join("\n");
-  return (
-    `---\n${frontmatter}\n---\n\n# ${record.title}\n\n${record.body}\n\n` +
-    `## Source\n\n@thread:${record.source.threadId}, through event ${record.source.sequence}.\n\n` +
-    (record.artifacts.length
-      ? `## Evidence\n\n${record.artifacts.map((a) => `- [${a.name}](../../${a.file}) · SHA-256 \`${a.sha256}\``).join("\n")}\n`
-      : "")
-  );
+  return `---\n${frontmatter}\n---\n\n${record.body}\n`;
 }
 
-/** Canonical version folders are immutable. HEAD publishes a complete version in one rename. */
+function parse(id: string, raw: string, updatedAt: string) {
+  const match = raw.match(/^---\n([\s\S]*?)\n---\n\n?([\s\S]*)$/);
+  if (!match) throw new Error(`Malformed body.md for ${id}`);
+  const fields: Record<string, unknown> = {};
+  for (const line of match[1].split("\n")) {
+    const separator = line.indexOf(": ");
+    if (separator === -1) continue;
+    const key = line.slice(0, separator);
+    if (!(FRONTMATTER_KEYS as readonly string[]).includes(key)) continue;
+    fields[key] = JSON.parse(line.slice(separator + 2));
+  }
+  if (typeof fields.title !== "string" || typeof fields.created !== "string")
+    throw new Error(`Malformed frontmatter for ${id}`);
+  return {
+    id,
+    title: fields.title,
+    body: match[2].replace(/\n$/, ""),
+    projectId: (fields.project as string | null) ?? null,
+    source: {
+      threadId: (fields.source_thread as string) ?? "unknown",
+      sequence: (fields.source_sequence as number) ?? 0,
+    },
+    createdAt: fields.created,
+    updatedAt,
+  };
+}
+
+/** A record is a folder: body.md plus artifacts/ and an artifacts.json
+ * sidecar. QMD indexes body.md files directly, so there is no search
+ * projection, no versions, and no HEAD pointer. */
 export class Library {
   constructor(readonly root: string) {
     if (!path.isAbsolute(root))
       throw new Error("libraryPath must be an absolute path on the BB server");
     fs.mkdirSync(path.join(root, "records"), { recursive: true, mode: 0o700 });
-    fs.mkdirSync(path.join(root, "search"), { recursive: true, mode: 0o700 });
   }
 
   private directory(id: string) {
     return path.join(this.root, "records", idSchema.parse(id));
   }
 
+  bodyPath(id: string) {
+    return path.join(this.directory(id), "body.md");
+  }
+
+  private readArtifacts(dir: string): Artifact[] {
+    const file = path.join(dir, "artifacts.json");
+    if (!fs.existsSync(file)) return [];
+    return artifactSchema.array().parse(JSON.parse(fs.readFileSync(file, "utf8")));
+  }
+
   read(id: string): KnowledgeRecord {
-    const dir = this.directory(id);
-    const version = fs.readFileSync(path.join(dir, "HEAD"), "utf8").trim();
-    if (!/^[1-9][0-9]*$/.test(version))
-      throw new Error(`Invalid HEAD for ${id}`);
-    const record = recordSchema.parse(
-      JSON.parse(
-        fs.readFileSync(
-          path.join(dir, "versions", version, "record.json"),
-          "utf8",
-        ),
-      ),
-    );
-    if (record.id !== id || record.version !== Number(version))
-      throw new Error(`Invalid version for ${id}`);
-    return record;
+    const file = this.bodyPath(id);
+    const raw = fs.readFileSync(file, "utf8");
+    const updatedAt = fs.statSync(file).mtime.toISOString();
+    const parsed = parse(id, raw, updatedAt);
+    return { ...parsed, artifacts: this.readArtifacts(path.dirname(file)) };
   }
 
   all(): KnowledgeRecord[] {
     return fs
       .readdirSync(path.join(this.root, "records"), { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
-      .filter((entry) =>
-        fs.existsSync(path.join(this.directory(entry.name), "HEAD")),
-      )
+      .filter((entry) => fs.existsSync(this.bodyPath(entry.name)))
       .map((entry) => this.read(entry.name));
   }
 
-  reportPath(record: KnowledgeRecord) {
-    return path.join(
-      this.directory(record.id),
-      "versions",
-      String(record.version),
-      "report.md",
-    );
-  }
-
+  /** Create or fully replace a record. Small updates should edit body.md
+   * directly instead of going through this method. */
   save(
     input: SaveInput,
     projectId: string | null,
@@ -110,29 +137,10 @@ export class Library {
     }>,
     source: KnowledgeRecord["source"],
   ): KnowledgeRecord {
-    // No await between the version check and HEAD publication. Calls in one server
-    // generation cannot interleave, including while a replacement plugin loads.
     const dir = this.directory(input.id);
-    const previous = fs.existsSync(path.join(dir, "HEAD"))
+    const previous = fs.existsSync(this.bodyPath(input.id))
       ? this.read(input.id)
       : null;
-    // Keep retries stable when an automatic source sequence advances between calls.
-    const requestHash = hash(
-      JSON.stringify({
-        input,
-        sourceThreadId: source.threadId,
-        projectId,
-        evidence: evidence.map((a) => ({
-          name: a.name,
-          sha256: hash(a.bytes),
-        })),
-      }),
-    );
-    if (previous?.requestHash === requestHash) return previous;
-    if ((previous?.version ?? 0) !== input.expectedVersion)
-      throw new Error(
-        `Version conflict for ${input.id}. Read the record and use its current expectedVersion.`,
-      );
     if (previous && previous.projectId !== projectId)
       throw new Error("A record cannot move between project and global scopes");
     const artifacts = evidence.map((a) => {
@@ -150,10 +158,7 @@ export class Library {
     });
     const now = new Date().toISOString();
     const record: KnowledgeRecord = {
-      schemaVersion: 2,
       id: input.id,
-      version: (previous?.version ?? 0) + 1,
-      requestHash,
       title: input.title,
       body: input.body,
       projectId,
@@ -167,14 +172,26 @@ export class Library {
         ...artifacts,
       ],
     };
-    const versionDir = path.join(dir, "versions", String(record.version));
-    atomicWrite(
-      path.join(versionDir, "record.json"),
-      JSON.stringify(record, null, 2) + "\n",
-    );
-    atomicWrite(path.join(versionDir, "report.md"), markdown(record));
-    atomicWrite(path.join(dir, "HEAD"), String(record.version));
+    atomicWrite(this.bodyPath(input.id), serialize(record));
+    if (record.artifacts.length)
+      atomicWrite(
+        path.join(dir, "artifacts.json"),
+        JSON.stringify(record.artifacts, null, 2) + "\n",
+      );
     return record;
+  }
+
+  /** Move a record into a trash folder at the library root, outside the QMD
+   * collection. Recover by moving the folder back into records/. */
+  delete(id: string): { id: string; trashedTo: string } {
+    const dir = this.directory(id);
+    if (!fs.existsSync(this.bodyPath(id)))
+      throw new Error(`No record named ${id}.`);
+    const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
+    const trashedTo = path.join(this.root, ".trash", `${id}-${stamp}`);
+    fs.mkdirSync(path.dirname(trashedTo), { recursive: true, mode: 0o700 });
+    fs.renameSync(dir, trashedTo);
+    return { id, trashedTo };
   }
 
   search(input: SearchInput, rankedIds?: string[]) {
@@ -202,34 +219,14 @@ export class Library {
     const records: RecordSummary[] = matches
       .slice(input.offset, input.offset + input.limit)
       .map(({ record }) => {
-        const { body, requestHash: _, artifacts, ...summary } = record;
+        const { body, artifacts, ...summary } = record;
         return {
           ...summary,
           artifactCount: artifacts.length,
           snippet: body.slice(0, 300),
+          path: this.bodyPath(record.id),
         };
       });
     return { records, total: matches.length };
-  }
-
-  rebuildSearch() {
-    const records = this.all();
-    const wanted = new Set(records.map((r) => `${r.id}.md`));
-    for (const file of fs.readdirSync(path.join(this.root, "search"))) {
-      if (file.endsWith(".md") && !wanted.has(file))
-        fs.unlinkSync(path.join(this.root, "search", file));
-    }
-    for (const record of records) {
-      const file = path.join(this.root, "search", `${record.id}.md`);
-      // Evidence links in the search projection point back into canonical storage.
-      atomicWrite(
-        file,
-        markdown(record).replaceAll(
-          "](../../artifacts/",
-          `](../records/${record.id}/artifacts/`,
-        ),
-      );
-    }
-    return records.length;
   }
 }

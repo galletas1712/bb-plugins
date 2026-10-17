@@ -46,7 +46,6 @@ function RecordEditor({
     try {
       const saved = await rpc.call("edit", {
         id: record.id,
-        expectedVersion: record.version,
         title,
         body,
       });
@@ -129,7 +128,7 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
   const [total, setTotal] = useState(0);
   const [detail, setDetail] = useState<{
     record: KnowledgeRecord;
-    reportPath: string;
+    path: string;
     hostId: string | null;
   } | null>(null);
   const [editing, setEditing] = useState(false);
@@ -229,8 +228,7 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
         ) : detail ? (
           <article className="space-y-4 rounded-lg border border-border p-5">
             <div className="text-xs text-muted-foreground">
-              Version {detail.record.version} ·{" "}
-              {new Date(detail.record.updatedAt).toLocaleDateString()}
+              Updated {new Date(detail.record.updatedAt).toLocaleDateString()}
             </div>
             <div className="flex items-start justify-between gap-3">
               <h2 className="text-lg font-medium">{detail.record.title}</h2>
@@ -275,10 +273,8 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
                           kind: "host",
                           hostId: detail.hostId,
                           path:
-                            detail.reportPath.replace(
-                              /[\\/]versions[\\/][^\\/]+[\\/]report\.md$/,
-                              "/",
-                            ) + a.file,
+                            detail.path.replace(/[\\/]body\.md$/, "/") +
+                            a.file,
                         }}
                       >
                         {a.name}
