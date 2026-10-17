@@ -301,30 +301,31 @@ function pickFileDiff(patch: string, path: string, oldPath: string | null): File
   }
 }
 
-function useRefreshFallback(refetch: () => void) {
+function useRefreshFallback(refetch: () => void, onActivate?: () => void) {
   const connection = useRealtimeConnectionState();
   useEffect(() => {
     const refreshVisible = () => { if (document.visibilityState !== "hidden") refetch(); };
+    const activate = () => { if (document.visibilityState !== "hidden") { onActivate?.(); refetch(); } };
     const timer = window.setInterval(refreshVisible, 15_000);
-    window.addEventListener("focus", refreshVisible);
-    document.addEventListener("visibilitychange", refreshVisible);
+    window.addEventListener("focus", activate);
+    document.addEventListener("visibilitychange", activate);
     return () => {
       window.clearInterval(timer);
-      window.removeEventListener("focus", refreshVisible);
-      document.removeEventListener("visibilitychange", refreshVisible);
+      window.removeEventListener("focus", activate);
+      document.removeEventListener("visibilitychange", activate);
     };
-  }, [refetch]);
+  }, [refetch, onActivate]);
   const previousConnection = useRef(connection);
   useEffect(() => {
-    if (connection === "connected" && previousConnection.current !== "connected") refetch();
+    if (connection === "connected" && previousConnection.current !== "connected") { if (document.visibilityState !== "hidden") onActivate?.(); refetch(); }
     previousConnection.current = connection;
-  }, [connection, refetch]);
+  }, [connection, refetch, onActivate]);
 }
 
-function reviewQuery(rpc: ReturnType<typeof useRpc<Contract>>, reviewId: string) {
+function reviewQuery(rpc: ReturnType<typeof useRpc<Contract>>, reviewId: string, prefetch = false) {
   return { queryKey: reviewKey(reviewId, "detail"), queryFn: async ({ signal }: { signal: AbortSignal }) => {
     const path = readStorage<string>(fileSelKey(reviewId)) ?? undefined;
-    const result = await rpc.call("reviews_get", { reviewId, ...(path ? { path } : {}) });
+    const result = await rpc.call("reviews_get", { reviewId, ...(path ? { path } : {}), ...(prefetch || document.visibilityState === "hidden" ? { prefetch: true } : {}) });
     signal.throwIfAborted();
     // Seed cold components without replacing a newer response from an active query.
     const seed = (key: unknown[], value: unknown) => { if (value && queryClient.getQueryData(key) === undefined) queryClient.setQueryData(key, value); };
@@ -363,7 +364,7 @@ function useReviews() {
     void Promise.all(Array.from({ length: 2 }, async () => {
       while (queue.length && !cancelled) {
         const review = queue.shift()!;
-        await queryClient.prefetchQuery({ ...reviewQuery(rpc, review.id!), staleTime: 60_000 });
+        await queryClient.prefetchQuery({ ...reviewQuery(rpc, review.id!, true), staleTime: 60_000 });
       }
     }));
     return () => { cancelled = true; };
@@ -376,6 +377,8 @@ function useReview(reviewId: string) {
   const [closed, setClosed] = useState<string | null>(null);
   const query = useQuery(reviewQuery(rpc, reviewId));
   const refetch = useCallback(() => { void query.refetch(); }, [query.refetch]);
+  const refreshNow = useCallback(() => { void rpc.call("reviews_refresh", { reviewId }).catch(() => undefined); }, [rpc, reviewId]);
+  useEffect(refreshNow, [refreshNow]);
   useRealtime(REVIEW_CHANGED, (payload) => {
     const p = payloadReview(payload);
     if (p === null || p.reviewId !== reviewId) return;
@@ -387,7 +390,7 @@ function useReview(reviewId: string) {
     }
     refetch();
   });
-  useRefreshFallback(refetch);
+  useRefreshFallback(refetch, refreshNow);
   return { rpc, detail: closed ? null : query.data ?? null, error: closed ?? (query.error ? describeError(query.error) : null), refetch };
 }
 

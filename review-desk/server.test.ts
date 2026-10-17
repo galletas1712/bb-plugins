@@ -110,7 +110,7 @@ test("cached merge actions survive reload, return while GitHub is slow, and refr
     const before = calls();
     assert.deepEqual(await f.rpc("review_merge_options", { reviewId: review.id }), original);
     assert.equal(calls(), before);
-    clock += 16_000;
+    clock += 601_000;
     f.onRead((method) => method === "gh_merge_options" ? new Promise((resolve) => { release = resolve; }) : undefined);
     assert.deepEqual(await f.rpc("review_merge_options", { reviewId: review.id }), original);
     assert.deepEqual(await f.rpc("review_merge_options", { reviewId: review.id }), original);
@@ -122,7 +122,7 @@ test("cached merge actions survive reload, return while GitHub is slow, and refr
     const next = { ...original, reason: "Mark draft pull requests ready before merging." };
     release(next);
     assert.deepEqual(await fresh, next);
-    clock += 16_000;
+    clock += 601_000;
     f.onRead((method) => method === "gh_merge_options" ? Promise.reject(new Error("GitHub unavailable")) : undefined);
     assert.deepEqual(await f.rpc("review_merge_options", { reviewId: review.id }), next);
     await new Promise((resolve) => setImmediate(resolve));
@@ -359,7 +359,7 @@ test("stack polling updates membership and counts while review details are block
     // File counts are published before the heavy query finishes.
     assert.equal((await f.rpc("reviews_get", { reviewId: first.id }) as any).review.additions, 8);
     const next = stack([1, 2, 3, 4]);
-    Date.now = () => now() + 40_000;
+    Date.now = () => now() + 80_000;
     next.entries[0].headSha = "pushed-head";
     next.entries[0].additions = 11; // Same head, newer remote comparison.
     next.entries[3].additions = 29;
@@ -404,7 +404,7 @@ test("all authored open PRs appear lazily, deduplicate stacks and local reviews,
   let clock = now();
   Date.now = () => clock;
   const poll = async () => {
-    clock += 20_000;
+    clock += 61_000;
     const service = f.harness.behavior.runService("sync-own-prs");
     f.onOwn(() => service.controller.abort());
     await service.done; f.onOwn(undefined);
@@ -438,7 +438,7 @@ test("automatic discovery respects removal of unopened PRs and entire stacks, an
   const f = await fixture(); const now = Date.now;
   let clock = now(); Date.now = () => clock;
   const poll = async () => {
-    clock += 20_000;
+    clock += 61_000;
     const service = f.harness.behavior.runService("sync-own-prs");
     f.onOwn(() => service.controller.abort());
     await service.done; f.onOwn(undefined);
@@ -576,11 +576,123 @@ test("minute prefetch warms files and conversation, and an unchanged head needs 
     assert.equal(f.calls.length, before);
     const db = f.bb.storage.database();
     assert.ok(db.prepare("SELECT json FROM conversation_cache WHERE review_id = ?").get(first.id));
-    clock += 6 * 60_000;
+    clock += 11 * 60_000;
     await prefetch();
     assert.equal(f.calls.filter((c) => c.method === "repo_prepare").length, 1);
     assert.equal(f.calls.filter((c) => c.method === "git_files").length, 1);
   } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("inactive reviews skip heavy minute refreshes, active reviews refresh each minute, and grid prefetch stays inactive", async () => {
+  const f = await fixture(); const original = Date.now; let clock = original(); Date.now = () => clock;
+  const sweep = async () => {
+    const service = f.harness.behavior.runService("sync-open-reviews");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    service.controller.abort(); await service.done;
+  };
+  const count = (method: string, number: number) => f.calls.filter((call) => call.method === method && call.input.number === number).length;
+  try {
+    f.setStack(null);
+    const first = await f.open(1); const second = await f.open(2);
+    await sweep();
+    for (let minute = 1; minute <= 9; minute++) {
+      clock += 61_000;
+      await f.rpc("reviews_get", { reviewId: second.id, prefetch: true });
+      await sweep();
+      for (const method of ["gh_pr_details", "gh_threads", "gh_conversation", "gh_merge_options", "gh_description"]) {
+        assert.equal(count(method, 1), 1, `${method}: inactive PR 1 at minute ${minute}`);
+        assert.equal(count(method, 2), 1, `${method}: grid-prefetched PR 2 at minute ${minute}`);
+      }
+    }
+    await f.rpc("reviews_refresh", { reviewId: first.id });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(count("gh_pr_details", 1), 2, "visiting bypasses the background freshness window");
+    clock += 61_000;
+    await sweep();
+    assert.equal(count("gh_pr_details", 1), 3, "active PR refreshes after a minute");
+    assert.equal(count("gh_pr_details", 2), 2, "inactive safety sweep runs after ten minutes");
+    clock += 120_000;
+    await sweep();
+    assert.equal(count("gh_pr_details", 1), 3, "activity expires when no page is reading the PR");
+    assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, 2, "unchanged revisions need no Git fetch");
+  } finally { Date.now = original; await f.harness.lifecycle.dispose(); }
+});
+
+test("a cached PR visit returns immediately and starts a fresh shared read without refetching unchanged Git", async () => {
+  const f = await fixture(); let release!: () => void;
+  try {
+    f.setStack(null); const review = await f.open(1);
+    await f.rpc("reviews_sync", { reviewId: review.id });
+    await f.rpc("review_merge_options", { reviewId: review.id });
+    await f.rpc("review_description", { reviewId: review.id });
+    const statusBefore = f.calls.filter((call) => call.method === "gh_pr_status").length;
+    const gitBefore = f.calls.filter((call) => call.method === "repo_prepare").length;
+    f.setPr(1, { title: "Fresh title", body: "Fresh description", updatedAt: "2026-10-17T00:00:00Z" });
+    f.onStatus(() => new Promise<void>((resolve) => { release = resolve; }));
+    assert.deepEqual(await f.rpc("reviews_refresh", { reviewId: review.id }), { ok: true });
+    await f.rpc("reviews_refresh", { reviewId: review.id });
+    const cached = await f.rpc("reviews_get", { reviewId: review.id, prefetch: true }) as any;
+    assert.equal(cached.review.title, "PR 1", "cached content remains available during the fetch");
+    assert.equal(f.calls.filter((call) => call.method === "gh_pr_status").length, statusBefore + 1);
+    release(); f.onStatus(undefined);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const fresh = await f.rpc("reviews_get", { reviewId: review.id, prefetch: true }) as any;
+    assert.equal(fresh.review.title, "Fresh title");
+    assert.equal(fresh.description.body, "Fresh description");
+    assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, gitBefore);
+  } finally { release?.(); await f.harness.lifecycle.dispose(); }
+});
+
+test("15-second revision scans fetch and cache head/base changes before slow history without a prefetch sweep", async () => {
+  const f = await fixture(); const original = Date.now; let clock = original(); Date.now = () => clock;
+  let release!: () => void;
+  try {
+    f.setStack(null);
+    const review = await f.open(1);
+    await f.rpc("reviews_sync", { reviewId: review.id });
+    for (const change of [{ headRefOid: "pushed-head", baseRefOid: "base" }, { headRefOid: "pushed-head", baseRefOid: "pushed-base" }]) {
+      clock += 16_000; f.setPr(1, change);
+      f.setFiles([{ path: "a.ts", oldPath: null, status: "modified", additions: 9, deletions: 1, binary: false }]);
+      let entered!: () => void; const pending = new Promise<void>((resolve) => { entered = resolve; });
+      f.onDetails(() => new Promise<void>((resolve) => { release = resolve; entered(); }));
+      const before = f.calls.filter((call) => call.method === "repo_prepare").length;
+      const scan = f.harness.behavior.runService("scan-pr-status");
+      f.onBatch(() => scan.controller.abort());
+      await scan.done; await pending;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const cached = await f.rpc("reviews_get", { reviewId: review.id, prefetch: true }) as any;
+      assert.equal(cached.review.headSha, "pushed-head");
+      assert.equal(cached.review.baseSha, change.baseRefOid ?? "base");
+      assert.equal(cached.review.additions, 9);
+      assert.ok(cached.initialPatch.patch.includes(`${cached.review.baseSha}..pushed-head`));
+      assert.equal(f.calls.filter((call) => call.method === "repo_prepare").length, before + 1);
+      release(); f.onDetails(undefined); f.onBatch(undefined);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  } finally { release?.(); Date.now = original; await f.harness.lifecycle.dispose(); }
+});
+
+test("a second push during Git preparation is fetched as soon as the older preparation finishes", async () => {
+  const f = await fixture(); const original = Date.now; let clock = original(); Date.now = () => clock;
+  let release!: () => void;
+  const scan = async () => {
+    const service = f.harness.behavior.runService("scan-pr-status");
+    f.onBatch(() => service.controller.abort()); await service.done; f.onBatch(undefined);
+  };
+  try {
+    f.setStack(null); const review = await f.open(1);
+    await f.rpc("reviews_sync", { reviewId: review.id });
+    let entered!: () => void; const blocked = new Promise<void>((resolve) => { entered = resolve; });
+    let preparations = 0;
+    f.onPrepare(() => ++preparations === 1 ? new Promise<void>((resolve) => { release = resolve; entered(); }) : undefined);
+    clock += 16_000; f.setPr(1, { headRefOid: "first-push" });
+    await scan(); await blocked;
+    clock += 16_000; f.setPr(1, { headRefOid: "second-push" }); await scan();
+    release(); await new Promise<void>((resolve) => setImmediate(resolve));
+    const cached = await f.rpc("reviews_get", { reviewId: review.id, prefetch: true }) as any;
+    assert.equal(cached.review.headSha, "second-push");
+    assert.equal(preparations, 2, "no minute sweep or additional status scan is needed");
+  } finally { release?.(); Date.now = original; await f.harness.lifecycle.dispose(); }
 });
 
 test("minute prefetch warms merge actions, permissions, patches and Markdown content before opening a PR", async () => {

@@ -21,6 +21,33 @@ const stub = (responses, rules = [[]]) => {
   } };
 };
 
+test("repository policy and branch rules are shared across PRs for ten minutes, with fresh merge validation", async () => {
+  const original = Date.now; let clock = original(); Date.now = () => clock;
+  try {
+    const fake = stub([repository(), { data: { repository: { pullRequest: { ...pr, number: 3 } } } }, repository(), repository()]);
+    await readMergeOptions(fake.run, ref);
+    const next = await readMergeOptions(fake.run, { ...ref, number: 3 });
+    assert.equal(next.defaultMethod, "squash");
+    assert.equal(fake.calls.filter((call) => call.args.some((arg) => arg.includes("/rules/branches/"))).length, 1);
+    assert.ok(!fake.calls.filter((call) => call.payload)[1].payload.query.includes("viewerPermission"));
+    await readMergeOptions(fake.run, ref, true);
+    assert.equal(fake.calls.filter((call) => call.args.some((arg) => arg.includes("/rules/branches/"))).length, 2);
+    clock += 601_000;
+    await readMergeOptions(fake.run, ref);
+    assert.equal(fake.calls.filter((call) => call.args.some((arg) => arg.includes("/rules/branches/"))).length, 3);
+  } finally { Date.now = original; }
+});
+
+test("a changed target branch has separate policy and failed branch reads can recover", async () => {
+  const fake = stub([repository(), repository({ ...pr, baseRefName: "release" })]);
+  await readMergeOptions(fake.run, ref); await readMergeOptions(fake.run, ref);
+  assert.equal(fake.calls.filter((call) => call.args.some((arg) => arg.includes("/rules/branches/"))).length, 2);
+  const failed = stub([repository(), repository()], new Error("GitHub unavailable"));
+  await assert.rejects(readMergeOptions(failed.run, ref), /unavailable/);
+  await assert.rejects(readMergeOptions(failed.run, ref), /unavailable/);
+  assert.equal(failed.calls.filter((call) => call.args.some((arg) => arg.includes("/rules/branches/"))).length, 2);
+});
+
 test("merge options reflect repository methods, permissions, and GitHub blockers", async () => {
   assert.deepEqual(await readMergeOptions(stub([repository()]).run, ref), { ...expected, methods: ["squash"], defaultMethod: "squash", reason: null });
   const all = await readMergeOptions(stub([repository(pr, { mergeCommitAllowed: true, rebaseMergeAllowed: true })]).run, ref);

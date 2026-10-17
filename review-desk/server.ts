@@ -151,7 +151,7 @@ export const rpcContract = defineRpcContract({
   reviews_list: { input: z.null(), output: z.object({ reviews: z.array(reviewSummarySchema), discoveryError: z.string().nullable().default(null) }) },
   reviews_open: { input: z.object({ ref: z.string().trim().min(1) }), output: z.object({ review: reviewSchema }) },
   reviews_get: {
-    input: reviewIdSchema.extend({ path: z.string().optional() }),
+    input: reviewIdSchema.extend({ path: z.string().optional(), prefetch: z.boolean().optional() }),
     output: z.object({
       review: reviewSchema,
       files: z.array(fileEntrySchema),
@@ -169,6 +169,7 @@ export const rpcContract = defineRpcContract({
     }),
   },
   reviews_sync: { input: reviewIdSchema, output: z.object({ review: reviewSchema, headChanged: z.boolean() }) },
+  reviews_refresh: { input: reviewIdSchema, output: okSchema },
   reviews_remove: { input: z.union([reviewIdSchema, z.object({ owner: z.string(), repo: z.string(), number: z.number() })]), output: okSchema },
   stacks_remove: { input: z.object({ key: z.string() }), output: okSchema },
   review_patch: {
@@ -660,6 +661,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Take a review out of Review Desk. Does not close the pull request on GitHub. */
   function forgetReview(row: ReviewRow, dismiss: boolean): void {
+    activeReviews.delete(row.id);
     reads.remove(row.id);
     q.clearPending.run(row.id);
     q.deleteViewedByReview.run(row.id);
@@ -761,11 +763,14 @@ export default async function plugin(bb: BbPluginApi) {
 
   const stackRefresh = new Map<string, { work: Promise<void>; forced: boolean }>();
   const stackFailures = new Map<string, { at: number; error: unknown }>();
-  const reviewSync = new Map<string, { work: Promise<{ review: Review; headChanged: boolean }>; forced: boolean }>();
+  const reviewSync = new Map<string, { work: Promise<{ review: Review; headChanged: boolean }>; mode: "poll" | "visit" | "force" }>();
   const SYNC_EVERY_MS = 15_000;
-  const STACK_FRESH_MS = 15_000;
+  const STACK_FRESH_MS = 60_000;
+  const DISCOVERY_EVERY_MS = 60_000;
   const REVIEW_SWEEP_MS = 60_000;
-  const DETAILS_EVERY_MS = 60_000;
+  const DETAILS_EVERY_MS = 10 * 60_000;
+  const activeReviews = new Map<string, number>();
+  const detailsAge = (id: string) => Date.now() - (activeReviews.get(id) ?? 0) < 90_000 ? 60_000 : DETAILS_EVERY_MS;
 
   const prKey = (pr: { owner: string; repo: string; number: number }) => `${pr.owner}/${pr.repo}#${pr.number}`;
   const prStatuses = new Map<string, { pr: PrStatus; fetchedAt: number; request: number }>();
@@ -797,6 +802,10 @@ export default async function plugin(bb: BbPluginApi) {
   function reconcileStatus(owner: string, repo: string, pr: PrStatus): void {
     const row = q.reviewByKey.get(owner, repo, pr.number);
     if (!row) return;
+    if (prIsOpen(pr.state) && (pr.headRefOid !== row.head_sha || pr.baseRefOid !== row.base_ref_sha)) {
+      // Revision changes bypass the minute prefetch schedule.
+      void syncReview(row.id).catch(() => undefined);
+    }
     if (row.state === pr.state && row.is_draft === Number(pr.isDraft) && row.title === pr.title && row.review_decision === pr.reviewDecision && row.gh_updated_at === pr.updatedAt) return;
     q.setStatus.run(pr.state, Number(pr.isDraft), pr.title, pr.reviewDecision, pr.updatedAt, Date.now(), Date.now(), row.id);
     detailsRefreshedAt.delete(row.id);
@@ -877,7 +886,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function refreshOwnPrs(): Promise<void> {
     if (ownPrRefresh) return ownPrRefresh;
-    if (Date.now() - Math.max(ownPrAttemptAt, q.ownPrsCache.get()?.fetched_at ?? 0) < SYNC_EVERY_MS) return;
+    if (Date.now() - Math.max(ownPrAttemptAt, q.ownPrsCache.get()?.fetched_at ?? 0) < DISCOVERY_EVERY_MS) return;
     ownPrAttemptAt = Date.now();
     ownPrRefresh = (async () => {
       try {
@@ -1118,16 +1127,23 @@ export default async function plugin(bb: BbPluginApi) {
     return openPr(parsed.owner, parsed.repo, parsed.number);
   }
 
-  async function syncReview(reviewId: string, force = false): Promise<{ review: Review; headChanged: boolean }> {
+  async function syncReview(reviewId: string, mode: "poll" | "visit" | "force" = "poll"): Promise<{ review: Review; headChanged: boolean }> {
     const inflight = reviewSync.get(reviewId);
     if (inflight !== undefined) {
-      if (!force || inflight.forced) return inflight.work;
+      if (mode === "poll") {
+        const result = await inflight.work;
+        const row = requireReview(reviewId);
+        const latest = prStatuses.get(prKey(row))?.pr;
+        if (latest && prIsOpen(latest.state) && (latest.headRefOid !== row.head_sha || latest.baseRefOid !== row.base_ref_sha)) return syncReview(reviewId);
+        return result;
+      }
+      if (inflight.mode === "force" || mode === inflight.mode) return inflight.work;
       await inflight.work.catch(() => undefined);
-      return syncReview(reviewId, true);
+      return syncReview(reviewId, mode);
     }
     const work = (async () => {
       try {
-        const result = await syncReviewOnce(reviewId, force);
+        const result = await syncReviewOnce(reviewId, mode);
         if (syncErrors.delete(reviewId)) publish(reviewId, "sync-error");
         return result;
       } catch (cause) {
@@ -1137,18 +1153,20 @@ export default async function plugin(bb: BbPluginApi) {
         reviewSync.delete(reviewId);
       }
     })();
-    reviewSync.set(reviewId, { work, forced: force });
+    reviewSync.set(reviewId, { work, mode });
     return work;
   }
 
-  async function syncReviewOnce(reviewId: string, force: boolean): Promise<{ review: Review; headChanged: boolean }> {
+  async function syncReviewOnce(reviewId: string, mode: "poll" | "visit" | "force"): Promise<{ review: Review; headChanged: boolean }> {
+    const force = mode === "force";
+    const freshRead = mode !== "poll";
     const row = requireReview(reviewId);
     const known = prStatuses.get(prKey(row))?.pr;
     const changedRefs = known !== undefined && (known.headRefOid !== row.head_sha || known.baseRefOid !== row.base_ref_sha);
-    if (!force && !changedRefs && !syncErrors.has(reviewId) && detailsRefreshedAt.has(reviewId) && Date.now() - row.synced_at < SYNC_EVERY_MS && stackFresh(row.owner, row.repo, row.number)) {
+    if (!freshRead && !changedRefs && !syncErrors.has(reviewId) && detailsRefreshedAt.has(reviewId) && Date.now() - row.synced_at < SYNC_EVERY_MS && stackFresh(row.owner, row.repo, row.number)) {
       return { review: toReview(row), headChanged: false };
     }
-    const pr = await readPrStatus(row.owner, row.repo, row.number, row.host_id, force);
+    const pr = await readPrStatus(row.owner, row.repo, row.number, row.host_id, freshRead);
     const wasOpen = prIsOpen(row.state);
     if (!prIsOpen(pr.state)) {
       const now = Date.now();
@@ -1164,8 +1182,8 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const headChanged = pr.headRefOid !== row.head_sha;
     const baseMoved = pr.baseRefName !== row.base_ref || pr.baseRefOid !== row.base_ref_sha;
-    const touched = force || syncErrors.has(reviewId) || headChanged || baseMoved || pr.updatedAt !== row.gh_updated_at || pr.title !== row.title || pr.body !== row.body || pr.state !== row.state || pr.isDraft !== (row.is_draft === 1) || (pr.reviewDecision ?? null) !== row.review_decision || q.threadsCache.get(row.id) === undefined;
-    const detailsDue = Date.now() - (detailsRefreshedAt.get(reviewId) ?? 0) >= DETAILS_EVERY_MS;
+    const touched = freshRead || syncErrors.has(reviewId) || headChanged || baseMoved || pr.updatedAt !== row.gh_updated_at || pr.title !== row.title || pr.body !== row.body || pr.state !== row.state || pr.isDraft !== (row.is_draft === 1) || (pr.reviewDecision ?? null) !== row.review_decision || q.threadsCache.get(row.id) === undefined;
+    const detailsDue = Date.now() - (detailsRefreshedAt.get(reviewId) ?? 0) >= detailsAge(reviewId);
     if (!touched && !detailsDue) {
       q.setSyncedAt.run(Date.now(), row.id);
       await refreshStack(row);
@@ -1190,6 +1208,7 @@ export default async function plugin(bb: BbPluginApi) {
     applyPr(row, { ...pr, ...retainedDetails }, prepared);
     const fresh = requireReview(reviewId);
     if (force || headChanged || baseMoved || cachedFiles(fresh) === null) await refreshFiles(fresh);
+    if (headChanged || baseMoved) void warmReview(fresh).catch((cause) => reportSyncError(row.id, cause));
     // Publish the new diff before slower checks, commits and conversation queries.
     publish(reviewId, wasOpen ? "synced" : "reopened");
     const details = await host.call("gh_pr_details", {
@@ -1264,12 +1283,18 @@ export default async function plugin(bb: BbPluginApi) {
     return stored?.version === 2 && Array.isArray(stored.events) ? { comments: stored.comments, reviews: stored.reviews, events: stored.events, fetchedAt: cache!.fetched_at } : null;
   }
 
-  function mergeOptionsFor(row: ReviewRow, fresh = false) {
-    return reads.read(row.id, "merge-options", () => host.call("gh_merge_options", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row)), SYNC_EVERY_MS, fresh);
+  function mergeOptionsFor(row: ReviewRow, { fresh = false, freshPolicy = fresh }: { fresh?: boolean; freshPolicy?: boolean } = {}) {
+    return reads.read(row.id, "merge-options", () => host.call("gh_merge_options", { owner: row.owner, repo: row.repo, number: row.number, freshPolicy }, hostOptions(row)), detailsAge(row.id), fresh);
   }
 
-  function descriptionFor(row: ReviewRow) {
-    return reads.read(row.id, "description", () => host.call("gh_description", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row)), REVIEW_SWEEP_MS);
+  function descriptionFor(row: ReviewRow, fresh = false) {
+    return reads.read(row.id, "description", () => host.call("gh_description", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row)), detailsAge(row.id), fresh);
+  }
+
+  function refreshOnVisit(row: ReviewRow) {
+    activeReviews.set(row.id, Date.now());
+    void syncReview(row.id, "visit").catch(() => undefined);
+    void Promise.allSettled([mergeOptionsFor(row, { fresh: true, freshPolicy: false }), descriptionFor(row, true)]);
   }
 
   const patchKey = (base: string, head: string, path: string, oldPath: string | null) => JSON.stringify(["patch", base, head, path, oldPath]);
@@ -1319,11 +1344,14 @@ export default async function plugin(bb: BbPluginApi) {
     return out;
   }
 
-  async function reviewDetail(reviewId: string, path?: string) {
+  async function reviewDetail(reviewId: string, path?: string, prefetch = false) {
     const row = requireReview(reviewId);
     if (!reviewIsActive(row)) throw new Error("closed");
-    void syncReview(reviewId).catch(() => undefined);
-    void Promise.allSettled([mergeOptionsFor(row), descriptionFor(row)]);
+    if (!prefetch) {
+      activeReviews.set(reviewId, Date.now());
+      void syncReview(reviewId).catch(() => undefined);
+      void Promise.allSettled([mergeOptionsFor(row), descriptionFor(row)]);
+    }
     await ensureStack(row);
     const files = await filesFor(row);
     const viewed = new Set(q.viewed.all(row.id).map((v) => v.path));
@@ -1546,8 +1574,9 @@ export default async function plugin(bb: BbPluginApi) {
   bb.rpc.register(rpcContract, {
     reviews_list: listReviews,
     reviews_open: async ({ ref }) => ({ review: await openReview(ref) }),
-    reviews_get: ({ reviewId, path }) => reviewDetail(reviewId, path),
-    reviews_sync: ({ reviewId }) => syncReview(reviewId, true),
+    reviews_get: ({ reviewId, path, prefetch }) => reviewDetail(reviewId, path, prefetch),
+    reviews_refresh: ({ reviewId }) => { refreshOnVisit(requireReview(reviewId)); return { ok: true as const }; },
+    reviews_sync: ({ reviewId }) => syncReview(reviewId, "force"),
     reviews_remove: async (input) => {
       const { owner, repo, number } = "reviewId" in input ? requireReview(input.reviewId) : input;
       const row = q.reviewByKey.get(owner, repo, number);
@@ -1588,7 +1617,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     review_threads_refresh: async ({ reviewId }) => ({ threads: await refreshThreads(requireReview(reviewId)) }),
     review_description: ({ reviewId }) => descriptionFor(requireReview(reviewId)),
-    review_merge_options: ({ reviewId, refresh }) => mergeOptionsFor(requireReview(reviewId), refresh),
+    review_merge_options: ({ reviewId, refresh }) => mergeOptionsFor(requireReview(reviewId), { fresh: refresh }),
     review_merge: async ({ reviewId, ...input }) => {
       const row = requireReview(reviewId);
       const result = await host.call("gh_merge", { owner: row.owner, repo: row.repo, number: row.number, ...input }, hostOptions(row));
@@ -1828,7 +1857,7 @@ export default async function plugin(bb: BbPluginApi) {
       while (!signal.aborted) {
         try { await refreshOwnPrs(); }
         catch (cause) { bb.log.warn(`sync authored PRs: ${errorMessage(cause)}`); }
-        await sleep(SYNC_EVERY_MS, signal);
+        await sleep(DISCOVERY_EVERY_MS, signal);
       }
     },
   });

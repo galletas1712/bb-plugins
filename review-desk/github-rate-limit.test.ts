@@ -26,7 +26,7 @@ test("rate limits back off exponentially to 15 minutes, then reset after recover
     f.advance(1);
   }
   f.respond(async () => ok);
-  assert.deepEqual(await f.run("gh", api), ok);
+  assert.equal((await f.run("gh", api)).stdout, ok.stdout);
   f.respond(async () => limited);
   await assert.rejects(f.run("gh", api), /rate limit/);
   f.advance(60_000);
@@ -141,7 +141,7 @@ test("concurrent failures coalesce, earlier successes cannot reset the pause, an
 test("last successful request can exhaust quota without losing its data, and mutations are never replayed", async () => {
   const f = fixture();
   f.respond(async () => ({ ...ok, stdout: headers(200, { "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": String(f.now() / 1000 + 3600) }, ok.stdout) }));
-  assert.deepEqual(await f.run("gh", api), ok);
+  assert.equal((await f.run("gh", api)).stdout, ok.stdout);
   await assert.rejects(f.run("gh", ["api", "-X", "PUT", "repos/o/r/pulls/1/merge"]), /Requests paused/);
   assert.equal(f.calls.length, 1);
   f.advance(3_600_000);

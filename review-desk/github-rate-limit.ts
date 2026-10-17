@@ -1,8 +1,8 @@
-type Result = { stdout: string; stderr: string; code: number };
+export type Result = { stdout: string; stderr: string; code: number; headers?: ResponseHeaders[] };
 type Options = { cwd?: string; input?: string; allowFailure?: boolean };
-type Run = (cmd: string, args: string[], options?: Options) => Promise<Result>;
+export type Run = (cmd: string, args: string[], options?: Options) => Promise<Result>;
 
-interface ResponseHeaders { status: number; values: Map<string, string> }
+export interface ResponseHeaders { status: number; values: Map<string, string> }
 
 // gh writes headers inside the outer JSON array when --slurp is used.
 // Real header blocks contain newlines, unlike header-like text in JSON strings.
@@ -61,7 +61,7 @@ export function withGitHubBackoff(execute: Run, { now = Date.now, random = Math.
       const api = args[0] === "api";
       const raw = await execute(cmd, api ? ["api", "--include", ...args.slice(1)] : args, { ...options, allowFailure: true });
       const { body, headers } = api ? responseBody(raw.stdout) : { body: raw.stdout, headers: [] };
-      const result = { ...raw, stdout: body };
+      const result = { ...raw, stdout: body, ...(headers.length ? { headers } : {}) };
       const limit = limitResponse(result, headers, now());
       if (limit.limited || limit.retryAt > now() && headers.some(({ values }) => values.get("x-ratelimit-remaining") === "0")) {
         // Responses from one concurrent burst share a single backoff step.

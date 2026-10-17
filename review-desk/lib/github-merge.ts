@@ -14,12 +14,25 @@ interface Repository {
   }) | null;
 }
 
+const POLICY_AGE_MS = 10 * 60_000;
+const POLICY_FIELDS = "mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission viewerDefaultMergeMethod";
+// Each runner belongs to a host worker and its authenticated gh environment.
+const policies = new WeakMap<Run, {
+  repositories: Map<string, { value: Omit<Repository, "pullRequest">; at: number }>;
+  branches: Map<string, { work: Promise<BranchRule[]>; at: number }>;
+}>();
+
 /** Read the merge action and its full downstack scope with the merging identity. */
-export async function readMergeOptions(run: Run, ref: PrRef): Promise<MergeOptions> {
+export async function readMergeOptions(run: Run, ref: PrRef, freshPolicy = false): Promise<MergeOptions> {
+  let cache = policies.get(run);
+  if (!cache) { cache = { repositories: new Map(), branches: new Map() }; policies.set(run, cache); }
+  const repoKey = `${ref.owner}/${ref.repo}`.toLowerCase();
+  const saved = cache.repositories.get(repoKey);
+  const cachedPolicy = !freshPolicy && saved && Date.now() - saved.at < POLICY_AGE_MS ? saved.value : null;
   const response = JSON.parse((await run("gh", ["api", "graphql", "--input", "-"], { input: JSON.stringify({
     query: `query($owner: String!, $repo: String!, $number: Int!) {
       repository(owner: $owner, name: $repo) {
-        mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission viewerDefaultMergeMethod
+        ${cachedPolicy ? "" : POLICY_FIELDS}
         pullRequest(number: $number) {
           number state isDraft headRefOid baseRefName mergeable mergeStateStatus
           stack { baseRefName entries(first: 100) {
@@ -28,12 +41,17 @@ export async function readMergeOptions(run: Run, ref: PrRef): Promise<MergeOptio
           } }
         }
       }
-    }`, variables: ref,
+    }`, variables: { owner: ref.owner, repo: ref.repo, number: ref.number },
   }) })).stdout) as { data: { repository: Repository | null }; errors?: { message: string }[] };
   if (response.errors?.length) throw new Error(response.errors.map((e) => e.message).join("\n"));
-  const repo = response.data.repository;
-  const pr = repo?.pullRequest;
-  if (!repo || !pr) throw new Error("Pull request not found on GitHub.");
+  const current = response.data.repository;
+  const pr = current?.pullRequest;
+  if (!current || !pr) throw new Error("Pull request not found on GitHub.");
+  const repo = { ...cachedPolicy, ...current };
+  if (!cachedPolicy) {
+    const { pullRequest, ...value } = current;
+    cache.repositories.set(repoKey, { value, at: Date.now() });
+  }
   const entries = pr.stack?.entries;
   const position = entries?.nodes.find((entry) => entry.pullRequest.number === ref.number)?.position;
   if (entries?.pageInfo.hasNextPage || entries && position === undefined) throw new Error("Cannot determine the complete merge scope. Open this pull request on GitHub to merge it.");
@@ -43,7 +61,15 @@ export async function readMergeOptions(run: Run, ref: PrRef): Promise<MergeOptio
   if (repo.squashMergeAllowed) methods.push("squash");
   if (repo.rebaseMergeAllowed) methods.push("rebase");
   const baseRefName = pr.stack?.baseRefName ?? pr.baseRefName;
-  const rules = (JSON.parse((await run("gh", ["api", "--paginate", "--slurp", "-H", "X-GitHub-Api-Version: 2026-03-10", `repos/${ref.owner}/${ref.repo}/rules/branches/${encodeURIComponent(baseRefName)}?per_page=100`])).stdout) as BranchRule[][]).flat();
+  const branchKey = `${repoKey}:${baseRefName}`;
+  let branch = cache.branches.get(branchKey);
+  if (freshPolicy || !branch || Date.now() - branch.at >= POLICY_AGE_MS) {
+    const next = { at: Date.now(), work: run("gh", ["api", "--paginate", "--slurp", "-H", "X-GitHub-Api-Version: 2026-03-10", `repos/${ref.owner}/${ref.repo}/rules/branches/${encodeURIComponent(baseRefName)}?per_page=100`]).then((result) => (JSON.parse(result.stdout) as BranchRule[][]).flat()) };
+    cache.branches.set(branchKey, next);
+    void next.work.catch(() => { if (cache!.branches.get(branchKey) === next) cache!.branches.delete(branchKey); });
+    branch = next;
+  }
+  const rules = await branch.work;
   for (const rule of rules) {
     const allowed = rule.type === "pull_request" ? rule.parameters?.allowed_merge_methods
       : rule.type === "required_linear_history" ? ["squash", "rebase"]
@@ -71,7 +97,7 @@ function mergeResult(result: ApiResult): MergeResult {
 }
 
 export async function mergePr(run: Run, input: PrRef & z.infer<typeof mergeInputSchema>): Promise<MergeResult> {
-  const current = await readMergeOptions(run, input);
+  const current = await readMergeOptions(run, input, true);
   if (current.reason) throw new Error(current.reason);
   if (!current.methods.includes(input.method)) throw new Error("This merge method is no longer allowed. Refresh the merge options.");
   const { headSha, baseRefName, prs } = current;

@@ -13,11 +13,12 @@ import { editBody, readDescription } from "./lib/github-edit";
 import { mergePr, readMergeOptions, readMergeResult } from "./lib/github-merge";
 import { fetchConversation, fetchPrMetadata, fetchReviewThreads } from "./github-conversation";
 import { withGitHubBackoff } from "./github-rate-limit";
+import { withGitHubCache } from "./github-cache";
 
 const execFileAsync = promisify(execFile);
 const MAX_BUFFER = 64 * 1024 * 1024;
 
-const run = withGitHubBackoff(async (cmd, args, options = {}) => {
+const run = withGitHubCache(withGitHubBackoff(async (cmd, args, options = {}) => {
   try {
     const child = execFileAsync(cmd, args, { cwd: options.cwd, maxBuffer: MAX_BUFFER, encoding: "utf8", timeout: cmd === "gh" && args[0] !== "repo" ? 30_000 : 180_000 });
     if (options.input !== undefined && child.child.stdin) {
@@ -32,7 +33,7 @@ const run = withGitHubBackoff(async (cmd, args, options = {}) => {
     }
     throw new Error(`${cmd} ${args.slice(0, 4).join(" ")}… failed: ${(err.stderr || err.message || "").trim().slice(0, 600)}`);
   }
-});
+}));
 
 const git = (cwd: string, args: string[], allowFailure = false) => run("git", args, { cwd, allowFailure });
 
@@ -173,7 +174,7 @@ async function ghPrStatus(owner: string, repo: string, number: number): Promise<
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
-    gh_merge_options(input) { return readMergeOptions(run, input); },
+    gh_merge_options(input) { return readMergeOptions(run, input, input.freshPolicy); },
     gh_merge(input) { return mergePr(run, input); },
     gh_merge_result(input) { return readMergeResult(run, input); },
     async repo_clone({ owner, repo, dest }, context) {
