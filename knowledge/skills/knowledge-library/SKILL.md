@@ -110,9 +110,9 @@ A record is a folder in the library (`bb knowledge status` prints the library
 path): `records/<id>/body.md` plus `artifacts/`. The body file is the
 canonical text.
 
-- To create a record, use `knowledge_save` or pipe compact JSON:
-  `jq -c . capture.json | bb knowledge save --input-stdin`. The plugin stamps
-  the project and source thread and copies any listed artifacts.
+- To create a record, use `knowledge_save`, or write the capture JSON to a
+  file and run `bb knowledge save capture.json`. The plugin stamps the
+  project and source thread and copies any listed artifacts.
 - To update a record, edit its body.md with your normal file tools. Keep the
   frontmatter intact except the title. If the library is not on your
   filesystem, use `knowledge_save` with the revised full body instead.
