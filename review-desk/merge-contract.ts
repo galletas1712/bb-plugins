@@ -8,6 +8,7 @@ export const mergeScopeSchema = z.object({
 });
 export const mergeOptionsSchema = mergeScopeSchema.extend({
   methods: z.array(mergeMethodSchema),
+  defaultMethod: mergeMethodSchema.nullable(),
   reason: z.string().nullable(),
 });
 export const mergeInputSchema = z.object({ method: mergeMethodSchema, expected: mergeScopeSchema });

@@ -1207,7 +1207,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
     </div> : null}
   </div>;
   return <div ref={setContainer} aria-label="Pull request review" className="flex h-full min-h-0 flex-col">
-    <header className="shrink-0 border-b border-border">
+    <header className="shrink-0">
       <div className="flex min-h-11 items-center gap-2 px-3 py-1 text-xs">
         <button type="button" aria-label="Reviews" title="Reviews" className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground" onClick={() => navigate.toPluginPanel(PANEL_PATH)}><Icon name="ChevronLeft" className="size-3.5" /></button>
         <UrlLink href={review.url} className="flex min-w-0 shrink items-center gap-1 text-muted-foreground hover:underline"><span className="truncate" title={`${review.owner}/${review.repo}`}>{narrowHeader ? review.repo : `${review.owner}/${review.repo}`}</span><span className="shrink-0">#{review.number}</span></UrlLink>
@@ -1231,7 +1231,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
           </details>
         </div>
       </div>
-      <nav className="flex min-h-9 items-center gap-1 border-t border-border px-3" aria-label="Pull request">
+      <nav className="flex min-h-9 items-center gap-1 px-3" aria-label="Pull request">
         <Button variant={tab === "changes" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("changes")}>Changes</Button>
         <Button variant={tab === "conversation" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("conversation")}>Conversation</Button>
         <Button variant={tab === "commits" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("commits")}>Commits</Button>

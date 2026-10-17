@@ -24,7 +24,7 @@ const resize = async (width) => act(() => {
 });
 const { fireEvent, act } = await import("@testing-library/react");
 const { loadPluginApp, renderSlot: sdkRenderSlot } = await import("@get-bb/plugin-sdk/testing/app");
-const mergeOptions = { methods: ["squash"], reason: null, headSha: "head", baseRefName: "main", prs: [{ number: 1, headSha: "head" }] };
+const mergeOptions = { methods: ["squash"], defaultMethod: "squash", reason: null, headSha: "head", baseRefName: "main", prs: [{ number: 1, headSha: "head" }] };
 const renderSlot = (slot, props, options) => sdkRenderSlot(slot, props, { ...options, rpc: { review_merge_options: () => mergeOptions, ...options?.rpc } });
 const app = await loadPluginApp(() => import("../app.tsx"));
 
@@ -99,6 +99,7 @@ test("merge method selection and confirmation show every native downstack PR aff
     review_merge: () => { merges++; throw new Error("GitHub branch rules rejected this merge"); },
   } });
   try {
+    assert.equal((await slot.findByRole("button", { name: "Squash and merge 2 PRs" })).disabled, false);
     fireEvent.change(await slot.findByRole("combobox", { name: "Merge method" }), { target: { value: "rebase" } });
     await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Rebase and merge 2 PRs" })); });
     const panel = slot.getByRole("region", { name: "Confirm merge" });
@@ -111,6 +112,22 @@ test("merge method selection and confirmation show every native downstack PR aff
     assert.ok(slot.getByRole("alert").textContent.includes("branch rules rejected"));
     assert.equal(slot.inspection.navigateCalls.length, 0);
     assert.equal(merges, 1);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test("confirmation adopts the valid default when merge options change before clicking", async () => {
+  let reads = 0;
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => detail, review_seen: () => ({ ok: true }),
+    review_merge_options: () => ++reads === 1 ? { ...mergeOptions, methods: ["merge", "squash", "rebase"], defaultMethod: "rebase" } : mergeOptions,
+  } });
+  try {
+    const button = await slot.findByRole("button", { name: "Rebase and merge", exact: true });
+    assert.equal(button.disabled, false);
+    await act(async () => { fireEvent.click(button); });
+    assert.ok(slot.getByRole("region", { name: "Confirm merge" }).textContent.includes("Squash and merge #1 into main"));
+    assert.equal(slot.queryByRole("combobox", { name: "Merge method" }), null);
+    assert.equal(slot.inspection.rpcCalls.some((call) => call.method === "review_merge"), false);
   } finally { slot.lifecycle.unmount(); }
 });
 

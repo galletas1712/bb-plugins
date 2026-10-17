@@ -9,12 +9,13 @@ import { Icon } from "./ui/icon";
 type Method = MergeOptions["methods"][number];
 const mergeMethodLabels = { merge: "Create a merge commit", squash: "Squash and merge", rebase: "Rebase and merge" };
 const message = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
+const selectedMethod = (options: MergeOptions | null, choice: Method | null): Method => choice && options?.methods.includes(choice) ? choice : options?.defaultMethod ?? "merge";
 
 export function MergePr({ review, compact = false }: { review: Review; compact?: boolean }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const [options, setOptions] = useState<MergeOptions | null>(null);
-  const [method, setMethod] = useState<Method>("merge");
+  const [choice, setChoice] = useState<Method | null>(null);
   const [confirmation, setConfirmation] = useState<{ options: MergeOptions; method: Method } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -22,7 +23,6 @@ export function MergePr({ review, compact = false }: { review: Review; compact?:
   const load = useCallback(async () => {
     const next = await rpc.call("review_merge_options", { reviewId: review.id });
     setOptions(next);
-    setMethod((method) => next.methods.includes(method) ? method : next.methods[0] ?? "merge");
     setError(null);
     return next;
   }, [rpc, review.id]);
@@ -31,7 +31,6 @@ export function MergePr({ review, compact = false }: { review: Review; compact?:
     const refresh = () => rpc.call("review_merge_options", { reviewId: review.id }).then((next) => {
       if (!active) return;
       setOptions(next);
-      setMethod((method) => next.methods.includes(method) ? method : next.methods[0] ?? "merge");
       setError(null);
     }, (cause) => { if (active) setError(message(cause)); });
     void refresh();
@@ -62,12 +61,15 @@ export function MergePr({ review, compact = false }: { review: Review; compact?:
     }
   }, [result?.status, navigate]);
   const pending = result?.status === "pending";
+  const method = selectedMethod(options, choice);
+  const hasChoices = options !== null && options.methods.length > 1;
   const reason = options?.reason ?? (options && options.headSha !== review.headSha ? "Refresh the PR to review its latest changes before merging." : null);
   const label = mergeMethodLabels[method];
   const prepare = async () => {
     setBusy(true);
     try {
       const next = await load();
+      const method = selectedMethod(next, choice);
       if (!next.reason && next.headSha === review.headSha && next.methods.includes(method)) setConfirmation({ options: next, method });
     } catch (cause) { setError(message(cause)); }
     finally { setBusy(false); }
@@ -83,10 +85,10 @@ export function MergePr({ review, compact = false }: { review: Review; compact?:
     } catch (cause) { setError(message(cause)); setConfirmation(null); }
     finally { setBusy(false); }
   };
-  return <div className="relative flex items-center gap-px" aria-label="Merge pull request" title={reason ?? undefined}>
-    <Button size="sm" className="bg-emerald-700 text-white hover:bg-emerald-800" disabled={!options || Boolean(reason) || busy || pending || confirmation !== null || result?.status === "enqueued"} title={reason ?? undefined} onClick={() => void prepare()}>{pending ? "Merging…" : options ? label : "Merge…"}{!compact && !pending && options && options.prs.length > 1 ? ` ${options.prs.length} PRs` : ""}</Button>
-    {options && options.methods.length > 1 ? <span className="relative">
-      <select aria-label="Merge method" title="Choose merge method" value={method} disabled={busy || pending || confirmation !== null} onChange={(event) => { setMethod(event.target.value as Method); setConfirmation(null); }} className="h-8 w-7 cursor-pointer appearance-none rounded-md bg-emerald-700 text-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+  return <div className="relative flex items-center" role="group" aria-label="Merge pull request" title={reason ?? undefined}>
+    <Button size="sm" className={`bg-emerald-700 text-white hover:bg-emerald-800 ${hasChoices ? "rounded-r-none" : ""}`} disabled={!options || Boolean(reason) || busy || pending || confirmation !== null || result?.status === "enqueued"} title={reason ?? undefined} onClick={() => void prepare()}>{pending ? "Merging…" : options ? label : "Merge…"}{!compact && !pending && options && options.prs.length > 1 ? ` ${options.prs.length} PRs` : ""}</Button>
+    {hasChoices ? <span className="relative inline-flex">
+      <select aria-label="Merge method" title="Choose merge method" value={method} disabled={busy || pending || confirmation !== null} onChange={(event) => { setChoice(event.target.value as Method); setConfirmation(null); }} className="h-8 w-7 cursor-pointer appearance-none rounded-r-md border-l border-white/30 bg-emerald-700 text-transparent hover:bg-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
         {options.methods.map((method) => <option key={method} value={method} className="bg-background text-foreground">{mergeMethodLabels[method]}</option>)}
       </select><Icon name="ChevronDown" className="pointer-events-none absolute left-1.5 top-2 size-3.5 text-white" />
     </span> : null}

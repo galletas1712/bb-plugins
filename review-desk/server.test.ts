@@ -29,7 +29,7 @@ async function fixture() {
     const args = input as any;
     calls.push({ method, input });
     switch (method) {
-      case "gh_merge_options": return { methods: ["squash"], reason: null, headSha: `head-${args.number}`, baseRefName: "main", prs: [{ number: args.number, headSha: `head-${args.number}` }] };
+      case "gh_merge_options": return { methods: ["squash"], defaultMethod: "squash", reason: null, headSha: `head-${args.number}`, baseRefName: "main", prs: [{ number: args.number, headSha: `head-${args.number}` }] };
       case "gh_merge": case "gh_merge_result": return mergeResult;
       case "gh_own_prs": onOwn?.(); if (ownError) throw new Error(ownError); return own;
       case "gh_pr_statuses": {

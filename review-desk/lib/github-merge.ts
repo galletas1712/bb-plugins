@@ -7,6 +7,7 @@ interface Pr { number: number; state: string; isDraft: boolean; headRefOid: stri
 interface BranchRule { type: string; parameters?: { allowed_merge_methods?: string[]; merge_method?: string } }
 interface Repository {
   mergeCommitAllowed: boolean; squashMergeAllowed: boolean; rebaseMergeAllowed: boolean; viewerPermission: string;
+  viewerDefaultMergeMethod: "MERGE" | "SQUASH" | "REBASE";
   pullRequest: (Pr & {
     baseRefName: string; mergeable: string; mergeStateStatus: string;
     stack: { baseRefName: string; entries: { pageInfo: { hasNextPage: boolean }; nodes: { position: number; pullRequest: Pr }[] } } | null;
@@ -18,7 +19,7 @@ export async function readMergeOptions(run: Run, ref: PrRef): Promise<MergeOptio
   const response = JSON.parse((await run("gh", ["api", "graphql", "--input", "-"], { input: JSON.stringify({
     query: `query($owner: String!, $repo: String!, $number: Int!) {
       repository(owner: $owner, name: $repo) {
-        mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission
+        mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission viewerDefaultMergeMethod
         pullRequest(number: $number) {
           number state isDraft headRefOid baseRefName mergeable mergeStateStatus
           stack { baseRefName entries(first: 100) {
@@ -58,7 +59,8 @@ export async function readMergeOptions(run: Run, ref: PrRef): Promise<MergeOptio
     : ["BLOCKED", "BEHIND", "DRAFT"].includes(pr.mergeStateStatus) ? "GitHub merge requirements have not been met."
     : pr.mergeable === "UNKNOWN" || pr.mergeStateStatus === "UNKNOWN" ? "GitHub is checking whether this pull request can be merged."
     : null;
-  return { methods, reason, headSha: pr.headRefOid, baseRefName, prs: affected.map((pr) => ({ number: pr.number, headSha: pr.headRefOid })) };
+  const defaultMethod = methods.find((method) => method.toUpperCase() === repo.viewerDefaultMergeMethod) ?? methods[0] ?? null;
+  return { methods, defaultMethod, reason, headSha: pr.headRefOid, baseRefName, prs: affected.map((pr) => ({ number: pr.number, headSha: pr.headRefOid })) };
 }
 
 interface ApiResult { status: MergeResult["status"]; details?: { uuid?: string; message?: string } }

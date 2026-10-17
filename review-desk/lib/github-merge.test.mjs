@@ -4,7 +4,7 @@ import { mergePr, readMergeOptions, readMergeResult } from "./github-merge.ts";
 
 const ref = { owner: "o", repo: "r", number: 2 };
 const pr = { number: 2, headRefOid: "head-2", state: "OPEN", isDraft: false, baseRefName: "main", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", stack: null };
-const repository = (pullRequest = pr, extra = {}) => ({ data: { repository: { mergeCommitAllowed: false, squashMergeAllowed: true, rebaseMergeAllowed: false, viewerPermission: "WRITE", pullRequest, ...extra } } });
+const repository = (pullRequest = pr, extra = {}) => ({ data: { repository: { mergeCommitAllowed: false, squashMergeAllowed: true, rebaseMergeAllowed: false, viewerPermission: "WRITE", viewerDefaultMergeMethod: "MERGE", pullRequest, ...extra } } });
 const expected = { headSha: "head-2", baseRefName: "main", prs: [{ number: 2, headSha: "head-2" }] };
 const stub = (responses, rules = [[]]) => {
   const calls = [];
@@ -22,7 +22,7 @@ const stub = (responses, rules = [[]]) => {
 };
 
 test("merge options reflect repository methods, permissions, and GitHub blockers", async () => {
-  assert.deepEqual(await readMergeOptions(stub([repository()]).run, ref), { ...expected, methods: ["squash"], reason: null });
+  assert.deepEqual(await readMergeOptions(stub([repository()]).run, ref), { ...expected, methods: ["squash"], defaultMethod: "squash", reason: null });
   const all = await readMergeOptions(stub([repository(pr, { mergeCommitAllowed: true, rebaseMergeAllowed: true })]).run, ref);
   assert.deepEqual(all.methods, ["merge", "squash", "rebase"]);
   for (const [changed, repoExtra, reason] of [
@@ -36,6 +36,15 @@ test("merge options reflect repository methods, permissions, and GitHub blockers
     await assert.rejects(mergePr(fake.run, { ...ref, expected, method: "squash" }), reason);
     assert.equal(fake.calls.filter((call) => call.args.includes("PUT")).length, 0, "blocked merges must never mutate GitHub");
   }
+});
+
+test("GitHub's preferred merge method is used only when the repository and branch permit it", async () => {
+  const response = repository(pr, { mergeCommitAllowed: true, rebaseMergeAllowed: true, viewerDefaultMergeMethod: "REBASE" });
+  assert.equal((await readMergeOptions(stub([response]).run, ref)).defaultMethod, "rebase");
+  const rules = [[{ type: "pull_request", parameters: { allowed_merge_methods: ["squash"] } }]];
+  assert.equal((await readMergeOptions(stub([response], rules).run, ref)).defaultMethod, "squash");
+  const disabled = repository(pr, { squashMergeAllowed: false });
+  assert.equal((await readMergeOptions(stub([disabled]).run, ref)).defaultMethod, null);
 });
 
 test("native stack merge scope includes open downstack layers in order and excludes layers above", async () => {
