@@ -20,6 +20,7 @@ async function fixture() {
   let onPrepare: ((number: number) => Promise<void> | void) | undefined;
   let onThreads: (() => Promise<void> | void) | undefined;
   let onConversation: (() => void) | undefined;
+  let onRead: ((method: string, input: any) => Promise<unknown> | undefined) | undefined;
   let mergeResult: MergeResult = { status: "pending", requestId: "630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42", message: "Processing" };
   let own: OwnPrs = { login: "viewer", prs: [] };
   let ownError: string | null = null;
@@ -28,8 +29,11 @@ async function fixture() {
   let { bb, harness } = createFakePluginHost({ pluginId: "review-desk", sdk: { projects: { list: async () => [] }, hosts: { list: async () => [makeHostResponse({ id: "host", status: "connected" })] } }, experimental_callHostRpc: async ({ method, input }) => {
     const args = input as any;
     calls.push({ method, input });
+    const override = onRead?.(method, args);
+    if (override !== undefined) return await override;
     switch (method) {
       case "gh_merge_options": return { methods: ["squash"], defaultMethod: "squash", reason: null, headSha: `head-${args.number}`, baseRefName: "main", prs: [{ number: args.number, headSha: `head-${args.number}` }] };
+      case "gh_description": return { body: remotePrs.get(args.number)?.body ?? "Body", canEdit: true };
       case "gh_merge": case "gh_merge_result": return mergeResult;
       case "gh_own_prs": onOwn?.(); if (ownError) throw new Error(ownError); return own;
       case "gh_pr_statuses": {
@@ -48,6 +52,8 @@ async function fixture() {
       case "repo_prepare": await onPrepare?.(args.number); return { worktree: `/repo/${args.number}`, headSha: args.headSha, baseSha: remotePrs.get(args.number)?.baseRefOid ?? "base" };
       case "repo_release": return { ok: true };
       case "git_files": return { files };
+      case "git_patch": return { patch: `patch ${args.baseSha}..${args.headSha}:${args.path}` };
+      case "git_show": return { content: `${args.sha}:${args.path}`, binary: false };
       case "gh_threads": await onThreads?.(); return { threads: [] };
       case "gh_conversation": onConversation?.(); return { comments: [], reviews: [], events: [] };
       case "gh_stack": await onStack?.(); return { stack: args.stackNumber !== null || snapshot?.entries.some((entry) => entry.number === args.number) ? snapshot : null };
@@ -58,7 +64,7 @@ async function fixture() {
   const rpc = (method: string, input: unknown) => harness.behavior.callRpc(method, input);
   const open = async (number: number) => (await rpc("reviews_open", { ref: `o/r#${number}` }) as any).review;
   const list = async () => (await rpc("reviews_list", null) as { reviews: ReviewSummary[] }).reviews;
-  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, setMergeResult: (result: MergeResult) => { mergeResult = result; }, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; }, onDetails: (fn: typeof onDetails) => { onDetails = fn; }, onStatus: (fn: typeof onStatus) => { onStatus = fn; }, setOwn: (next: OwnPrs) => { own = next; }, setOwnError: (error: string | null) => { ownError = error; }, onOwn: (fn: typeof onOwn) => { onOwn = fn; }, onBatch: (fn: typeof onBatch) => { onBatch = fn; }, setBatchError: (error: string | null) => { batchError = error; }, onPrepare: (fn: typeof onPrepare) => { onPrepare = fn; }, onThreads: (fn: typeof onThreads) => { onThreads = fn; }, onConversation: (fn: typeof onConversation) => { onConversation = fn; } };
+  return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, onRead: (fn: typeof onRead) => { onRead = fn; }, setMergeResult: (result: MergeResult) => { mergeResult = result; }, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; }, onDetails: (fn: typeof onDetails) => { onDetails = fn; }, onStatus: (fn: typeof onStatus) => { onStatus = fn; }, setOwn: (next: OwnPrs) => { own = next; }, setOwnError: (error: string | null) => { ownError = error; }, onOwn: (fn: typeof onOwn) => { onOwn = fn; }, onBatch: (fn: typeof onBatch) => { onBatch = fn; }, setBatchError: (error: string | null) => { batchError = error; }, onPrepare: (fn: typeof onPrepare) => { onPrepare = fn; }, onThreads: (fn: typeof onThreads) => { onThreads = fn; }, onConversation: (fn: typeof onConversation) => { onConversation = fn; } };
 }
 
 test("merge RPCs use the saved PR identity and only hide a review after confirmed GitHub success", async () => {
@@ -89,6 +95,70 @@ test("merge RPCs use the saved PR identity and only hide a review after confirme
     await assert.rejects(f.rpc("review_merge", { ...input, reviewId: "missing" }), /not found/);
     await assert.rejects(f.rpc("review_merge", { ...input, method: "admin" }));
   } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("cached merge actions survive reload, return while GitHub is slow, and refresh before confirmation", async () => {
+  const f = await fixture(); const now = Date.now; let clock = now(); Date.now = () => clock;
+  let release!: (value: unknown) => void;
+  try {
+    f.setStack(null);
+    const review = await f.open(1);
+    const original = await f.rpc("review_merge_options", { reviewId: review.id }) as any;
+    await f.rpc("review_description", { reviewId: review.id });
+    await f.reload();
+    const calls = () => f.calls.filter((call) => call.method === "gh_merge_options").length;
+    const before = calls();
+    assert.deepEqual(await f.rpc("review_merge_options", { reviewId: review.id }), original);
+    assert.equal(calls(), before);
+    clock += 16_000;
+    f.onRead((method) => method === "gh_merge_options" ? new Promise((resolve) => { release = resolve; }) : undefined);
+    assert.deepEqual(await f.rpc("review_merge_options", { reviewId: review.id }), original);
+    assert.deepEqual(await f.rpc("review_merge_options", { reviewId: review.id }), original);
+    assert.equal(calls(), before + 1, "share one refresh across cached readers");
+    let settled = false;
+    const fresh = f.rpc("review_merge_options", { reviewId: review.id, refresh: true }).then((value) => { settled = true; return value; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false, "confirmation must wait for fresh GitHub options");
+    const next = { ...original, reason: "Mark draft pull requests ready before merging." };
+    release(next);
+    assert.deepEqual(await fresh, next);
+    clock += 16_000;
+    f.onRead((method) => method === "gh_merge_options" ? Promise.reject(new Error("GitHub unavailable")) : undefined);
+    assert.deepEqual(await f.rpc("review_merge_options", { reviewId: review.id }), next);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(await f.rpc("review_merge_options", { reviewId: review.id }), next, "failed refresh retains last good data");
+  } finally { release?.(null); Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("patches use immutable revisions, hydrate the selected file, persist, and disappear with a removed review", async () => {
+  const f = await fixture();
+  let release!: (value: unknown) => void;
+  try {
+    f.setStack(null); f.setFiles([{ path: "a.md", oldPath: null, status: "modified", additions: 1, deletions: 1, binary: false }]);
+    const review = await f.open(1);
+    const input = { reviewId: review.id, path: "a.md", revision: { base: "base", head: "head-1", oldPath: null } };
+    const first = await f.rpc("review_patch", input) as any;
+    await f.reload();
+    const calls = () => f.calls.filter((call) => call.method === "git_patch").length;
+    const before = calls();
+    assert.equal((await f.rpc("review_patch", input) as any).patch, first.patch);
+    assert.equal(calls(), before);
+    const detail = await f.rpc("reviews_get", { reviewId: review.id, path: "a.md" }) as any;
+    assert.deepEqual(detail.initialPatch, { path: "a.md", patch: first.patch, contents: null });
+    f.setPr(1, { headRefOid: "head-new", updatedAt: "2026-10-17T12:00:00Z" });
+    await f.rpc("reviews_sync", { reviewId: review.id });
+    const next = await f.rpc("review_patch", { ...input, revision: { ...input.revision, head: "head-new" } }) as any;
+    assert.notEqual(next.patch, first.patch);
+    assert.equal((await f.rpc("review_patch", input) as any).patch, first.patch);
+    assert.equal(calls(), before + 1);
+    f.onRead((method) => method === "gh_merge_options" ? new Promise((resolve) => { release = resolve; }) : undefined);
+    const pending = f.rpc("review_merge_options", { reviewId: review.id, refresh: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    await f.rpc("reviews_remove", { reviewId: review.id });
+    release({ methods: ["squash"], defaultMethod: "squash", reason: null, headSha: "head-new", baseRefName: "main", prs: [{ number: 1, headSha: "head-new" }] });
+    await pending;
+    assert.equal(f.bb.storage.database().prepare<[string], { n: number }>("SELECT COUNT(*) AS n FROM read_cache WHERE review_id = ?").get(review.id)?.n, 0, "late responses cannot restore removed cache data");
+  } finally { release?.(null); await f.harness.lifecycle.dispose(); }
 });
 
 test("Recent includes unopened layers and refreshed metadata, preserves detached drafts, and survives reload", async () => {
@@ -511,6 +581,34 @@ test("minute prefetch warms files and conversation, and an unchanged head needs 
     assert.equal(f.calls.filter((c) => c.method === "repo_prepare").length, 1);
     assert.equal(f.calls.filter((c) => c.method === "git_files").length, 1);
   } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("minute prefetch warms merge actions, permissions, patches and Markdown content before opening a PR", async () => {
+  const f = await fixture();
+  let service: ReturnType<typeof f.harness.behavior.runService> | undefined;
+  try {
+    f.setStack(null); f.setOwn({ login: "viewer", prs: [ownPr(10)] });
+    f.setFiles(["a.md", "b.ts"].map((path) => ({ path, oldPath: null, status: "modified", additions: 1, deletions: 1, binary: false })));
+    f.onRead((method, input) => {
+      if (method !== "git_patch") return;
+      if (input.path === "b.ts") service!.controller.abort();
+      return Promise.resolve({ patch: `prefetched ${input.path}` });
+    });
+    service = f.harness.behavior.runService("sync-open-reviews");
+    await service.done;
+    const review = (await f.list())[0];
+    assert.ok(review.id);
+    const before = f.calls.length;
+    const detail = await f.rpc("reviews_get", { reviewId: review.id, path: "a.md" }) as any;
+    assert.equal(detail.mergeOptions.defaultMethod, "squash");
+    assert.equal(detail.description.canEdit, true);
+    assert.deepEqual(detail.conversation.comments, []);
+    assert.deepEqual(detail.initialPatch, { path: "a.md", patch: "prefetched a.md", contents: { oldContent: "base:a.md", newContent: "head-10:a.md" } });
+    await f.rpc("review_patch", { reviewId: review.id, path: "b.ts" });
+    await f.rpc("commit_file", { reviewId: review.id, sha: "base", path: "a.md" });
+    await f.rpc("commit_file", { reviewId: review.id, sha: "head-10", path: "a.md" });
+    assert.equal(f.calls.length, before, "opening prefetched resources makes no host or GitHub calls");
+  } finally { service?.controller.abort(); await f.harness.lifecycle.dispose(); }
 });
 
 test("foreground opens share pending preparation and cached opens do not wait for heavy refreshes", { timeout: 8000 }, async () => {

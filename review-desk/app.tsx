@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { toast } from "sonner";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { queryClient, reviewKey } from "./lib/query-client";
 import {
   definePluginApp,
   Markdown,
@@ -17,7 +19,7 @@ import type { FileDiffMetadata, SelectedLineRange } from "@pierre/diffs";
 import { parsePatchFiles } from "@pierre/diffs";
 import type { CommitInfo, FileEntry, Note, PendingComment, Review, ReviewSummary, StackView, rpcContract } from "./server";
 import type { ChangedFile } from "./host-contract";
-import type { GhThread, GhIssueComment, GhReview, GhEvent } from "./host-contract";
+import type { GhThread } from "./host-contract";
 import { EditableBody } from "./components/editable-body";
 import { MergePr } from "./components/merge-pr";
 import { DiffViewer, type MarkdownView, type SourceTarget } from "./components/diff-viewer";
@@ -319,66 +321,74 @@ function useRefreshFallback(refetch: () => void) {
   }, [connection, refetch]);
 }
 
-function useReviews() {
-  const rpc = useRpc<Contract>();
-  const [reviews, setReviews] = useState<ReviewSummary[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const generation = useRef(0);
-  const refetch = useCallback(() => {
-    const request = ++generation.current;
-    rpc.call("reviews_list").then(
-      (result) => {
-        if (request !== generation.current) return;
-        setReviews(result.reviews);
-        setError(result.discoveryError ?? null);
-      },
-      (cause: unknown) => { if (request === generation.current) setError(describeError(cause)); },
-    );
-  }, [rpc]);
-  useEffect(() => { refetch(); return () => { generation.current++; }; }, [refetch]);
-  useRefreshFallback(refetch);
-  useRealtime(REVIEW_CHANGED, refetch);
-  return { reviews, error, refetch };
+function reviewQuery(rpc: ReturnType<typeof useRpc<Contract>>, reviewId: string) {
+  return { queryKey: reviewKey(reviewId, "detail"), queryFn: async ({ signal }: { signal: AbortSignal }) => {
+    const path = readStorage<string>(fileSelKey(reviewId)) ?? undefined;
+    const result = await rpc.call("reviews_get", { reviewId, ...(path ? { path } : {}) });
+    signal.throwIfAborted();
+    // Seed cold components without replacing a newer response from an active query.
+    const seed = (key: unknown[], value: unknown) => { if (value && queryClient.getQueryData(key) === undefined) queryClient.setQueryData(key, value); };
+    seed(reviewKey(reviewId, "merge"), result.mergeOptions);
+    seed(reviewKey(reviewId, "description"), result.description);
+    seed(reviewKey(reviewId, "conversation"), result.conversation);
+    if (result.initialPatch) {
+      seed(reviewKey(reviewId, "patch", result.review.baseSha, result.review.headSha, result.initialPatch.path), { patch: result.initialPatch.patch });
+      seed(reviewKey(reviewId, "contents", result.review.baseSha, result.review.headSha, result.initialPatch.path), result.initialPatch.contents);
+    }
+    return result;
+  } };
 }
 
-function useReview(reviewId: string | null) {
+function commitQuery(rpc: ReturnType<typeof useRpc<Contract>>, reviewId: string, base: string, target: CommitTarget | null) {
+  return { queryKey: reviewKey(reviewId, "commit", base, target?.to, target?.from, target?.inclusive), enabled: target !== null, staleTime: Infinity,
+    queryFn: () => rpc.call("commit_get", { reviewId, to: target!.to, ...(target!.from === null ? {} : { from: target!.from, inclusive: target!.inclusive }) }) };
+}
+
+function useReviews() {
   const rpc = useRpc<Contract>();
-  const [detail, setDetail] = useState<ReviewDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const generation = useRef(0);
-  const activeReview = useRef(reviewId);
-  activeReview.current = reviewId;
-  const refetch = useCallback(() => {
-    if (reviewId === null || activeReview.current !== reviewId) return;
-    const request = ++generation.current;
-    rpc.call("reviews_get", { reviewId }).then(
-      (result) => {
-        if (request !== generation.current) return;
-        setDetail(result);
-        setError(null);
-      },
-      (cause: unknown) => { if (request === generation.current) setError(describeError(cause)); },
-    );
-  }, [rpc, reviewId]);
-  useEffect(() => {
-    setDetail(null);
-    setError(null);
+  const query = useQuery({ queryKey: ["reviews"], queryFn: () => rpc.call("reviews_list") });
+  const refetch = useCallback(() => { void query.refetch(); }, [query.refetch]);
+  useRefreshFallback(refetch);
+  useRealtime(REVIEW_CHANGED, (payload) => {
+    const change = payloadReview(payload);
+    if (change && (change.what === "removed" || change.what === "closed")) {
+      void queryClient.cancelQueries({ queryKey: reviewKey(change.reviewId) });
+      queryClient.removeQueries({ queryKey: reviewKey(change.reviewId) });
+    }
     refetch();
-    return () => { generation.current++; };
-  }, [refetch]);
+  });
+  useEffect(() => {
+    let cancelled = false;
+    const queue = (query.data?.reviews ?? []).filter((review) => review.id !== null);
+    void Promise.all(Array.from({ length: 2 }, async () => {
+      while (queue.length && !cancelled) {
+        const review = queue.shift()!;
+        await queryClient.prefetchQuery({ ...reviewQuery(rpc, review.id!), staleTime: 60_000 });
+      }
+    }));
+    return () => { cancelled = true; };
+  }, [rpc, query.data?.reviews]);
+  return { reviews: query.data?.reviews ?? null, error: query.error ? describeError(query.error) : query.data?.discoveryError ?? null, refetch };
+}
+
+function useReview(reviewId: string) {
+  const rpc = useRpc<Contract>();
+  const [closed, setClosed] = useState<string | null>(null);
+  const query = useQuery(reviewQuery(rpc, reviewId));
+  const refetch = useCallback(() => { void query.refetch(); }, [query.refetch]);
   useRealtime(REVIEW_CHANGED, (payload) => {
     const p = payloadReview(payload);
     if (p === null || p.reviewId !== reviewId) return;
     if (p.what === "removed" || p.what === "closed") {
-      generation.current++;
-      setDetail(null);
-      setError(p.what);
+      void queryClient.cancelQueries({ queryKey: reviewKey(reviewId) });
+      queryClient.removeQueries({ queryKey: reviewKey(reviewId) });
+      setClosed(p.what);
       return;
     }
     refetch();
   });
   useRefreshFallback(refetch);
-  return { rpc, detail, error, refetch };
+  return { rpc, detail: closed ? null : query.data ?? null, error: closed ?? (query.error ? describeError(query.error) : null), refetch };
 }
 
 // ---------------------------------------------------------------------------
@@ -705,24 +715,17 @@ interface FileCardProps {
 
 function FileCard({ review, file, source = { kind: "pr" }, threads, pending, notes, composer, selection, onSelect, onOpenComposer, diffStyle, wrap, mode, onMode, target, theme, actions, rpc }: FileCardProps) {
   const inCommit = source.kind === "range";
-  const [patch, setPatch] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [contents, setContents] = useState<{ oldContent: string; newContent: string } | null>(null);
-  const [contentError, setContentError] = useState<string | null>(null);
   const markdown = /\.(md|markdown)$/i.test(file.path) && !file.binary;
   const base = source.kind === "range" ? source.base : null;
   const head = source.kind === "range" ? source.head : review.headSha;
-  useEffect(() => {
-    setPatch(null);
-    setError(null);
-    if (file.binary) return;
-    let cancelled = false;
-    const request = base === null
-      ? rpc.call("review_patch", { reviewId: review.id, path: file.path })
-      : rpc.call("commit_patch", { reviewId: review.id, base, head, path: file.path, oldPath: file.oldPath });
-    request.then((result) => { if (!cancelled) setPatch(result.patch); }, (cause: unknown) => { if (!cancelled) setError(describeError(cause)); });
-    return () => { cancelled = true; };
-  }, [file.binary, file.path, file.oldPath, review.id, review.baseSha, rpc, base, head]);
+  const patchQuery = useQuery({ queryKey: reviewKey(review.id, "patch", base ?? review.baseSha, head, file.path),
+    enabled: !file.binary, staleTime: Infinity,
+    queryFn: () => base === null
+      ? rpc.call("review_patch", { reviewId: review.id, path: file.path, revision: { base: review.baseSha, head, oldPath: file.oldPath } })
+      : rpc.call("commit_patch", { reviewId: review.id, base, head, path: file.path, oldPath: file.oldPath }),
+  });
+  const patch = patchQuery.data?.patch ?? null;
+  const error = patchQuery.error ? describeError(patchQuery.error) : null;
   const fileDiff = useMemo(() => patch === null ? null : pickFileDiff(patch, file.path, file.oldPath), [patch, file.path, file.oldPath]);
   const outdatedThreads = threads.filter((thread) => thread.isOutdated);
   const resolvedThreads = threads.filter((thread) => thread.isResolved && !thread.isOutdated);
@@ -736,26 +739,20 @@ function FileCard({ review, file, source = { kind: "pr" }, threads, pending, not
     return placeAnnotations(fileDiff, comments);
   }, [fileDiff, threads, pending, notes, composer]);
   const selected = selection?.path === file.path ? selection.range : null;
-  const contentRequest = useMemo(() => ({ work: null as Promise<{ oldContent: string; newContent: string }> | null }), [rpc, review.id, review.baseSha, file.path, file.oldPath, base, head]);
-  const loadContents = useCallback(() => {
-    return contentRequest.work ??= Promise.all([
-      rpc.call("commit_file", { reviewId: review.id, sha: base ?? review.baseSha, path: file.oldPath ?? file.path }),
-      rpc.call("commit_file", { reviewId: review.id, sha: head, path: file.path }),
-    ]).then(([oldSide, newSide]) => ({ oldContent: oldSide.content ?? "", newContent: newSide.content ?? "" }), (cause) => { contentRequest.work = null; throw cause; });
-  }, [contentRequest, rpc, review.id, review.baseSha, file.path, file.oldPath, base, head]);
+  const loadContents = useCallback(() => Promise.all([
+    queryClient.fetchQuery({ queryKey: reviewKey(review.id, "file", base ?? review.baseSha, file.oldPath ?? file.path), staleTime: Infinity,
+      queryFn: () => rpc.call("commit_file", { reviewId: review.id, sha: base ?? review.baseSha, path: file.oldPath ?? file.path }) }),
+    queryClient.fetchQuery({ queryKey: reviewKey(review.id, "file", head, file.path), staleTime: Infinity,
+      queryFn: () => rpc.call("commit_file", { reviewId: review.id, sha: head, path: file.path }) }),
+  ]).then(([oldSide, newSide]) => ({ oldContent: oldSide.content ?? "", newContent: newSide.content ?? "" })), [rpc, review.id, review.baseSha, file.path, file.oldPath, base, head]);
   const loadDiffFiles = useCallback(async (meta: FileDiffMetadata) => {
     const { oldContent, newContent } = await loadContents();
     return { oldFile: { name: meta.prevName ?? meta.name, contents: oldContent }, newFile: { name: meta.name, contents: newContent } };
   }, [loadContents]);
-  const showRendered = markdown && mode !== "source";
-  useEffect(() => {
-    setContents(null);
-    setContentError(null);
-    if (!showRendered) return;
-    let cancelled = false;
-    loadContents().then((result) => { if (!cancelled) setContents(result); }, (cause: unknown) => { if (!cancelled) setContentError(describeError(cause)); });
-    return () => { cancelled = true; };
-  }, [loadContents, showRendered]);
+  const contentQuery = useQuery({ queryKey: reviewKey(review.id, "contents", base ?? review.baseSha, head, file.path),
+    queryFn: loadContents, enabled: markdown && mode !== "source", staleTime: Infinity });
+  const contents = contentQuery.data ?? null;
+  const contentError = contentQuery.error ? describeError(contentQuery.error) : null;
   const header = <>
     {selected ? <div className="flex items-center gap-3 border-b border-border px-3 py-2 text-xs">
       <span className="font-mono text-muted-foreground">Line {Math.min(selected.start, selected.end)}{selected.start !== selected.end ? "–" + Math.max(selected.start, selected.end) : ""}</span>
@@ -811,23 +808,18 @@ function annotationLocation(anno: Anno): string {
 
 function Description({ reviewId, body }: { reviewId: string; body: string }) {
   const rpc = useRpc<Contract>();
-  const [description, setDescription] = useState<{ body: string; canEdit: boolean } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [revision, setRevision] = useState(0);
-  useEffect(() => {
-    let cancelled = false;
-    setError(null);
-    rpc.call("review_description", { reviewId }).then(
-      (result) => { if (!cancelled) setDescription(result); },
-      (cause: unknown) => { if (!cancelled) setError(describeError(cause)); },
-    );
-    return () => { cancelled = true; };
-  }, [rpc, reviewId, body, revision]);
+  const key = reviewKey(reviewId, "description");
+  const query = useQuery({ queryKey: key, queryFn: () => rpc.call("review_description", { reviewId }) });
+  const description = query.data;
+  const error = query.error ? describeError(query.error) : null;
+  const refresh = useCallback(() => { void query.refetch(); }, [query.refetch]);
+  useRefreshFallback(refresh);
+  useRealtime(REVIEW_CHANGED, (payload) => { if (payloadReview(payload)?.reviewId === reviewId) refresh(); });
   return <div>
-    {error !== null ? <div role="alert" className="mb-2 flex items-center gap-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="h-6 px-2" onClick={() => setRevision((value) => value + 1)}>Retry</Button></div> : null}
-    <EditableBody body={description?.body ?? body} canEdit={description?.canEdit ?? false} label="PR description" allowEmpty renderBody={(content) => <DescriptionPreview body={content} />} onCancel={() => setRevision((value) => value + 1)} onSave={async (content, expectedBody) => {
+    {error !== null ? <div role="alert" className="mb-2 flex items-center gap-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="h-6 px-2" onClick={refresh}>Retry</Button></div> : null}
+    <EditableBody body={description?.body ?? body} canEdit={description?.canEdit ?? false} label="PR description" allowEmpty renderBody={(content) => <DescriptionPreview body={content} />} onCancel={refresh} onSave={async (content, expectedBody) => {
       const result = await rpc.call("review_edit_body", { reviewId, target: { kind: "description" }, body: content, expectedBody });
-      setDescription((current) => current === null ? null : { ...current, body: result.body });
+      queryClient.setQueryData(key, { ...description, body: result.body });
       toast.success("Description updated");
       return result;
     }} />
@@ -863,17 +855,16 @@ function DescriptionPreview({ body }: { body: string }) {
 
 function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string; threads: GhThread[]; onJump: JumpFn; onRefresh(): void }) {
   const rpc = useRpc<Contract>();
-  const [conversation, setConversation] = useState<{ comments: GhIssueComment[]; reviews: GhReview[]; events?: GhEvent[] } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const generation = useRef(0);
+  const key = reviewKey(reviewId, "conversation");
+  const query = useQuery({ queryKey: key, queryFn: () => rpc.call("review_conversation", { reviewId }) });
+  const conversation = query.data ?? null;
+  const error = query.error ? describeError(query.error) : null;
   const load = useCallback((refresh = false) => {
-    const request = ++generation.current;
-    rpc.call("review_conversation", { reviewId, refresh }).then(
-      (result) => { if (request === generation.current) { setConversation(result); setError(null); } },
-      (cause: unknown) => { if (request === generation.current) setError(describeError(cause)); },
-    );
-  }, [rpc, reviewId]);
-  useEffect(() => { load(); return () => { generation.current++; }; }, [load]);
+    if (refresh) void queryClient.fetchQuery({ queryKey: key, queryFn: () => rpc.call("review_conversation", { reviewId, refresh: true }) }).catch(() => undefined);
+    else void query.refetch();
+  }, [rpc, reviewId, query.refetch]);
+  const refresh = useCallback(() => load(), [load]);
+  useRefreshFallback(refresh);
   useRealtime(REVIEW_CHANGED, (payload) => { if (payloadReview(payload)?.reviewId === reviewId) load(); });
   const actions = {
     editComment: async (id: string, body: string, expectedBody: string) => { const result = await rpc.call("review_edit_body", { reviewId, target: { kind: "inline", id }, body, expectedBody }); onRefresh(); toast.success("Comment updated"); return result; },
@@ -881,7 +872,7 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
     reply: async (commentId: number, body: string) => { await rpc.call("thread_reply", { reviewId, commentId, body }); onRefresh(); },
     resolve: async (threadId: string, resolve: boolean) => { await rpc.call("thread_resolve", { reviewId, threadId, resolve }); onRefresh(); },
   };
-  if (error !== null) return <p role="alert" className="text-sm text-destructive">{error} <button type="button" className="underline" onClick={() => load(true)}>Retry</button></p>;
+  if (error !== null && conversation === null) return <p role="alert" className="text-sm text-destructive">{error} <button type="button" className="underline" onClick={() => load(true)}>Retry</button></p>;
   if (conversation === null) return <EmptyState>Loading conversation…</EmptyState>;
   const outdatedThreads = threads.filter((thread) => thread.isOutdated);
   const resolvedThreads = threads.filter((thread) => thread.isResolved && !thread.isOutdated);
@@ -916,7 +907,7 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
       </>}>
       <EditableBody body={item.body} canEdit={Boolean(item.canEdit && item.target)} label={`comment by ${item.author}`} renderBody={(body) => <CommentBody body={body} />} onCancel={() => load(true)} onSave={async (body, expectedBody) => {
         const result = await rpc.call("review_edit_body", { reviewId, target: item.target!, body, expectedBody });
-        setConversation((current) => current === null ? null : { ...current, comments: current.comments.map((comment) => comment.nodeId === item.target?.id ? { ...comment, body: result.body } : comment), reviews: current.reviews.map((review) => review.nodeId === item.target?.id ? { ...review, body: result.body } : review) });
+        queryClient.setQueryData<typeof conversation>(key, (current) => !current ? current : { ...current, comments: current.comments.map((comment) => comment.nodeId === item.target?.id ? { ...comment, body: result.body } : comment), reviews: current.reviews.map((review) => review.nodeId === item.target?.id ? { ...review, body: result.body } : review) });
         toast.success("Comment updated"); return result;
       }} />
       </CommentDetails>
@@ -989,14 +980,6 @@ function Commits({ review, seen, onOpen }: { review: Review; seen: { prevHead: s
 // PR head diff and are not shown here.
 // ---------------------------------------------------------------------------
 
-interface CommitData {
-  base: string;
-  head: string;
-  info: CommitInfo;
-  commits: CommitInfo[];
-  files: ChangedFile[];
-}
-
 function CommitView({ reviewId, review, target, rpc, onNavigate, onOpenDiff }: {
   reviewId: string;
   review: Review;
@@ -1005,20 +988,10 @@ function CommitView({ reviewId, review, target, rpc, onNavigate, onOpenDiff }: {
   onNavigate(target: CommitTarget | null): void;
   onOpenDiff(): void;
 }) {
-  const [data, setData] = useState<CommitData | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [showMessage, setShowMessage] = useState(false);
-  const key = commitPath(reviewId, target);
-  useEffect(() => {
-    setData(null);
-    setError(null);
-    let cancelled = false;
-    rpc.call("commit_get", { reviewId, to: target.to, ...(target.from === null ? {} : { from: target.from, inclusive: target.inclusive }) }).then(
-      (result) => { if (!cancelled) setData(result); },
-      (cause: unknown) => { if (!cancelled) setError(describeError(cause)); },
-    );
-    return () => { cancelled = true; };
-  }, [rpc, reviewId, key, target.to, target.from, target.inclusive]);
+  const query = useQuery(commitQuery(rpc, reviewId, review.baseSha, target));
+  const data = query.data ?? null;
+  const error = query.error ? describeError(query.error) : null;
 
   if (error) return <div className="p-6"><p role="alert" className="text-sm text-destructive">{error}</p></div>;
   if (data === null) return <div className="p-6"><EmptyState>Loading commit…</EmptyState></div>;
@@ -1394,32 +1367,16 @@ function DiffPane({ detail, rpc, refetch, commit, jump, display, onOpenPrDiff }:
   const [selection, setSelectionState] = useState<Selection | null>(null);
   const [composer, setComposer] = useState<Extract<Anno, { kind: "composer" }> | null>(null);
   const appliedJump = useRef<DiffJump | null>(null);
-  const [commitData, setCommitData] = useState<CommitData | null>(null);
-  const [commitError, setCommitError] = useState<string | null>(null);
+  const commitQueryResult = useQuery(commitQuery(rpc, reviewId, detail.review.baseSha, commit));
+  const commitData = commitQueryResult.data ?? null;
+  const commitError = commitQueryResult.error ? describeError(commitQueryResult.error) : null;
 
   useEffect(() => {
     setPicked(readStorage<string>(fileSelKey(reviewId, scope)));
     setFilter("");
     setComposer(null);
-    setCommitData(null);
-    setCommitError(null);
   }, [reviewId, scope]);
 
-  useEffect(() => {
-    if (commit === null) {
-      setCommitData(null);
-      setCommitError(null);
-      return;
-    }
-    setCommitData(null);
-    setCommitError(null);
-    let cancelled = false;
-    rpc.call("commit_get", { reviewId, to: commit.to, ...(commit.from === null ? {} : { from: commit.from, inclusive: commit.inclusive }) }).then(
-      (result) => { if (!cancelled) setCommitData(result); },
-      (cause: unknown) => { if (!cancelled) setCommitError(describeError(cause)); },
-    );
-    return () => { cancelled = true; };
-  }, [rpc, reviewId, commit?.to, commit?.from, commit?.inclusive]);
 
   const setSelection = setSelectionState;
 
@@ -1874,12 +1831,16 @@ function ReviewsPage({ subPath }: { subPath: string }) {
   );
 }
 
+function ReviewsApp(props: { subPath: string }) {
+  return <QueryClientProvider client={queryClient}><ReviewsPage {...props} /></QueryClientProvider>;
+}
+
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: PANEL_ID,
     title: "Reviews",
     icon: "GitPullRequest",
     path: PANEL_PATH,
-    component: ReviewsPage,
+    component: ReviewsApp,
   });
 });

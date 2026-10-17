@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, afterEach } from "node:test";
 import { JSDOM } from "jsdom";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost", pretendToBeVisual: true });
@@ -22,16 +22,74 @@ const resize = async (width) => act(() => {
     observer.callback([{ target: observer.element, contentRect: { width, height: 600 }, borderBoxSize: [{ inlineSize: width, blockSize: 600 }] }]);
   }
 });
-const { fireEvent, act } = await import("@testing-library/react");
+const { fireEvent, act, waitFor } = await import("@testing-library/react");
 const { loadPluginApp, renderSlot: sdkRenderSlot } = await import("@get-bb/plugin-sdk/testing/app");
 const mergeOptions = { methods: ["squash"], defaultMethod: "squash", reason: null, headSha: "head", baseRefName: "main", prs: [{ number: 1, headSha: "head" }] };
 const renderSlot = (slot, props, options) => sdkRenderSlot(slot, props, { ...options, rpc: { review_merge_options: () => mergeOptions, ...options?.rpc } });
 const app = await loadPluginApp(() => import("../app.tsx"));
+const { queryClient, reviewKey } = await import("../lib/query-client.ts");
+afterEach(() => queryClient.clear());
 
 const comment = (id, author, body, replyToId = null) => ({ id, author, body, replyToId, databaseId: 1, createdAt: "2026-10-05T00:00:00Z", url: null, canEdit: author === "me" });
 const thread = (id, comments, isResolved = false) => ({ id, comments, isResolved, isOutdated: false, path: "file.ts", line: 1, originalLine: 1, startLine: null, originalStartLine: null, startSide: null, subjectType: "LINE", side: "RIGHT" });
 const review = { id: "review", owner: "o", repo: "r", number: 1, title: "Review", body: "Description", state: "OPEN", isDraft: false, url: "https://github.com/o/r/pull/1", author: "me", baseRefName: "main", headRefName: "branch", headSha: "head", baseSha: "base", additions: 0, deletions: 0, changedFiles: 0, reviewDecision: null, mergeable: null, labels: [], checks: [], reviewers: [], assignees: [], commits: [], createdAt: "2026-10-05T00:00:00Z", worktree: "/repo", environmentId: null, hostId: "host", syncedAt: 0, ghUpdatedAt: "2026-10-05T00:00:00Z" };
 const detail = { review, files: [], pending: [], notes: [], seen: { prevHead: null, seenHead: null }, stack: null, syncError: null, threads: [thread("active", [comment("reply", "me", "Reply body", "original"), comment("original", "other", "Original body")]), thread("resolved", [comment("hidden", "other", "Resolved body")], true)] };
+
+test("cached PR, merge action, description, conversation and diff remain visible through slow and failed refreshes", async () => {
+  const file = { path: "cached.ts", oldPath: null, status: "modified", additions: 1, deletions: 0, binary: false, viewed: false, threadCount: 0, unresolvedCount: 0, pendingCount: 0 };
+  queryClient.setQueryData(reviewKey(review.id, "detail"), { ...detail, files: [file] });
+  queryClient.setQueryData(reviewKey(review.id, "merge"), mergeOptions);
+  queryClient.setQueryData(reviewKey(review.id, "description"), { body: "Cached description", canEdit: true });
+  queryClient.setQueryData(reviewKey(review.id, "patch", "base", "head", file.path), { patch: "" });
+  queryClient.setQueryData(reviewKey(review.id, "conversation"), { comments: [{ id: 1, nodeId: "cached", canEdit: false, author: "other", body: "Cached comment", createdAt: review.createdAt, url: review.url }], reviews: [], events: [], fetchedAt: 1 });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const blocked = async () => { await gate; throw new Error("GitHub unavailable"); };
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: blocked, review_seen: () => ({ ok: true }),
+    review_merge_options: blocked, review_description: blocked, review_conversation: blocked,
+    review_patch: () => { throw new Error("An immutable cached patch must not be fetched again"); },
+  } });
+  try {
+    assert.ok(slot.getByRole("heading", { name: "Review", exact: true }));
+    assert.equal(slot.getByRole("button", { name: "Squash and merge", exact: true }).disabled, false);
+    assert.equal(slot.queryByText("Merge…"), null);
+    assert.ok(slot.getByText("No textual diff."));
+    fireEvent.click(slot.getByRole("button", { name: "Conversation", exact: true }));
+    assert.ok(slot.getByText("Cached comment"));
+    assert.ok(slot.getByText("Cached description"));
+    assert.equal(slot.queryByText("Loading conversation…"), null);
+    fireEvent.click(slot.getByRole("button", { name: "Edit PR description" }));
+    fireEvent.change(slot.getByRole("textbox", { name: "PR description" }), { target: { value: "Unsaved edits" } });
+    await act(async () => { release(); });
+    await slot.findAllByText(/GitHub unavailable/);
+    assert.ok(slot.getByText("Cached comment"));
+    assert.equal(slot.getByRole("textbox", { name: "PR description" }).value, "Unsaved edits");
+    assert.equal(slot.getByRole("button", { name: "Squash and merge", exact: true }).disabled, false);
+    assert.equal(slot.inspection.rpcCalls.some((call) => call.method === "review_patch"), false);
+    assert.equal(slot.inspection.rpcCalls.some((call) => call.method === "review_merge"), false);
+  } finally { release(); slot.lifecycle.unmount(); }
+});
+
+test("the first PR response hydrates merge action, comments and selected patch before components mount", async () => {
+  const file = { path: "readme.md", oldPath: null, status: "modified", additions: 1, deletions: 1, binary: false, viewed: false, threadCount: 0, unresolvedCount: 0, pendingCount: 0 };
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), review_seen: () => ({ ok: true }),
+    reviews_get: () => ({ ...detail, files: [file], mergeOptions, initialPatch: { path: file.path, patch: "" }, description: { body: "Prefetched description", canEdit: true }, conversation: { comments: [], reviews: [], events: [], fetchedAt: 1 } }),
+    review_merge_options: () => gate, review_description: () => gate, review_conversation: () => gate,
+  } });
+  try {
+    await slot.findByRole("heading", { name: "Review", exact: true });
+    assert.equal(slot.getByRole("button", { name: "Squash and merge", exact: true }).disabled, false);
+    assert.ok(slot.getByText("No textual diff."));
+    assert.equal(slot.inspection.rpcCalls.some((call) => call.method === "review_patch"), false);
+    fireEvent.click(slot.getByRole("button", { name: "Conversation", exact: true }));
+    assert.ok(slot.getByText("Prefetched description"));
+    assert.equal(slot.queryByText("Loading conversation…"), null);
+  } finally { release(mergeOptions); slot.lifecycle.unmount(); }
+});
 
 test("compact Markdown toolbar offers three icon modes, keeps source coordinates, and restores the wide view", async () => {
   window.localStorage.clear();
@@ -133,6 +191,7 @@ test("confirmation adopts the valid default when merge options change before cli
 
 test("merge stays disabled for blockers or a head that has not been reviewed", async () => {
   for (const options of [{ ...mergeOptions, reason: "Mark draft pull requests ready before merging." }, { ...mergeOptions, headSha: "new-head" }]) {
+    queryClient.clear();
     const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
       reviews_list: () => ({ reviews: [] }), reviews_get: () => detail, review_seen: () => ({ ok: true }), review_merge_options: () => options,
     } });
@@ -472,7 +531,7 @@ test("repository groups sort by latest PR activity and nest stacks independently
     assert.equal(slot.getByLabelText("Repository other/shared").open, true);
     reviews = reviews.map((pr) => pr.owner === "other" ? { ...pr, updatedAt: 400 } : pr);
     await act(async () => { window.dispatchEvent(new window.Event("focus")); });
-    assert.deepEqual(slot.getAllByRole("heading", { level: 2 }).map((el) => el.textContent), ["other/shared", "same/shared"]);
+    await waitFor(() => assert.deepEqual(slot.getAllByRole("heading", { level: 2 }).map((el) => el.textContent), ["other/shared", "same/shared"]));
     assert.equal(slot.getByLabelText("Repository same/shared"), repo);
     assert.equal(repo.open, false);
     assert.equal(stack.open, true);

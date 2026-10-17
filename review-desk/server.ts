@@ -5,6 +5,7 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { mergeInputSchema, mergeOptionsSchema, mergeResultSchema } from "./merge-contract";
 import { createStackStore, type TrackedStack } from "./stack-store";
+import { createReadCache } from "./read-cache";
 import { diffStats } from "./lib/diff-stats";
 import { hunkLineNumbers } from "./diff-lines";
 import {
@@ -150,7 +151,7 @@ export const rpcContract = defineRpcContract({
   reviews_list: { input: z.null(), output: z.object({ reviews: z.array(reviewSummarySchema), discoveryError: z.string().nullable().default(null) }) },
   reviews_open: { input: z.object({ ref: z.string().trim().min(1) }), output: z.object({ review: reviewSchema }) },
   reviews_get: {
-    input: reviewIdSchema,
+    input: reviewIdSchema.extend({ path: z.string().optional() }),
     output: z.object({
       review: reviewSchema,
       files: z.array(fileEntrySchema),
@@ -161,13 +162,17 @@ export const rpcContract = defineRpcContract({
       /** Heads you opened this review at: the one before the current, and the current. */
       seen: z.object({ prevHead: z.string().nullable(), seenHead: z.string().nullable() }),
       stack: stackViewSchema.nullable(),
+      mergeOptions: mergeOptionsSchema.nullable().default(null),
+      description: z.object({ body: z.string(), canEdit: z.boolean() }).nullable().default(null),
+      conversation: z.object({ comments: z.array(ghIssueCommentSchema), reviews: z.array(ghReviewSchema), events: z.array(ghEventSchema), fetchedAt: z.number() }).nullable().default(null),
+      initialPatch: z.object({ path: z.string(), patch: z.string(), contents: z.object({ oldContent: z.string(), newContent: z.string() }).nullable().default(null) }).nullable().default(null),
     }),
   },
   reviews_sync: { input: reviewIdSchema, output: z.object({ review: reviewSchema, headChanged: z.boolean() }) },
   reviews_remove: { input: z.union([reviewIdSchema, z.object({ owner: z.string(), repo: z.string(), number: z.number() })]), output: okSchema },
   stacks_remove: { input: z.object({ key: z.string() }), output: okSchema },
   review_patch: {
-    input: z.object({ reviewId: z.string(), path: z.string() }),
+    input: z.object({ reviewId: z.string(), path: z.string(), revision: z.object({ base: z.string(), head: z.string(), oldPath: z.string().nullable() }).optional() }),
     output: z.object({ patch: z.string(), file: changedFileSchema.nullable() }),
   },
   review_file: {
@@ -181,7 +186,7 @@ export const rpcContract = defineRpcContract({
   review_threads_refresh: { input: reviewIdSchema, output: z.object({ threads: z.array(ghThreadSchema) }) },
   review_description: { input: reviewIdSchema, output: z.object({ body: z.string(), canEdit: z.boolean() }) },
   review_edit_body: { input: ghBodyEditSchema.extend({ reviewId: z.string() }), output: z.object({ body: z.string() }) },
-  review_merge_options: { input: reviewIdSchema, output: mergeOptionsSchema },
+  review_merge_options: { input: reviewIdSchema.extend({ refresh: z.boolean().optional() }), output: mergeOptionsSchema },
   review_merge: { input: mergeInputSchema.extend({ reviewId: z.string() }), output: mergeResultSchema },
   review_merge_result: { input: reviewIdSchema.extend({ requestId: z.string().uuid() }), output: mergeResultSchema },
   viewed_set: { input: z.object({ reviewId: z.string(), path: z.string(), viewed: z.boolean() }), output: okSchema },
@@ -373,6 +378,7 @@ const MIGRATIONS = [
   `ALTER TABLE reviews ADD COLUMN base_ref_sha TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE files_cache ADD COLUMN base_sha TEXT NOT NULL DEFAULT ''`,
   `CREATE TABLE IF NOT EXISTS own_prs_cache (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL, fetched_at INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS read_cache (review_id TEXT NOT NULL, key TEXT NOT NULL, json TEXT NOT NULL, bytes INTEGER NOT NULL, fetched_at INTEGER NOT NULL, PRIMARY KEY (review_id, key))`,
 ];
 
 interface ReviewRow {
@@ -633,6 +639,9 @@ export default async function plugin(bb: BbPluginApi) {
   const commitsRefreshedHead = new Map<string, string>();
 
   const publish = (reviewId: string, what: string) => bb.realtime.publish(REVIEW_CHANGED, { reviewId, what });
+  const reads = createReadCache(db, (id) => q.review.get(id) !== undefined, (id, key) => {
+    if (key === "merge-options" || key === "description") publish(id, key);
+  }, (cause) => bb.log.warn(`cached read refresh: ${errorMessage(cause)}`));
 
   const reportSyncError = (reviewId: string, cause: unknown) => {
     const error = errorMessage(cause);
@@ -651,6 +660,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Take a review out of Review Desk. Does not close the pull request on GitHub. */
   function forgetReview(row: ReviewRow, dismiss: boolean): void {
+    reads.remove(row.id);
     q.clearPending.run(row.id);
     q.deleteViewedByReview.run(row.id);
     q.deleteFilesCache.run(row.id);
@@ -755,7 +765,7 @@ export default async function plugin(bb: BbPluginApi) {
   const SYNC_EVERY_MS = 15_000;
   const STACK_FRESH_MS = 15_000;
   const REVIEW_SWEEP_MS = 60_000;
-  const DETAILS_EVERY_MS = 5 * 60_000;
+  const DETAILS_EVERY_MS = 60_000;
 
   const prKey = (pr: { owner: string; repo: string; number: number }) => `${pr.owner}/${pr.repo}#${pr.number}`;
   const prStatuses = new Map<string, { pr: PrStatus; fetchedAt: number; request: number }>();
@@ -1248,6 +1258,42 @@ export default async function plugin(bb: BbPluginApi) {
     return stored?.version === 2 && Array.isArray(stored.threads) ? stored.threads : null;
   }
 
+  function cachedConversation(row: ReviewRow) {
+    const cache = q.conversationCache.get(row.id);
+    const stored = parseJson<{ version?: number; comments: z.infer<typeof ghIssueCommentSchema>[]; reviews: z.infer<typeof ghReviewSchema>[]; events: z.infer<typeof ghEventSchema>[] } | null>(cache?.json ?? "null", null);
+    return stored?.version === 2 && Array.isArray(stored.events) ? { comments: stored.comments, reviews: stored.reviews, events: stored.events, fetchedAt: cache!.fetched_at } : null;
+  }
+
+  function mergeOptionsFor(row: ReviewRow, fresh = false) {
+    return reads.read(row.id, "merge-options", () => host.call("gh_merge_options", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row)), SYNC_EVERY_MS, fresh);
+  }
+
+  function descriptionFor(row: ReviewRow) {
+    return reads.read(row.id, "description", () => host.call("gh_description", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row)), REVIEW_SWEEP_MS);
+  }
+
+  const patchKey = (base: string, head: string, path: string, oldPath: string | null) => JSON.stringify(["patch", base, head, path, oldPath]);
+  function patchFor(row: ReviewRow, base: string, head: string, path: string, oldPath: string | null) {
+    return reads.read(row.id, patchKey(base, head, path, oldPath), () => host.call("git_patch", { worktree: row.worktree, baseSha: base, headSha: head, path, oldPath }, hostOptions(row)), Infinity);
+  }
+
+  function fileAt(row: ReviewRow, sha: string, path: string) {
+    return reads.read(row.id, JSON.stringify(["file", sha, path]), () => host.call("git_show", { worktree: row.worktree, sha, path }, hostOptions(row)), Infinity);
+  }
+
+  async function warmReview(row: ReviewRow) {
+    const files = (cachedFiles(row) ?? []).filter((file) => !file.binary);
+    await Promise.all(Array.from({ length: 2 }, async () => {
+      while (files.length && q.review.get(row.id)) {
+        const file = files.shift()!;
+        await patchFor(row, row.base_sha, row.head_sha, file.path, file.oldPath);
+        if (/\.(md|markdown)$/i.test(file.path)) await Promise.all([
+          fileAt(row, row.base_sha, file.oldPath ?? file.path), fileAt(row, row.head_sha, file.path),
+        ]);
+      }
+    }));
+  }
+
   // -- read model ------------------------------------------------------------
 
   /** Mark pending comments whose path or line is gone from the current diff. */
@@ -1262,11 +1308,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!stale && file !== undefined) {
         let hunks = hunksByPath.get(file.path);
         if (hunks === undefined) {
-          const result = await host.call(
-            "git_patch",
-            { worktree: row.worktree, baseSha: row.base_sha, headSha: row.head_sha, path: file.path, oldPath: file.oldPath },
-            hostOptions(row),
-          );
+          const result = await patchFor(row, row.base_sha, row.head_sha, file.path, file.oldPath);
           hunks = result.patch.trim() === "" ? null : hunkLineNumbers(result.patch);
           hunksByPath.set(file.path, hunks);
         }
@@ -1277,10 +1319,11 @@ export default async function plugin(bb: BbPluginApi) {
     return out;
   }
 
-  async function reviewDetail(reviewId: string) {
+  async function reviewDetail(reviewId: string, path?: string) {
     const row = requireReview(reviewId);
     if (!reviewIsActive(row)) throw new Error("closed");
     void syncReview(reviewId).catch(() => undefined);
+    void Promise.allSettled([mergeOptionsFor(row), descriptionFor(row)]);
     await ensureStack(row);
     const files = await filesFor(row);
     const viewed = new Set(q.viewed.all(row.id).map((v) => v.path));
@@ -1312,6 +1355,21 @@ export default async function plugin(bb: BbPluginApi) {
       syncError: syncErrors.get(reviewId) ?? null,
       seen: seenState(row),
       stack: stackViewFor(row),
+      mergeOptions: reads.peek<z.infer<typeof mergeOptionsSchema>>(row.id, "merge-options"),
+      description: reads.peek<{ body: string; canEdit: boolean }>(row.id, "description"),
+      conversation: cachedConversation(row),
+      initialPatch: (() => {
+        const file = files.find((file) => file.path === path) ?? files[0];
+        if (!file) return null;
+        const cached = reads.peek<{ patch: string }>(row.id, patchKey(row.base_sha, row.head_sha, file.path, file.oldPath));
+        const oldFile = reads.peek<{ content: string | null }>(row.id, JSON.stringify(["file", row.base_sha, file.oldPath ?? file.path]));
+        const newFile = reads.peek<{ content: string | null }>(row.id, JSON.stringify(["file", row.head_sha, file.path]));
+        if (!cached) return null;
+        const initial = { path: file.path, patch: cached.patch, contents: oldFile && newFile ? { oldContent: oldFile.content ?? "", newContent: newFile.content ?? "" } : null };
+        // Large files still load individually without making the whole page response oversized.
+        if (Buffer.byteLength(JSON.stringify(initial)) > 2 * 1024 * 1024) initial.contents = null;
+        return Buffer.byteLength(JSON.stringify(initial)) > 2 * 1024 * 1024 ? null : initial;
+      })(),
     };
   }
 
@@ -1488,7 +1546,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.rpc.register(rpcContract, {
     reviews_list: listReviews,
     reviews_open: async ({ ref }) => ({ review: await openReview(ref) }),
-    reviews_get: ({ reviewId }) => reviewDetail(reviewId),
+    reviews_get: ({ reviewId, path }) => reviewDetail(reviewId, path),
     reviews_sync: ({ reviewId }) => syncReview(reviewId, true),
     reviews_remove: async (input) => {
       const { owner, repo, number } = "reviewId" in input ? requireReview(input.reviewId) : input;
@@ -1500,11 +1558,11 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
     stacks_remove: ({ key }) => { removeStack(key); return { ok: true as const }; },
-    review_patch: async ({ reviewId, path }) => {
+    review_patch: async ({ reviewId, path, revision }) => {
       const row = requireReview(reviewId);
       const files = await filesFor(row);
       const file = files.find((f) => f.path === path) ?? null;
-      const result = await host.call("git_patch", { worktree: row.worktree, baseSha: row.base_sha, headSha: row.head_sha, path, oldPath: file?.oldPath ?? null }, hostOptions(row));
+      const result = await patchFor(row, revision?.base ?? row.base_sha, revision?.head ?? row.head_sha, path, revision ? revision.oldPath : file?.oldPath ?? null);
       return { patch: result.patch, file };
     },
     review_file: async ({ reviewId, path, side }) => {
@@ -1512,7 +1570,8 @@ export default async function plugin(bb: BbPluginApi) {
       const files = await filesFor(row);
       const file = files.find((f) => f.path === path);
       const targetPath = side === "old" ? file?.oldPath ?? path : path;
-      return host.call("git_show", { worktree: row.worktree, sha: side === "old" ? row.base_sha : row.head_sha, path: targetPath }, hostOptions(row));
+      const sha = side === "old" ? row.base_sha : row.head_sha;
+      return fileAt(row, sha, targetPath);
     },
     review_conversation: async ({ reviewId, refresh }) => {
       const row = requireReview(reviewId);
@@ -1528,14 +1587,8 @@ export default async function plugin(bb: BbPluginApi) {
       return { ...result, fetchedAt: Date.now() };
     },
     review_threads_refresh: async ({ reviewId }) => ({ threads: await refreshThreads(requireReview(reviewId)) }),
-    review_description: ({ reviewId }) => {
-      const row = requireReview(reviewId);
-      return host.call("gh_description", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row));
-    },
-    review_merge_options: ({ reviewId }) => {
-      const row = requireReview(reviewId);
-      return host.call("gh_merge_options", { owner: row.owner, repo: row.repo, number: row.number }, hostOptions(row));
-    },
+    review_description: ({ reviewId }) => descriptionFor(requireReview(reviewId)),
+    review_merge_options: ({ reviewId, refresh }) => mergeOptionsFor(requireReview(reviewId), refresh),
     review_merge: async ({ reviewId, ...input }) => {
       const row = requireReview(reviewId);
       const result = await host.call("gh_merge", { owner: row.owner, repo: row.repo, number: row.number, ...input }, hostOptions(row));
@@ -1555,6 +1608,8 @@ export default async function plugin(bb: BbPluginApi) {
       // refresh failure must not turn a successful save into a failed save.
       if (input.target.kind === "description") {
         q.setBody.run(result.body, Date.now(), row.id);
+        const previous = reads.peek<{ canEdit: boolean }>(row.id, "description");
+        reads.update(row.id, "description", { body: result.body, canEdit: previous?.canEdit ?? true });
         publish(row.id, "description");
       } else if (input.target.kind === "inline") {
         const id = input.target.id;
@@ -1669,11 +1724,11 @@ export default async function plugin(bb: BbPluginApi) {
     commit_get: ({ reviewId, to, from, inclusive }) => commitRange(requireReview(reviewId), to, from, inclusive === true),
     commit_patch: async ({ reviewId, base, head, path, oldPath }) => {
       const row = requireReview(reviewId);
-      return host.call("git_patch", { worktree: row.worktree, baseSha: base, headSha: head, path, oldPath }, hostOptions(row));
+      return patchFor(row, base, head, path, oldPath);
     },
     commit_file: ({ reviewId, sha, path }) => {
       const row = requireReview(reviewId);
-      return host.call("git_show", { worktree: row.worktree, sha, path }, hostOptions(row));
+      return fileAt(row, sha, path);
     },
   });
 
@@ -1737,7 +1792,11 @@ export default async function plugin(bb: BbPluginApi) {
               const ref = queue.shift()!;
               try {
                 const review = await openPr(ref.owner, ref.repo, ref.number, true);
-                if (!signal.aborted) await syncReview(review.id);
+                if (!signal.aborted) {
+                  const row = requireReview(review.id);
+                  await Promise.all([syncReview(review.id), Promise.allSettled([mergeOptionsFor(row), descriptionFor(row)])]);
+                  if (!signal.aborted) await warmReview(requireReview(review.id));
+                }
               } catch (cause) { bb.log.warn(`prefetch ${ref.owner}/${ref.repo}#${ref.number}: ${errorMessage(cause)}`); }
             }
           }),
@@ -1785,6 +1844,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.onDispose(() => {
+    reads.dispose();
     bb.log.info("disposed");
   });
   bb.log.info("loaded");
