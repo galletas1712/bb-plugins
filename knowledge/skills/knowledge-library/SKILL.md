@@ -111,8 +111,9 @@ path): `records/<id>/body.md` plus `artifacts/`. The body file is the
 canonical text.
 
 - To create a record, use `knowledge_save` or pipe compact JSON:
-  `jq -c . capture.json | bb knowledge save --input-stdin`. The plugin stamps
-  the project and source thread and copies any listed artifacts.
+  `jq -c . capture.json | bb knowledge save --input-stdin`. Stdin input is
+  capped at 16 KiB; use `--inputFile capture.json` for larger captures. The
+  plugin stamps the project and source thread and copies any listed artifacts.
 - To update a record, edit its body.md with your normal file tools. Keep the
   frontmatter intact except the title. If the library is not on your
   filesystem, use `knowledge_save` with the revised full body instead.
