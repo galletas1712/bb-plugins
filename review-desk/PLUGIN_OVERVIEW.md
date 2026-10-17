@@ -1,4 +1,4 @@
-# Review Desk
+# GitHub
 
 A GitHub pull request review page with the original conversation and inline comments.
 

@@ -1,9 +1,11 @@
-# Review Desk
+# GitHub
 
 Review GitHub pull requests inside bb with their original description, conversation, and diffs.
 
+The plugin ID and CLI command remain `review-desk`, preserving saved reviews, settings and existing links.
+
 - Open a PR URL, `owner/repo#123`, or `owner/repo/stack/N`.
-- Your authenticated GitHub account's open PRs appear automatically across all repositories, including drafts. Discovery checks every 15 seconds. Closed and merged PRs are hidden throughout Reviews and stack navigation. Stacks with no open PRs are hidden. Explicitly removed PRs stay hidden until you open them again.
+- Your authenticated GitHub account's open PRs appear automatically across all repositories, including drafts. Discovery checks every minute. Closed and merged PRs are hidden throughout the plugin and stack navigation. Stacks with no open PRs are hidden. Explicitly removed PRs stay hidden until you open them again.
 - Open PR diffs are prefetched in the background every minute with two workers. Changed revisions immediately fetch Git and warm the new patches and Markdown content. Inactive PR details, history, description permissions and merge options refresh every ten minutes or after detected changes. Cached PRs open immediately and start a fresh background read on navigation, focus or reconnect. A first visit can still wait if its Git preparation has not finished. Foreground and background requests share preparation, and unchanged refs reuse the Git and file caches.
 - PR pages, conversations, merge actions, file previews, and commits retain cached data across navigation. The repository grid also prefetches saved PR pages. Refreshes update the existing content without clearing it, including when a request fails. The initial PR response includes cached merge options, conversation, description permissions, and the selected patch to avoid sequential loading. The shared UI cache uses TanStack Query and retains inactive queries for 30 minutes. The SQLite read cache survives plugin reloads and is limited to 64 MiB, 2048 entries, and 4 MiB per entry. Patch and file keys include exact revisions. Merge confirmation always reads fresh GitHub options and submission rechecks the action.
 - A separate status scan runs every 15 seconds, including closed tracked PRs that can be reopened. It batches up to 50 PRs per GitHub request and updates visibility without waiting for Git fetches or conversation loading. Saved notes and drafts survive closing and reopening. Inaccessible PRs keep their last known state while other PRs continue updating.
@@ -25,11 +27,11 @@ Review GitHub pull requests inside bb with their original description, conversat
 
 Changes, Conversation, and Commits use a single main workspace, one view at a time. Submit review opens a dialog with pending comments and review controls, with checks and metadata in expandable sections. Reviews and tracked stacks refresh from GitHub in the background. Visible panels also poll every 15 seconds and refresh on focus or reconnect. Head and base-branch pushes refresh cached diffs. Manual refresh fetches Git again. Fetch errors are shown with a retry action.
 
-Requires an authenticated `gh` CLI on the machine holding the repository. Review Desk finds a local checkout or clones one, then creates a detached worktree for reading the diff.
+Requires an authenticated `gh` CLI on the machine holding the repository. The GitHub plugin finds a local checkout or clones one, then creates a detached worktree for reading the diff.
 
 Manually opened PRs are saved and remain listed while open, including your own PRs missing from the authored discovery snapshot. They share the regular status scans, diff prefetch and persistent component caches. Closed or merged PRs are hidden after their status updates, and closed PRs can reappear when reopened. Explicit removal is remembered.
 
-Review Desk currently uses polling rather than GitHub webhooks. Webhook delivery requires a reachable receiver and repository, organization, or GitHub App configuration. Repository work is serialized so background fetches do not compete over shared Git refs. The plugin never runs global worktree pruning on shared repositories.
+The plugin currently uses polling rather than GitHub webhooks. Webhook delivery requires a reachable receiver and repository, organization, or GitHub App configuration. Repository work is serialized so background fetches do not compete over shared Git refs. The plugin never runs global worktree pruning on shared repositories.
 
 Background polling continues while the page is closed. Batched PR status and head/base scans run every 15 seconds. A revision change immediately fetches and caches the new diff without waiting for the minute prefetch sweep, and publishes it before slower history requests finish. Authored PR discovery and tracked stack membership run every minute. Visible pages refresh from BB every 15 seconds, keeping the active PR's details and merge readiness on a one-minute freshness window. Inactive full details use a ten-minute safety sweep. Grid prefetch reads cached page data without marking those PRs active. Patches and file content at fixed commit SHAs use local Git and persistent caching.
 

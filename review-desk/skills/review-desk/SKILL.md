@@ -1,11 +1,11 @@
 ---
 name: review-desk
-description: Open or inspect GitHub pull requests and PR stacks in Review Desk with the bb review-desk CLI.
+description: Open or inspect pull requests and PR stacks in the GitHub plugin with the bb review-desk CLI.
 ---
 
-# Review Desk
+# GitHub
 
-Review Desk displays GitHub pull-request diffs, descriptions, conversations and inline threads. It keeps comments pending until the reviewer submits them to GitHub. Private notes stay in Review Desk until added to the pending review.
+The GitHub plugin displays pull-request diffs, descriptions, conversations and inline threads. It keeps comments pending until the reviewer submits them to GitHub. Private notes stay in the plugin until added to the pending review. Its stable plugin ID and CLI command are `review-desk`.
 
 Use these commands when the user asks to open or inspect a review:
 
@@ -17,11 +17,11 @@ bb review-desk stack <reviewId> [--json]
 
 The repository host needs an authenticated `gh` CLI. Opening a PR creates a detached worktree for its diff. Stack navigation lists open layers; other open layers load when selected. Comments and review submission belong to the selected PR.
 
-Reviews automatically lists the authenticated account's open PRs across repositories, including drafts. Authored discovery and stack metadata poll every 15 seconds. Closed and merged PRs are hidden from the front page and stack navigation, and stacks with no open layers are hidden. Counts, positions, and totals include only open layers. Completed PRs and stacks cannot be opened. Hidden PRs retain saved drafts and notes. Explicitly removed PRs stay hidden until reopened.
+The GitHub page automatically lists the authenticated account's open PRs across repositories, including drafts. Authored discovery and stack membership poll every minute. Closed and merged PRs are hidden from the front page and stack navigation, and stacks with no open layers are hidden. Counts, positions, and totals include only open layers. Completed PRs and stacks cannot be opened. Hidden PRs retain saved drafts and notes. Explicitly removed PRs stay hidden until reopened.
 
-Open PRs are prefetched every minute with two workers, including Git preparation, file counts, comments and conversation. Cached opens return while refreshing, and repeated requests share preparation. Independent batched status scans every 15 seconds watch tracked closed PRs for reopening and hide completed PRs without waiting for heavy fetches. The plugin uses polling and does not configure GitHub webhooks.
+Open PR diffs are prefetched every minute with two workers. Active PR details refresh every minute, and inactive full details use a ten-minute safety sweep or detected changes. Cached opens return immediately while refreshing, and repeated requests share preparation. Independent batched status scans every 15 seconds automatically fetch changed head/base revisions, watch tracked closed PRs for reopening and hide completed PRs without waiting for heavy fetches. The plugin uses polling and does not configure GitHub webhooks.
 
-The UI supports replying to and resolving GitHub review threads, writing pending inline comments, and submitting a comment, approval or request for changes. Removing a review from Review Desk does not close it on GitHub.
+The UI supports replying to and resolving GitHub review threads, writing pending inline comments, and submitting a comment, approval or request for changes. Removing a review from the plugin does not close it on GitHub.
 
 The merge button names the selected allowed method, such as Squash and merge. Confirmation lists the destination branch and affected PRs. Native GitHub stack merges include open downstack PRs. Fresh GitHub checks validate permissions, methods, head and stack scope before submitting an asynchronous direct merge with repository rules enforced. The UI tracks pending, failed and successful outcomes. It does not enable automatic merging or bypass merge queues. Review summaries without visible text appear as compact activity rows instead of empty comments.
 

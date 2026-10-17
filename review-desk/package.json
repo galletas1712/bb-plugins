@@ -7,10 +7,10 @@
     "bbPluginSdk": ">=0.4.47"
   },
   "bb": {
-    "name": "Review Desk",
+    "name": "GitHub",
     "description": "Review GitHub pull requests with diffs, conversations, inline comments, and stack navigation.",
     "branding": {
-      "icon": "GitPullRequest"
+      "icon": "Github"
     },
     "server": "./server.ts",
     "app": "./app.tsx",

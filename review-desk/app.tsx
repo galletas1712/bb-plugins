@@ -69,8 +69,8 @@ function payloadReview(payload: unknown): { reviewId: string; what: string } | n
 
 function confirmRemoveReview(multiple = false): boolean {
   return window.confirm(multiple
-    ? "Remove this entire stack from Review Desk, including its local notes and pending comments? The pull requests stay on GitHub."
-    : "Remove this review from Review Desk? The pull request stays on GitHub.");
+    ? "Remove this entire stack from this workspace, including its local notes and pending comments? The pull requests stay on GitHub."
+    : "Remove this review from this workspace? The pull request stays on GitHub.");
 }
 
 function RemoveReviewButton({ onClick, label }: { onClick(): void; label: string }) {
@@ -1698,7 +1698,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
       else if (review.id) await rpc.call("reviews_remove", { reviewId: review.id });
       else await rpc.call("reviews_remove", { owner: review.owner, repo: review.repo, number: review.number });
       refetch();
-      toast.success("Removed from Review Desk");
+      toast.success("Removed from reviews");
     } catch (cause) { toast.error(describeError(cause)); }
   };
   const openSummary = async (summary: ReviewSummary) => {
@@ -1731,7 +1731,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
   return (
     <div className="h-full min-h-0 overflow-y-auto">
       <div className="w-full px-4 py-8 sm:px-8 sm:py-12">
-        <h1 className="text-2xl font-semibold tracking-tight">Reviews</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">GitHub</h1>
         <form onSubmit={open} className="mt-6 flex max-w-2xl items-center gap-2">
           <Input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="owner/repo#123 or owner/repo/stack/7" className="h-10" aria-label="Pull request" />
           <Button type="submit" className="h-10" disabled={opening || ref.trim() === ""}>
@@ -1843,8 +1843,8 @@ function ReviewsApp(props: { subPath: string }) {
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: PANEL_ID,
-    title: "Reviews",
-    icon: "GitPullRequest",
+    title: "GitHub",
+    icon: "Github",
     path: PANEL_PATH,
     component: ReviewsApp,
   });
