@@ -25,7 +25,7 @@ export const rpcContract = defineRpcContract({
     input: z.object({ id: idSchema }),
     output: z.object({
       record: recordSchema,
-      reportPath: z.string(),
+      path: z.string(),
       hostId: z.string().nullable(),
     }),
   },
@@ -34,12 +34,15 @@ export const rpcContract = defineRpcContract({
     input: z
       .object({
         id: idSchema,
-        expectedVersion: saveSchema.shape.expectedVersion,
         title: saveSchema.shape.title,
         body: saveSchema.shape.body,
       })
       .strict(),
     output: recordSchema,
+  },
+  delete: {
+    input: z.object({ id: idSchema }),
+    output: z.object({ id: z.string(), trashedTo: z.string() }),
   },
   sync: {
     input: z.object({ embed: z.boolean().default(false) }),

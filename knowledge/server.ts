@@ -33,7 +33,7 @@ export default async function plugin(bb: BbPluginApi) {
     const record = library.read(id);
     return {
       record,
-      reportPath: library.reportPath(record),
+      path: library.bodyPath(id),
       hostId: (await bb.sdk.system.config()).primaryHostId,
     };
   };
@@ -56,13 +56,18 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish("changed", {});
       return record;
     },
+    delete: ({ id }) => {
+      const result = library.delete(id);
+      bb.realtime.publish("changed", {});
+      return result;
+    },
     sync: ({ embed }) => recall.sync(embed),
   });
 
   bb.agents.registerTool({
     name: "knowledge_recall",
     description:
-      "Find saved project context, findings, decisions, procedures, and experiment evidence. Searches this project plus global records by default. Keyword search uses QMD BM25. Hybrid search uses QMD local models.",
+      "Find saved project context, findings, decisions, procedures, and experiment evidence. Searches this project plus global records by default. Keyword search uses QMD BM25. Hybrid search uses QMD local models. Each result includes the absolute path of the record's body.md: read it directly for the full text, and grep the artifacts folder next to it for detail that is not in the body.",
     parameters: searchSchema,
     async execute(input, context) {
       return JSON.stringify(
@@ -74,23 +79,25 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   bb.agents.registerTool({
-    name: "knowledge_read",
-    description:
-      "Read the full saved record and its evidence metadata. Check conditions, limitations, and source dates before reuse.",
-    parameters: z.object({ id: idSchema }),
-    async execute({ id }) {
-      return JSON.stringify(await read(id));
-    },
-  });
-  bb.agents.registerTool({
     name: "knowledge_save",
     description:
-      "Update a matching record first when useful context or evidence is missing or outdated. Read it, keep its id, and pass its current version as expectedVersion with the revised title and full Markdown body. Preserve useful older context and sources. Create with expectedVersion=0 when no existing record fits. Reuse adequately covered material without saving. Source defaults to the current thread at save time. Set threadId or sourceSequence only to cite a different thread or a specific point in its history.",
+      "Create a record, fully rewrite one, or attach evidence files. Records are plain folders: body.md (frontmatter plus Markdown) and artifacts/. To update an existing record's text, prefer editing its body.md directly with your file tools instead of calling this tool. Source defaults to the current thread at save time. Set threadId or sourceSequence only to cite a different thread or a specific point in its history.",
     parameters: saveSchema,
     async execute(input, context) {
       return JSON.stringify(
         await saveRecord(bb, library, input, context.threadId),
       );
+    },
+  });
+  bb.agents.registerTool({
+    name: "knowledge_delete",
+    description:
+      "Move a record to the library trash. The record disappears from search and listings, but its body and artifacts stay on disk and can be recovered. Use for temporary records whose subject is finished, such as PR review notes after the PR merges, and only when the record has no lasting value.",
+    parameters: z.object({ id: idSchema }),
+    async execute({ id }) {
+      const result = library.delete(id);
+      bb.realtime.publish("changed", {});
+      return JSON.stringify(result);
     },
   });
   const json = { type: "boolean", description: "Emit JSON" } as const;
@@ -167,7 +174,7 @@ export default async function plugin(bb: BbPluginApi) {
           },
         }),
         read: cliCommand({
-          summary: "Read a saved result and its current version",
+          summary: "Read a saved record and the path of its body.md",
           options: { json },
           positionals: [
             { name: "id", description: "Record ID", required: true },
@@ -175,7 +182,8 @@ export default async function plugin(bb: BbPluginApi) {
           run: async ({ positionals }) => reply(await read(positionals.id)),
         }),
         save: cliCommand({
-          summary: "Save a JSON record and preserve its evidence",
+          summary:
+            "Create or rewrite a record and preserve its evidence. To update text, prefer editing body.md directly",
           options: {
             json,
             input: {
@@ -197,8 +205,21 @@ export default async function plugin(bb: BbPluginApi) {
             );
           },
         }),
+        delete: cliCommand({
+          summary:
+            "Move a record to the library trash (recoverable; body and artifacts stay on disk)",
+          options: { json },
+          positionals: [
+            { name: "id", description: "Record ID", required: true },
+          ],
+          async run({ positionals }) {
+            const result = library.delete(positionals.id);
+            bb.realtime.publish("changed", {});
+            return reply(result);
+          },
+        }),
         sync: cliCommand({
-          summary: "Rebuild the QMD index from durable files",
+          summary: "Rebuild the QMD index from the record files",
           options: {
             json,
             embed: {
