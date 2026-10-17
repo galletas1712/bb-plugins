@@ -1,5 +1,5 @@
 // Review pull requests, read GitHub conversations, and submit inline comments.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { toast } from "sonner";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
@@ -862,9 +862,16 @@ function DescriptionPreview({ body }: { body: string }) {
   );
 }
 
+const ACTIVITY_PAGE_SIZE = 20;
+type ActivityCursor = { key: string; when: string };
+const compareActivity = (a: ActivityCursor, b: ActivityCursor) => (Date.parse(a.when) || 0) - (Date.parse(b.when) || 0) || a.key.localeCompare(b.key);
+
 function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string; threads: GhThread[]; onJump: JumpFn; onRefresh(): void }) {
   const rpc = useRpc<Contract>();
   const key = reviewKey(reviewId, "conversation");
+  const [activityStart, setActivityStart] = useState<ActivityCursor | null>(null);
+  const activityRef = useRef<HTMLElement | null>(null);
+  const prependAnchor = useRef<{ element: HTMLElement; top: number } | null>(null);
   const query = useQuery({ queryKey: key, queryFn: () => rpc.call("review_conversation", { reviewId }) });
   const conversation = query.data ?? null;
   const error = query.error ? describeError(query.error) : null;
@@ -881,34 +888,54 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
     reply: async (commentId: number, body: string) => { await rpc.call("thread_reply", { reviewId, commentId, body }); onRefresh(); },
     resolve: async (threadId: string, resolve: boolean) => { await rpc.call("thread_resolve", { reviewId, threadId, resolve }); onRefresh(); },
   };
-  if (error !== null && conversation === null) return <p role="alert" className="text-sm text-destructive">{error} <button type="button" className="underline" onClick={() => load(true)}>Retry</button></p>;
-  if (conversation === null) return <EmptyState>Loading conversation…</EmptyState>;
   const outdatedThreads = threads.filter((thread) => thread.isOutdated);
   const resolvedThreads = threads.filter((thread) => thread.isResolved && !thread.isOutdated);
   type Item = { key: string; when: string; author: string; body: string; state?: string; url: string; thread?: GhThread; event?: string; target?: { kind: "review" | "comment"; id: string }; canEdit?: boolean };
   const items: Item[] = [
-    ...conversation.reviews.map((r) => ({ key: "review-" + r.id, author: r.author, when: r.submittedAt ?? "", body: r.body, state: r.state, url: r.url, canEdit: r.canEdit, target: r.nodeId ? { kind: "review" as const, id: r.nodeId } : undefined })),
-    ...conversation.comments.map((c) => ({ key: "comment-" + c.id, author: c.author, when: c.createdAt, body: c.body, url: c.url, canEdit: c.canEdit, target: c.nodeId ? { kind: "comment" as const, id: c.nodeId } : undefined })),
-    ...threads.filter((thread) => !thread.isOutdated && !thread.isResolved).map((thread) => ({ key: "thread-" + thread.id, author: "", when: orderThreadComments(thread.comments)[0]?.comment.createdAt ?? "", body: "", url: "", thread })),
-    ...(conversation.events ?? []).map((event) => ({ key: "event-" + event.id, author: event.actor ?? "", when: event.createdAt ?? "", body: event.details, url: event.url ?? "", event: event.event })),
+    ...(conversation?.reviews ?? []).map((r) => ({ key: "review-" + r.id, author: r.author, when: r.submittedAt ?? "", body: r.body, state: r.state, url: r.url, canEdit: r.canEdit, target: r.nodeId ? { kind: "review" as const, id: r.nodeId } : undefined })),
+    ...(conversation?.comments ?? []).map((c) => ({ key: "comment-" + c.id, author: c.author, when: c.createdAt, body: c.body, url: c.url, canEdit: c.canEdit, target: c.nodeId ? { kind: "comment" as const, id: c.nodeId } : undefined })),
+    ...threads.filter((thread) => !thread.isOutdated && !thread.isResolved).map((thread) => ({ key: "thread-" + thread.id, author: "", when: thread.comments.reduce((latest, comment) => (Date.parse(comment.createdAt) || 0) > (Date.parse(latest) || 0) ? comment.createdAt : latest, ""), body: "", url: "", thread })),
+    ...(conversation?.events ?? []).map((event) => ({ key: "event-" + event.id, author: event.actor ?? "", when: event.createdAt ?? "", body: event.details, url: event.url ?? "", event: event.event })),
   ];
-  items.sort((a, b) => (Date.parse(a.when) || 0) - (Date.parse(b.when) || 0));
-  return <div className="space-y-5">
+  items.sort(compareActivity);
+  const boundary = activityStart === null ? -1 : items.findIndex((item) => compareActivity(item, activityStart) >= 0);
+  const start = boundary < 0 ? Math.max(0, items.length - ACTIVITY_PAGE_SIZE) : boundary;
+  const first = items[start];
+  useLayoutEffect(() => {
+    const anchor = prependAnchor.current;
+    if (anchor?.element.isConnected) {
+      const scroller = activityRef.current?.closest<HTMLElement>("[data-review-conversation-scroll]");
+      if (scroller) scroller.scrollTop += anchor.element.getBoundingClientRect().top - anchor.top;
+    }
+    prependAnchor.current = null;
+    // Anchor the window so polling cannot hide expanded history or unmount an editor.
+    if (activityStart === null && conversation !== null && first) setActivityStart({ key: first.key, when: first.when });
+  }, [activityStart, conversation !== null, first?.key, first?.when]);
+  const seeEarlier = () => {
+    const element = activityRef.current?.querySelector<HTMLElement>("[data-conversation-activity]");
+    if (element) prependAnchor.current = { element, top: element.getBoundingClientRect().top };
+    const earlier = items[Math.max(0, start - ACTIVITY_PAGE_SIZE)];
+    if (earlier) setActivityStart({ key: earlier.key, when: earlier.when });
+  };
+  if (error !== null && conversation === null) return <p role="alert" className="text-sm text-destructive">{error} <button type="button" className="underline" onClick={() => load(true)}>Retry</button></p>;
+  if (conversation === null) return <EmptyState>Loading conversation…</EmptyState>;
+  return <section ref={activityRef} aria-label="Conversation activity" className="space-y-5">
+    {start > 0 ? <div className="flex justify-center"><Button variant="outline" size="sm" onClick={seeEarlier}><Icon name="ChevronUp" className="size-3.5" />See earlier activity</Button></div> : null}
     {items.length === 0 && threads.length === 0 ? <EmptyState>No conversation yet.</EmptyState> : null}
-    {items.map((item) => item.thread ? <div key={item.key}>
+    {items.slice(start).map((item) => item.thread ? <div key={item.key} data-conversation-activity={item.key}>
       <button type="button" className="break-all text-left font-mono text-xs text-muted-foreground hover:underline" onClick={() => onJump(item.thread!.path, item.thread!.isOutdated ? null : item.thread!.line, item.thread!.side === "LEFT" ? "old" : "new")}>{item.thread.path}{item.thread.line !== null ? ":" + item.thread.line : ""}</button>
       <ThreadCard thread={item.thread} actions={actions} />
-    </div> : item.event ? <div key={item.key} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground">
+    </div> : item.event ? <div key={item.key} data-conversation-activity={item.key} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground">
       {item.author ? <span className="font-medium text-foreground">{item.author}</span> : null}
       <span className="min-w-0 whitespace-pre-wrap break-words">{item.event.replace(/_/g, " ")}{item.body ? ": " + item.body : ""}</span>
       {item.when ? <time dateTime={item.when} className="ml-auto shrink-0">{timeAgo(item.when)}</time> : null}
       {item.url ? <UrlLink href={item.url} className="hover:underline">GitHub</UrlLink> : null}
-    </div> : item.body.replace(/<!--[\s\S]*?-->/g, "").trim() === "" ? <div key={item.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+    </div> : item.body.replace(/<!--[\s\S]*?-->/g, "").trim() === "" ? <div key={item.key} data-conversation-activity={item.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
       <span className="font-medium text-foreground">{item.author}</span>
       <span className={item.state ? reviewStateTone(item.state) : undefined}>{item.state === "APPROVED" ? "approved these changes" : item.state === "CHANGES_REQUESTED" ? "requested changes" : item.state === "DISMISSED" ? "had their review dismissed" : item.state ? "reviewed" : "commented"}</span>
       {item.when ? <time dateTime={item.when}>{timeAgo(item.when)}</time> : null}
       <UrlLink href={item.url} className="hover:underline">{item.state ? "View reviewed changes" : "GitHub"}</UrlLink>
-    </div> : <article key={item.key} className="border-b border-border pb-5 last:border-0">
+    </div> : <article key={item.key} data-conversation-activity={item.key} className="border-b border-border pb-5 last:border-0">
       <EditableBody body={item.body} canEdit={Boolean(item.canEdit && item.target)} label={`comment by ${item.author}`} renderBody={(body) => <CommentBody body={body} />} onCancel={() => load(true)} onSave={async (body, expectedBody) => {
         const result = await rpc.call("review_edit_body", { reviewId, target: item.target!, body, expectedBody });
         queryClient.setQueryData<typeof conversation>(key, (current) => !current ? current : { ...current, comments: current.comments.map((comment) => comment.nodeId === item.target?.id ? { ...comment, body: result.body } : comment), reviews: current.reviews.map((review) => review.nodeId === item.target?.id ? { ...review, body: result.body } : review) });
@@ -920,7 +947,7 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
     </article>)}
     <ThreadGroup label="Resolved" threads={resolvedThreads} actions={actions} onJump={onJump} />
     <ThreadGroup label="Outdated" threads={outdatedThreads} actions={actions} onJump={onJump} />
-  </div>;
+  </section>;
 }
 
 /** The commit last opened per review; a later shift-click diffs from it. Survives leaving and returning to the tab. */
@@ -1176,7 +1203,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
     <div className={cn("min-h-0 flex-1", tab !== "changes" && "hidden")}>
       <DiffPane {...diffProps} jump={diffJump} />
     </div>
-    {tab !== "changes" ? <div className="min-h-0 flex-1 overflow-y-auto">
+    {tab !== "changes" ? <div data-review-conversation-scroll className="min-h-0 flex-1 overflow-y-auto">
       {tab === "commits" && commit ? <CommitView reviewId={reviewId} review={review} target={commit} rpc={rpc} onNavigate={openCommit} onOpenDiff={() => setTab("changes")} /> : <div className="mx-auto max-w-4xl space-y-6 px-5 py-6">
         {tab === "commits" ? <Commits review={review} seen={detail.seen} onOpen={openCommit} /> : <>
           <section className="border-b border-border pb-6"><Description key={reviewId} reviewId={reviewId} body={review.body} /></section>

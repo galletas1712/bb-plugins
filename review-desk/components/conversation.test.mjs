@@ -222,6 +222,89 @@ test("async merges stay pending until GitHub reports success or a failure", asyn
   } finally { slot.lifecycle.unmount(); }
 });
 
+const activityTime = (minute) => new Date(Date.UTC(2026, 9, 5, 0, minute)).toISOString();
+
+test("conversation shows the latest mixed activity and repeatedly prepends earlier pages beneath the description", async () => {
+  const conversation = { comments: [], reviews: [], events: [], fetchedAt: 0 };
+  for (let id = 1; id <= 55; id++) {
+    const common = { id, author: `author-${id}`, body: `Activity ${id}`, url: review.url, canEdit: false };
+    if (id % 3 === 1) conversation.comments.push({ ...common, createdAt: activityTime(id) });
+    else if (id % 3 === 2) conversation.reviews.push({ ...common, state: "COMMENTED", submittedAt: activityTime(id) });
+    else conversation.events.push({ id: String(id), event: "labeled", details: common.body, actor: common.author, createdAt: activityTime(id), url: review.url });
+  }
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => ({ ...detail, threads: [] }), review_seen: () => ({ ok: true }),
+    review_description: () => ({ body: "Persistent description", canEdit: false }), review_conversation: () => conversation,
+  } });
+  try {
+    fireEvent.click(await slot.findByRole("button", { name: "Conversation", exact: true }));
+    const activity = await slot.findByRole("region", { name: "Conversation activity" });
+    const numbers = () => [...activity.querySelectorAll("[data-conversation-activity]")].map((item) => Number(item.dataset.conversationActivity.split("-").at(-1)));
+    const range = (start) => Array.from({ length: 56 - start }, (_, i) => start + i);
+    assert.deepEqual(numbers(), range(36));
+    const earlier = slot.getByRole("button", { name: "See earlier activity" });
+    assert.ok(slot.getByText("Persistent description").compareDocumentPosition(earlier) & Node.DOCUMENT_POSITION_FOLLOWING);
+    assert.ok(earlier.compareDocumentPosition(activity.querySelector("[data-conversation-activity]")) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const anchor = activity.querySelector("[data-conversation-activity]");
+    const scroller = activity.closest("[data-review-conversation-scroll]");
+    scroller.scrollTop = 100;
+    let reads = 0;
+    anchor.getBoundingClientRect = () => ({ top: reads++ === 0 ? 100 : 300 });
+    fireEvent.click(earlier);
+    assert.deepEqual(numbers(), range(16));
+    assert.equal(scroller.scrollTop, 300, "prepending keeps the old first activity at its viewport position");
+    assert.equal(activity.querySelector('[data-conversation-activity="event-36"]'), anchor);
+    fireEvent.click(slot.getByRole("button", { name: "See earlier activity" }));
+    assert.deepEqual(numbers(), range(1));
+    assert.equal(slot.queryByRole("button", { name: "See earlier activity" }), null);
+    assert.ok(slot.getByText("Persistent description"));
+    assert.equal(slot.inspection.rpcCalls.filter((call) => call.method === "review_conversation").length, 1, "earlier activity uses the existing cache");
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test("new activity preserves expanded history and unsaved edits instead of sliding the visible window", async () => {
+  const conversation = { comments: Array.from({ length: 45 }, (_, i) => ({ id: i + 1, nodeId: `comment-${i + 1}`, author: `author-${i + 1}`, body: `Activity ${i + 1}`, createdAt: activityTime(i + 1), url: review.url, canEdit: true })), reviews: [], events: [], fetchedAt: 0 };
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => ({ ...detail, threads: [] }), review_seen: () => ({ ok: true }),
+    review_conversation: () => conversation,
+  } });
+  try {
+    fireEvent.click(await slot.findByRole("button", { name: "Conversation", exact: true }));
+    await slot.findByText("Activity 26");
+    fireEvent.click(slot.getByRole("button", { name: "Edit comment by author-26" }));
+    const editor = slot.getByRole("textbox", { name: "comment by author-26" });
+    fireEvent.change(editor, { target: { value: "Unsaved activity edit" } });
+    fireEvent.click(slot.getByRole("button", { name: "See earlier activity" }));
+    assert.ok(slot.getByText("Activity 6"));
+    assert.equal(slot.getByRole("textbox", { name: "comment by author-26" }), editor);
+    await act(async () => queryClient.setQueryData(reviewKey(review.id, "conversation"), { ...conversation, comments: [...conversation.comments, { ...conversation.comments[44], id: 46, nodeId: "comment-46", body: "Newest activity", createdAt: activityTime(46) }] }));
+    assert.ok(await slot.findByText("Newest activity"));
+    assert.ok(slot.getByText("Activity 6"));
+    assert.equal(editor.value, "Unsaved activity edit");
+    assert.equal(slot.getByRole("region", { name: "Conversation activity" }).querySelectorAll("[data-conversation-activity]").length, 41);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test("recent replies bring older threads into the latest activity while keeping the original and replies together", async () => {
+  const original = { ...comment("original", "original-author", "Old thread original"), createdAt: activityTime(1) };
+  const reply = { ...comment("recent-reply", "reply-author", "Recent thread reply", "original"), createdAt: activityTime(60) };
+  const conversation = { comments: Array.from({ length: 45 }, (_, i) => ({ id: i + 1, author: "other", body: `Activity ${i + 1}`, createdAt: activityTime(i + 2), url: review.url, canEdit: false })), reviews: [], events: [], fetchedAt: 0 };
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => ({ ...detail, threads: [thread("old-active-thread", [reply, original])] }), review_seen: () => ({ ok: true }),
+    review_conversation: () => conversation,
+  } });
+  try {
+    fireEvent.click(await slot.findByRole("button", { name: "Conversation", exact: true }));
+    const old = await slot.findByText("Old thread original");
+    const recent = slot.getByText("Recent thread reply");
+    assert.ok(old.compareDocumentPosition(recent) & Node.DOCUMENT_POSITION_FOLLOWING);
+    assert.equal(slot.queryByText("Activity 1"), null);
+    const activity = slot.getByRole("region", { name: "Conversation activity" });
+    assert.equal(activity.querySelectorAll("[data-conversation-activity]").length, 20);
+    assert.equal([...activity.querySelectorAll("[data-conversation-activity]")].at(-1).dataset.conversationActivity, "thread-old-active-thread");
+  } finally { slot.lifecycle.unmount(); }
+});
+
 test("empty and HTML-comment-only review summaries are activity rows while real comments keep their disclosures", async () => {
   const states = ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"];
   const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
