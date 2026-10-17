@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 import { cliCommand, defineCli, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -184,22 +185,23 @@ export default async function plugin(bb: BbPluginApi) {
         save: cliCommand({
           summary:
             "Create or rewrite a record and preserve its evidence. To update text, prefer editing body.md directly",
-          options: {
-            json,
-            input: {
-              type: "string",
-              required: true,
-              stdin: true,
+          options: { json },
+          positionals: [
+            {
+              name: "file",
               description:
-                "Capture JSON. Use --input-stdin < capture.json to avoid shell quoting",
+                "Capture JSON file. Write it with jq or your file tools, then pass the path",
+              required: true,
             },
-          },
-          async run({ options }, context) {
+          ],
+          async run({ positionals }, context) {
             return reply(
               await saveRecord(
                 bb,
                 library,
-                saveSchema.parse(JSON.parse(options.input)),
+                saveSchema.parse(
+                  JSON.parse(fs.readFileSync(positionals.file, "utf8")),
+                ),
                 context.threadId,
               ),
             );

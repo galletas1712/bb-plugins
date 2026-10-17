@@ -82,11 +82,24 @@ export async function saveRecord(
       sourcePath: filePath,
     });
   }
+  // Metadata-only saves keep the original source: when the caller does not
+  // cite a thread and the content is unchanged, the record still originates
+  // from the thread that produced the content, not from the maintainer.
+  let source = { threadId, sequence: input.sourceSequence ?? sequence };
+  if (input.threadId === undefined) {
+    try {
+      const previous = library.read(input.id);
+      if (previous.title === input.title && previous.body === input.body)
+        source = previous.source;
+    } catch {
+      // New record: the caller is the source.
+    }
+  }
   const record = library.save(
     input,
     input.global ? null : thread.projectId,
     evidence,
-    { threadId, sequence: input.sourceSequence ?? sequence },
+    source,
   );
   bb.realtime.publish("changed", {});
   return record;
