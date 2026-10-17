@@ -519,7 +519,7 @@ const PROSE = cn(
 function AuthorChip({ login, when }: { login: string; when?: string }) {
   return <span className="flex min-w-0 items-baseline gap-3 text-xs">
     <span className="truncate font-medium text-foreground">{login}</span>
-    {when ? <time dateTime={when} className="text-muted-foreground">{timeAgo(when)}</time> : null}
+    {when ? <time dateTime={when} className="shrink-0 whitespace-nowrap text-muted-foreground">{timeAgo(when)}</time> : null}
   </span>;
 }
 
@@ -547,10 +547,14 @@ function CommentBody({ body, className }: { body: string; className?: string }) 
   return <div className={cn(PROSE, className)}>{parts}</div>;
 }
 
-function CommentDetails({ header, children }: { header: ReactNode; children: ReactNode }) {
-  return <details open className="min-w-0">
-    <summary className="cursor-pointer text-xs text-muted-foreground"><span className="inline-flex flex-wrap items-center gap-3 align-middle">{header}</span></summary>
-    <div className="pt-3">{children}</div>
+function CommentDetails({ header, actions, children }: { header: ReactNode; actions?: ReactNode; children: ReactNode }) {
+  return <details open className="group/comment min-w-0">
+    <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-muted-foreground [&::-webkit-details-marker]:hidden">
+      <Icon name="ChevronRight" className="size-3.5 shrink-0 transition-transform group-open/comment:rotate-90" />
+      <span className="flex min-w-0 flex-1 flex-wrap items-center gap-3">{header}</span>
+      <span className="flex shrink-0 items-center gap-2" onClick={(event) => event.stopPropagation()}>{actions}</span>
+    </summary>
+    <div className="pt-2">{children}</div>
   </details>;
 }
 
@@ -565,26 +569,28 @@ function ThreadCard({ thread, actions }: { thread: GhThread; actions: Pick<AnnoA
     setBusy(true);
     try { await fn(); } catch (cause) { toast.error(describeError(cause)); } finally { setBusy(false); }
   };
+  const header = (editButton?: ReactNode) => <header className="flex items-center gap-2 px-3 py-1.5">
+    <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
+      <Icon name={open ? "ChevronDown" : "ChevronRight"} className="size-3.5 shrink-0 text-muted-foreground" />
+      <AuthorChip login={first?.author ?? "Review thread"} when={first?.createdAt} />
+      {thread.isResolved ? <span className="text-xs text-muted-foreground">Resolved</span> : null}
+      {thread.isOutdated ? <span className="text-xs text-muted-foreground">Earlier version</span> : null}
+    </button>
+    <span className="flex shrink-0 items-center gap-1">
+      {open ? editButton : null}
+      {first?.url ? <UrlLink href={first.url} className="px-1 text-xs text-muted-foreground hover:underline">GitHub</UrlLink> : null}
+      <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" disabled={busy} onClick={() => void run(() => actions.resolve(thread.id, !thread.isResolved))}>{thread.isResolved ? "Reopen" : "Resolve"}</Button>
+    </span>
+  </header>;
   return (
-    <div className="my-2 min-w-0 rounded-lg border border-border bg-card text-sm">
-      <div className="flex flex-wrap items-center gap-2 px-3 py-2">
-        <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
-          <Icon name={open ? "ChevronDown" : "ChevronRight"} className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="truncate font-medium">{first?.author ?? "Review thread"}</span>
-          {thread.isResolved ? <span className="text-xs text-muted-foreground">Resolved</span> : null}
-          {thread.isOutdated ? <span className="text-xs text-muted-foreground">Earlier version</span> : null}
-        </button>
-        {first?.url ? <UrlLink href={first.url} className="text-xs text-muted-foreground hover:underline">GitHub</UrlLink> : null}
-        <Button variant="ghost" size="sm" disabled={busy} onClick={() => void run(() => actions.resolve(thread.id, !thread.isResolved))}>{thread.isResolved ? "Reopen" : "Resolve"}</Button>
-      </div>
+    <article aria-label={`Review thread by ${first?.author ?? "unknown"}`} className="my-2 min-w-0 rounded-lg border border-border bg-card text-sm">
+      {comments.length === 0 ? header() : null}
+      {comments.map(({ comment, depth }, index) => <EditableBody key={comment.id} body={comment.body} canEdit={comment.canEdit} label={`comment by ${comment.author}`} renderBody={(body) => <CommentBody body={body} />} onSave={(body, expectedBody) => actions.editComment(comment.id, body, expectedBody)} onCancel={actions.refreshThreads}
+        renderLayout={(editButton, content) => index > 0 && !open ? null : <div className={cn(index > 0 && "border-t border-border", depth > 0 && "ml-4 border-l-2 border-border")}>
+          {index === 0 ? header(editButton) : <header className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground"><AuthorChip login={comment.author} when={comment.createdAt} /><span>Reply</span>{editButton}</header>}
+          {open ? <div className="px-3 pb-2">{content}</div> : null}
+        </div>} />)}
       {open ? <>
-        <div className="divide-y divide-border border-t border-border">
-          {comments.map(({ comment, depth }) => <div key={comment.id} className={cn("px-3 py-3", depth > 0 && "ml-4 border-l-2 border-border")}>
-            <CommentDetails header={<><AuthorChip login={comment.author} when={comment.createdAt} />{depth > 0 ? <span>Reply</span> : null}</>}>
-              <EditableBody body={comment.body} canEdit={comment.canEdit} label={`comment by ${comment.author}`} renderBody={(body) => <CommentBody body={body} />} onSave={(body, expectedBody) => actions.editComment(comment.id, body, expectedBody)} onCancel={actions.refreshThreads} />
-            </CommentDetails>
-          </div>)}
-        </div>
         {reply === null ? <div className="border-t border-border px-3 py-1"><Button variant="ghost" size="sm" disabled={!first?.databaseId} onClick={() => setReply("")}>Reply</Button></div> : (
           <form className="space-y-2 border-t border-border p-3" onSubmit={(event) => {
             event.preventDefault();
@@ -597,7 +603,7 @@ function ThreadCard({ thread, actions }: { thread: GhThread; actions: Pick<AnnoA
           </form>
         )}
       </> : null}
-    </div>
+    </article>
   );
 }
 
@@ -903,17 +909,14 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
       {item.when ? <time dateTime={item.when}>{timeAgo(item.when)}</time> : null}
       <UrlLink href={item.url} className="hover:underline">{item.state ? "View reviewed changes" : "GitHub"}</UrlLink>
     </div> : <article key={item.key} className="border-b border-border pb-5 last:border-0">
-      <CommentDetails header={<>
-        <AuthorChip login={item.author} when={item.when} />
-        {item.state ? <span className={cn("text-xs", reviewStateTone(item.state))}>{item.state.replace(/_/g, " ").toLowerCase()}</span> : null}
-        <UrlLink href={item.url} className="text-muted-foreground hover:underline">GitHub</UrlLink>
-      </>}>
       <EditableBody body={item.body} canEdit={Boolean(item.canEdit && item.target)} label={`comment by ${item.author}`} renderBody={(body) => <CommentBody body={body} />} onCancel={() => load(true)} onSave={async (body, expectedBody) => {
         const result = await rpc.call("review_edit_body", { reviewId, target: item.target!, body, expectedBody });
         queryClient.setQueryData<typeof conversation>(key, (current) => !current ? current : { ...current, comments: current.comments.map((comment) => comment.nodeId === item.target?.id ? { ...comment, body: result.body } : comment), reviews: current.reviews.map((review) => review.nodeId === item.target?.id ? { ...review, body: result.body } : review) });
         toast.success("Comment updated"); return result;
-      }} />
-      </CommentDetails>
+      }} renderLayout={(editButton, content) => <CommentDetails header={<>
+        <AuthorChip login={item.author} when={item.when} />
+        {item.state ? <span className={cn("text-xs", reviewStateTone(item.state))}>{item.state.replace(/_/g, " ").toLowerCase()}</span> : null}
+      </>} actions={<>{editButton}<UrlLink href={item.url} className="text-muted-foreground hover:underline">GitHub</UrlLink></>}>{content}</CommentDetails>} />
     </article>)}
     <ThreadGroup label="Resolved" threads={resolvedThreads} actions={actions} onJump={onJump} />
     <ThreadGroup label="Outdated" threads={outdatedThreads} actions={actions} onJump={onJump} />

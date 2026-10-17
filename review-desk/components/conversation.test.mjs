@@ -241,7 +241,7 @@ test("empty and HTML-comment-only review summaries are activity rows while real 
   } finally { slot.lifecycle.unmount(); }
 });
 
-test("conversation shows each comment, independently toggles bodies, and keeps replies under their original", async () => {
+test("conversation uses one toggle per thread, independently collapses discussion comments, and keeps replies under their original", async () => {
   const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
     reviews_list: () => ({ reviews: [] }),
     reviews_get: () => detail,
@@ -270,11 +270,49 @@ test("conversation shows each comment, independently toggles bodies, and keeps r
     const dropdown = discussion.closest("details");
     fireEvent.click(dropdown.querySelector("summary"));
     assert.equal(dropdown.open, false);
-    assert.equal(original.closest("details").open, true);
-    assert.equal(reply.closest("details").open, true);
+    const card = original.closest("article");
+    assert.equal(card.querySelectorAll("button[aria-expanded], summary").length, 1, "one thread toggle replaces nested thread/comment disclosures");
+    assert.equal(reply.closest("article"), card);
+    fireEvent.click(card.querySelector("button[aria-expanded]"));
+    assert.equal(slot.queryByText("Original body"), null);
+    assert.equal(slot.queryByText("Reply body"), null);
+    fireEvent.click(card.querySelector("button[aria-expanded]"));
+    assert.ok(slot.getByText("Original body"));
+    assert.ok(slot.getByText("Reply body"));
     fireEvent.click(dropdown.querySelector("summary"));
     assert.equal(dropdown.open, true);
     assert.ok(slot.getByText("Discussion body"));
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test("thread edit actions share the author header and unsaved drafts survive collapse", async () => {
+  const ownThread = thread("own-thread", [comment("own", "me", "Original thread body"), comment("own-reply", "me", "Own reply body", "own")]);
+  const saves = [];
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => ({ ...detail, threads: [ownThread] }), review_seen: () => ({ ok: true }),
+    review_conversation: () => ({ comments: [], reviews: [], events: [], fetchedAt: 0 }),
+    review_description: () => ({ body: review.body, canEdit: false }),
+    review_edit_body: (input) => { saves.push(input); return { body: input.body }; },
+    review_threads_refresh: () => ({ threads: [ownThread] }),
+  } });
+  try {
+    fireEvent.click(await slot.findByRole("button", { name: "Conversation" }));
+    const card = await slot.findByRole("article", { name: "Review thread by me" });
+    assert.equal(card.querySelectorAll("button[aria-expanded], summary").length, 1);
+    const edit = slot.getAllByRole("button", { name: "Edit comment by me" })[0];
+    assert.equal(edit.closest("header"), card.querySelector("header"));
+    assert.ok(edit.closest("header").textContent.includes("Resolve"));
+    assert.equal(card.querySelectorAll("header").length, 2, "one header per comment, without a repeated root author");
+    fireEvent.click(edit);
+    fireEvent.change(slot.getByRole("textbox", { name: "comment by me" }), { target: { value: "Unsaved draft" } });
+    const toggle = card.querySelector("button[aria-expanded]");
+    fireEvent.click(toggle);
+    assert.equal(slot.queryByRole("textbox", { name: "comment by me" }), null);
+    fireEvent.click(toggle);
+    assert.equal(slot.getByRole("textbox", { name: "comment by me" }).value, "Unsaved draft");
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Save" })); });
+    assert.equal(saves[0].body, "Unsaved draft");
+    assert.equal(saves[0].expectedBody, "Original thread body");
   } finally { slot.lifecycle.unmount(); }
 });
 
