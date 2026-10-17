@@ -27,6 +27,8 @@ Changes, Conversation, and Commits use a single main workspace, one view at a ti
 
 Requires an authenticated `gh` CLI on the machine holding the repository. Review Desk finds a local checkout or clones one, then creates a detached worktree for reading the diff.
 
+Manually opened PRs are saved and remain listed while open, including your own PRs missing from the authored discovery snapshot. They share the regular status scans, diff prefetch and persistent component caches. Closed or merged PRs are hidden after their status updates, and closed PRs can reappear when reopened. Explicit removal is remembered.
+
 Review Desk currently uses polling rather than GitHub webhooks. Webhook delivery requires a reachable receiver and repository, organization, or GitHub App configuration. Repository work is serialized so background fetches do not compete over shared Git refs. The plugin never runs global worktree pruning on shared repositories.
 
 Background polling continues while the page is closed. Batched PR status and head/base scans run every 15 seconds. A revision change immediately fetches and caches the new diff without waiting for the minute prefetch sweep, and publishes it before slower history requests finish. Authored PR discovery and tracked stack membership run every minute. Visible pages refresh from BB every 15 seconds, keeping the active PR's details and merge readiness on a one-minute freshness window. Inactive full details use a ten-minute safety sweep. Grid prefetch reads cached page data without marking those PRs active. Patches and file content at fixed commit SHAs use local Git and persistent caching.

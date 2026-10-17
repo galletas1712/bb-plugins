@@ -1552,7 +1552,7 @@ export default async function plugin(bb: BbPluginApi) {
             updatedAt: Date.parse(pr.updatedAt), stack: null,
           };
         }),
-        ...rows.filter((row) => prIsOpen(row.state) && cachedPrStack(row.owner, row.repo, row.number) === null && !owned.has(prKey(row)) && row.author !== own?.login).map((row) => ({
+        ...rows.filter((row) => prIsOpen(row.state) && cachedPrStack(row.owner, row.repo, row.number) === null && !owned.has(prKey(row))).map((row) => ({
           id: row.id,
           owner: row.owner,
           repo: row.repo,

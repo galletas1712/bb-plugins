@@ -429,9 +429,56 @@ test("all authored open PRs appear lazily, deduplicate stacks and local reviews,
     await poll();
     const next = await f.list();
     assert.ok(next.some((pr) => pr.number === 7));
-    assert.equal(next.some((pr) => pr.number === 4), false);
+    assert.equal(next.find((pr) => pr.number === 4)?.id, opened.id, "discovery omission does not close a saved PR");
+    f.setPr(4, { state: "CLOSED", author: { login: "viewer" } });
+    const scan = f.harness.behavior.runService("scan-pr-status");
+    f.onBatch(() => scan.controller.abort()); await scan.done; f.onBatch(undefined);
+    assert.equal((await f.list()).some((pr) => pr.number === 4), false);
     assert.equal(f.bb.storage.database().prepare<[string], { n: number }>("SELECT COUNT(*) AS n FROM pending WHERE review_id = ?").get(opened.id)?.n, 1);
   } finally { Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("a manually added own PR stays cached and refreshed without discovery membership", async () => {
+  const f = await fixture(); const original = Date.now; let clock = original(); Date.now = () => clock;
+  let prefetch: ReturnType<typeof f.harness.behavior.runService> | undefined;
+  const scan = async () => {
+    clock += 16_000;
+    const service = f.harness.behavior.runService("scan-pr-status");
+    f.onBatch(() => service.controller.abort()); await service.done; f.onBatch(undefined);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+  try {
+    f.setStack(null); f.setOwn({ login: "viewer", prs: [] }); await f.list();
+    f.setPr(4, { author: { login: "viewer" } });
+    f.setFiles([{ path: "a.md", oldPath: null, status: "modified", additions: 1, deletions: 1, binary: false }]);
+    const review = await f.open(4);
+    assert.equal((await f.list()).find((pr) => pr.number === 4)?.id, review.id, "manual open immediately appears despite the empty discovery cache");
+    await f.reload();
+    assert.equal((await f.list()).find((pr) => pr.number === 4)?.id, review.id);
+    clock += 61_000;
+    f.onRead((method) => { if (method === "git_patch") prefetch!.controller.abort(); return undefined; });
+    prefetch = f.harness.behavior.runService("sync-open-reviews"); await prefetch.done; f.onRead(undefined);
+    const calls = f.calls.length;
+    const cached = await f.rpc("reviews_get", { reviewId: review.id, path: "a.md", prefetch: true }) as any;
+    assert.ok(cached.mergeOptions); assert.ok(cached.description); assert.ok(cached.conversation); assert.ok(cached.initialPatch);
+    assert.equal(f.calls.length, calls, "all resources hydrate from the same cache without another host call");
+    await f.rpc("pending_add", { reviewId: review.id, path: "a.md", line: 1, side: "RIGHT", body: "Keep through close and reopen" });
+    const pushed = { author: { login: "viewer" }, headRefOid: "pushed-head", title: "Updated manual PR", reviewDecision: "APPROVED", updatedAt: "2026-10-17T00:00:00Z" };
+    f.setPr(4, pushed);
+    f.setFiles([{ ...cached.files[0], additions: 9 }]); await scan();
+    const updated = (await f.list()).find((pr) => pr.number === 4)!;
+    assert.equal(updated.title, pushed.title); assert.equal(updated.headSha, pushed.headRefOid);
+    assert.equal(updated.reviewDecision, "APPROVED"); assert.equal(updated.additions, 9);
+    const diff = await f.rpc("reviews_get", { reviewId: review.id, prefetch: true }) as any;
+    assert.ok(diff.initialPatch.patch.includes("pushed-head"), "revision scan warms the manual PR's changed diff");
+    f.setPr(4, { ...pushed, state: "CLOSED" }); await scan();
+    assert.equal((await f.list()).some((pr) => pr.number === 4), false);
+    f.setPr(4, { ...pushed, state: "OPEN" }); await scan();
+    assert.equal((await f.list()).find((pr) => pr.number === 4)?.id, review.id);
+    assert.equal((await f.rpc("reviews_get", { reviewId: review.id, prefetch: true }) as any).pending.length, 1);
+    f.setPr(4, { ...pushed, state: "MERGED" }); await scan();
+    assert.equal((await f.list()).some((pr) => pr.number === 4), false);
+  } finally { prefetch?.controller.abort(); Date.now = original; await f.harness.lifecycle.dispose(); }
 });
 
 test("automatic discovery respects removal of unopened PRs and entire stacks, and retains data on failure", async () => {
