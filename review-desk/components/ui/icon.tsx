@@ -7,6 +7,7 @@ import {
   ArrowUp01Icon,
   BubbleChatIcon,
   Cancel01Icon,
+  Copy01Icon,
   Delete02Icon,
   Folder02Icon,
   FolderIcon,
@@ -28,6 +29,7 @@ import {
 
 const icons = {
   Check: Tick02Icon,
+  Copy: Copy01Icon,
   ChevronDown: ArrowDown01Icon,
   ChevronLeft: ArrowLeft01Icon,
   ChevronRight: ArrowRight01Icon,

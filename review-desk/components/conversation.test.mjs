@@ -436,6 +436,50 @@ test("Recent uses one status per PR, only offers stack-level removal, and opens 
   } finally { slot.lifecycle.unmount(); window.confirm = previousConfirm; }
 });
 
+test("front-page buttons copy GitHub links, mark unopened layers ready and confirm closing without navigation", async () => {
+  let reviews = summaries.filter((pr) => pr.state === "OPEN");
+  const actions = []; const copied = [];
+  const previousConfirm = window.confirm;
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: async (url) => { copied.push(url); } } } });
+  let confirm = false;
+  window.confirm = () => confirm;
+  let release;
+  const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: {
+    reviews_list: () => ({ reviews }),
+    pr_action: async (input) => {
+      actions.push(input);
+      if (input.action === "ready") await new Promise((resolve) => { release = resolve; });
+      reviews = input.action === "close" ? reviews.filter((pr) => pr.number !== input.number) : reviews.map((pr) => pr.number === input.number ? { ...pr, isDraft: false } : pr);
+      return { ok: true };
+    },
+  } });
+  try {
+    await slot.findByRole("button", { name: "Copy GitHub link for #4" });
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Copy GitHub link for #4" })); });
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Copy GitHub link for #3" })); });
+    assert.deepEqual(copied, ["https://github.com/o/r/pull/4", "https://github.com/o/r/pull/3"]);
+    assert.equal(slot.queryByRole("button", { name: "Mark #4 ready for review" }), null);
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Mark #3 ready for review" })); });
+    assert.equal(slot.getByRole("button", { name: "Mark #3 ready for review" }).disabled, true);
+    assert.equal(slot.getByRole("button", { name: "Close PR #3" }).disabled, true);
+    await act(async () => { release(); });
+    await waitFor(() => assert.ok(slot.queryByRole("button", { name: "Mark #3 ready for review" }) === null));
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Close PR #3" })); });
+    assert.equal(actions.length, 1, "cancelled close sends no mutation");
+    confirm = true;
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Close PR #3" })); });
+    await waitFor(() => assert.ok(slot.queryByText("Draft layer") === null));
+    assert.deepEqual(actions, [{ owner: "o", repo: "r", number: 3, action: "ready" }, { owner: "o", repo: "r", number: 3, action: "close" }]);
+    assert.equal(slot.inspection.navigateCalls.length, 0);
+    assert.equal(slot.inspection.rpcCalls.some((call) => call.method === "reviews_open"), false);
+  } finally {
+    release?.(); slot.lifecycle.unmount(); window.confirm = previousConfirm;
+    if (previousNavigator) Object.defineProperty(globalThis, "navigator", previousNavigator);
+    else delete globalThis.navigator;
+  }
+});
+
 test("stack checkmarks use full-stack readiness rather than the most recently active approved PR", async () => {
   const prs = [
     ...summaries.slice(0, 2).map((pr) => ({ ...pr, state: "OPEN", reviewDecision: pr.number === 1 ? "APPROVED" : "REVIEW_REQUIRED", stack: { ...pr.stack, size: 2, mergeReady: false } })),
@@ -659,7 +703,7 @@ test("repository groups sort by latest PR activity and nest stacks independently
     assert.ok(slot.getAllByLabelText("Diff: 40 additions, 8 deletions").length > 0);
     fireEvent.click(stack.querySelector("summary"));
     assert.equal(stack.open, true);
-    const layers = [...stack.querySelectorAll("ul button")];
+    const layers = [...stack.querySelectorAll("ul > li")].map((layer) => layer.querySelector("button"));
     assert.ok(layers[0].textContent.includes("Stack bottom"));
     assert.ok(layers[1].textContent.includes("Stack top"));
     assert.equal(stack.parentElement.querySelectorAll('button[aria-label="Remove stack reviews"]').length, 1);

@@ -166,6 +166,7 @@ export const prStatusesSchema = z.object({ prs: z.array(ghPrStatusSchema.extend(
 export type PrStatus = z.infer<typeof ghPrStatusSchema>;
 
 export const hostContract = defineRpcContract({
+  gh_close: { input: prRefSchema, output: z.object({ ok: z.literal(true) }) },
   gh_merge_options: { input: prRefSchema.extend({ freshPolicy: z.boolean().optional() }), output: mergeOptionsSchema },
   gh_merge: { input: prRefSchema.extend(mergeInputSchema.shape), output: mergeResultSchema },
   gh_merge_result: { input: prRefSchema.extend({ requestId: z.string().uuid() }), output: mergeResultSchema },

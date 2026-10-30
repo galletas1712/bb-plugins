@@ -176,6 +176,10 @@ async function ghPrStatus(owner: string, repo: string, number: number): Promise<
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
+    async gh_close({ owner, repo, number }) {
+      await run("gh", ["pr", "close", String(number), "--repo", `${owner}/${repo}`]);
+      return { ok: true as const };
+    },
     gh_merge_options(input) { return readMergeOptions(run, input, input.freshPolicy); },
     gh_merge(input) { return mergePr(run, input); },
     gh_merge_result(input) { return readMergeResult(run, input); },

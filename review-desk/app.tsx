@@ -22,6 +22,7 @@ import type { ChangedFile } from "./host-contract";
 import type { GhThread } from "./host-contract";
 import { EditableBody } from "./components/editable-body";
 import { MergePr } from "./components/merge-pr";
+import { PrActions } from "./components/pr-actions";
 import { DiffViewer, type MarkdownView, type SourceTarget } from "./components/diff-viewer";
 import { diffStats } from "./lib/diff-stats";
 import { orderThreadComments } from "./lib/thread-comments";
@@ -1228,6 +1229,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           <Button variant="outline" size="sm" aria-label={`Submit review${pending.length > 0 ? " (" + pending.length + ")" : ""}`} onClick={() => { setReviewOpened(true); setReviewOpen(true); }}>Review{pending.length > 0 ? " (" + pending.length + ")" : ""}</Button>
           <MergePr key={reviewId} review={review} compact={narrowHeader} />
+          <PrActions pr={review} compact onClosed={() => navigate.toPluginPanel(PANEL_PATH)} />
           <details className="relative">
             <summary className="flex cursor-pointer list-none rounded p-2 hover:bg-state-hover" aria-label="Review actions"><Icon name="MoreHorizontal" className="size-4" /></summary>
             <div className="absolute right-0 z-40 mt-2 w-64 rounded-md border border-border bg-card p-1 text-xs shadow-lg">
@@ -1812,6 +1814,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                                 </button>
                                 <RemoveReviewButton label="Remove review" onClick={() => void drop(r)} />
                               </div>
+                              <div className="border-t border-border/60 px-2 py-1"><PrActions pr={r} /></div>
                             </li>
                           );
                         }
@@ -1852,6 +1855,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                                         <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
                                       </button>
                                     </div>
+                                    <div className="px-2 pb-1"><PrActions pr={r} /></div>
                                   </li>
                                 ))}
                               </ul>
