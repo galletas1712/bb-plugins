@@ -8,7 +8,7 @@ import { Icon } from "./ui/icon";
 
 type Pr = Pick<ReviewSummary, "id" | "owner" | "repo" | "number" | "state" | "isDraft"> & { url?: string };
 
-export function PrActions({ pr, compact = false, onClosed }: { pr: Pr; compact?: boolean; onClosed?(): void }) {
+export function PrActions({ pr, onClosed }: { pr: Pr; onClosed?(): void }) {
   const rpc = useRpc<typeof rpcContract>();
   const [busy, setBusy] = useState(false);
   const copy = async () => {
@@ -29,17 +29,17 @@ export function PrActions({ pr, compact = false, onClosed }: { pr: Pr; compact?:
     } catch (cause) { toast.error(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   };
-  const buttonClass = compact ? "h-7 w-7 shrink-0 px-0" : "h-7 gap-1.5 px-2 text-xs";
-  return <div role="group" aria-label={`Pull request actions for #${pr.number}`} className="flex flex-wrap items-center gap-1">
+  const buttonClass = "h-7 w-7 shrink-0 px-0 text-muted-foreground";
+  return <div role="group" aria-label={`Pull request actions for #${pr.number}`} className="flex shrink-0 items-center gap-1">
     <Button type="button" variant="ghost" size="sm" className={buttonClass} aria-label={`Copy GitHub link for #${pr.number}`} title="Copy GitHub link" onClick={() => void copy()}>
-      <Icon name="Copy" className="size-3.5" />{!compact ? "Copy link" : null}
+      <Icon name="Copy" className="size-3.5" />
     </Button>
     {pr.state === "OPEN" ? <>
       {pr.isDraft ? <Button type="button" variant="ghost" size="sm" className={buttonClass} disabled={busy} aria-label={`Mark #${pr.number} ready for review`} title="Mark ready for review" onClick={() => void act("ready")}>
-        <Icon name="GitPullRequestArrow" className="size-3.5" />{!compact ? "Mark ready" : null}
+        <Icon name="GitPullRequestArrow" className="size-3.5" />
       </Button> : null}
       <Button type="button" variant="ghost" size="sm" className={`${buttonClass} text-muted-foreground hover:text-destructive`} disabled={busy} aria-label={`Close PR #${pr.number}`} title="Close PR" onClick={() => void act("close")}>
-        <Icon name="GitPullRequestClosed" className="size-3.5" />{!compact ? "Close PR" : null}
+        <Icon name="GitPullRequestClosed" className="size-3.5" />
       </Button>
     </> : null}
   </div>;

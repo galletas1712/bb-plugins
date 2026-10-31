@@ -112,12 +112,12 @@ function timeAgo(iso: string | number): string {
   if (!Number.isFinite(ms)) return "";
   const diff = Math.max(0, Date.now() - ms);
   const m = Math.round(diff / 60_000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
+  if (m < 1) return "now";
+  if (m < 60) return `${m} min`;
   const h = Math.round(m / 60);
-  if (h < 48) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  if (h < 48) return `${h} hr`;
   const d = Math.round(h / 24);
-  return `${d} day${d === 1 ? "" : "s"} ago`;
+  return `${d} d`;
 }
 
 function shortSha(sha: string): string {
@@ -1229,7 +1229,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           <Button variant="outline" size="sm" aria-label={`Submit review${pending.length > 0 ? " (" + pending.length + ")" : ""}`} onClick={() => { setReviewOpened(true); setReviewOpen(true); }}>Review{pending.length > 0 ? " (" + pending.length + ")" : ""}</Button>
           <MergePr key={reviewId} review={review} compact={narrowHeader} />
-          <PrActions pr={review} compact onClosed={() => navigate.toPluginPanel(PANEL_PATH)} />
+          <PrActions pr={review} onClosed={() => navigate.toPluginPanel(PANEL_PATH)} />
           <details className="relative">
             <summary className="flex cursor-pointer list-none rounded p-2 hover:bg-state-hover" aria-label="Review actions"><Icon name="MoreHorizontal" className="size-4" /></summary>
             <div className="absolute right-0 z-40 mt-2 w-64 rounded-md border border-border bg-card p-1 text-xs shadow-lg">
@@ -1812,9 +1812,9 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                                   </span>
                                   <span className="shrink-0 text-xs text-muted-foreground">{timeAgo(r.updatedAt)}</span>
                                 </button>
+                                <PrActions pr={r} />
                                 <RemoveReviewButton label="Remove review" onClick={() => void drop(r)} />
                               </div>
-                              <div className="border-t border-border/60 px-2 py-1"><PrActions pr={r} /></div>
                             </li>
                           );
                         }
@@ -1854,8 +1854,8 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                                         <PrMark state={r.state} reviewDecision={r.reviewDecision} isDraft={r.isDraft} />
                                         <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
                                       </button>
+                                      <div className="mr-1"><PrActions pr={r} /></div>
                                     </div>
-                                    <div className="px-2 pb-1"><PrActions pr={r} /></div>
                                   </li>
                                 ))}
                               </ul>
