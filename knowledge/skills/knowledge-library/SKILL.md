@@ -18,8 +18,8 @@ request. Also honor explicit visual requests. Save and present it before the fin
 reply instead of merely offering to make one. Keep mundane queries, routine tasks
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
-For explanations, make the HTML a complete answer. Show one concrete idea at a
-time, with one interactive diagram and a caption of two or three short sentences.
+For explanations, cover every requested topic with interactive visuals in HTML.
+Show one concrete idea at a time, with a diagram and two or three short sentences.
 Let controls change inputs or advance events, with visible consequences. Use
 arrows only for real relationships. Keep supporting prose, code, and reference
 data collapsed by default. Check every selectable view before saving.
