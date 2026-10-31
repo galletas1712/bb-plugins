@@ -10,6 +10,66 @@ someone would otherwise have to re-derive, even when no files or experiments wer
 produced. Skip routine edits, obvious facts, and ordinary successful checks.
 Respect the user's restrictions on saving information.
 
+## Create or reuse an explainer
+
+Create or reuse a saved explainer for substantial explanations of system behavior,
+architecture, tradeoffs, or experimental results, even without an explicit visual
+request. Also honor explicit visual requests. Save and present it before the final
+reply instead of merely offering to make one. Keep mundane queries, routine tasks
+and updates, and simple answers in chat. Saving findings does not require HTML.
+
+Design a visual teaching flow from the saved findings. The default view should
+show one visual and a few short sentences, with deeper concepts and technical
+detail opened through steps or selection. Explain mechanisms and relationships
+with sequences, diagrams, before/after views, or charts as appropriate. Use simple,
+precise terms. Avoid long introductions, upfront glossaries, and scrolling reports.
+Use tables only for compact reference or comparison. Return only the opener and
+one short paragraph in chat.
+
+Assume the reader may know the ideas but is unfamiliar with the codebase. Use
+concrete, consistent terms and short sentences. Define technical terms,
+abbreviations, and symbols beside their first use, including units where relevant.
+Explain what a component does before naming its code. Introduce only the terms
+needed for the current concept, including in diagrams. Connect selective, short,
+annotated code examples to the visual, using pseudocode for architectural behavior.
+
+Recall reusable HTML first. For new visuals, author self-contained UTF-8 HTML or
+HTM, at most 5 MiB, with inline CSS, JavaScript, and assets. Avoid companion files
+and relative imports. Render diagrams as inline SVG with short, precise labels
+and single-sentence captions. Split complex diagrams rather than using vague
+shorthand to fit more information. Use
+responsive layouts and BB variables such as `var(--background)` and
+`var(--foreground)`. With a browser, check rendering at 360px and in dark mode,
+interactions, and console errors. Otherwise inspect the file and disclose that
+rendering was not verified.
+
+Save and explicitly present visual explanations, charts, diagrams, mockups, and
+reports in the calling thread's Explainers panel rather than embedding them in
+chat. For an existing record:
+
+```js
+knowledge_save({
+  id: "request-handoff",
+  artifacts: [{
+    name: "overview.html",
+    path: "explainers/overview.html",
+    source: "thread-storage"
+  }],
+  present: [{ name: "overview.html", title: "How request handoff works" }]
+})
+```
+
+To reuse saved HTML, omit artifacts. Choose a descriptive presentation title of
+at most 80 characters and reuse the artifact name when revising an explainer.
+Add a sentence describing the visual to the record body so recall can find it.
+`threadId` selects the source, never the destination for `present`.
+
+Check `presented[].attached`. If false, retry once with only `id` and `present`,
+then report any remaining error. Always include the returned `reference` in the
+reply. Never put it in a record body or link a scratch file as the finished
+explainer.
+
+
 ## Recall
 
 Search with `knowledge_recall` or `bb knowledge search` when prior context could
@@ -94,64 +154,6 @@ Use `knowledge_delete` or `bb knowledge delete <id>` only for records with no
 lasting value, such as review notes after their findings have been reconciled and
 the PR merges. Deletion moves the record and evidence to recoverable library trash.
 
-## Create or reuse an explainer
-
-Create or reuse a saved explainer for substantial explanations of system behavior,
-architecture, tradeoffs, or experimental results, even without an explicit visual
-request. Also honor explicit visual requests. Save and present it before the final
-reply instead of merely offering to make one. Keep mundane queries, routine tasks
-and updates, and simple answers in chat. Saving findings does not require HTML.
-
-Lead with a visual overview, then explain one concept at a time. Pair each visual
-with a short explanation in simple, precise terms. Show mechanisms and
-relationships through interaction, using sequences, diagrams, before/after views,
-or charts as appropriate. Reveal deeper detail through steps or selections.
-Avoid long introductions, upfront glossaries, and reports split into cards.
-Use tables only for compact reference or comparison. Keep the chat reply to a
-takeaway and opener.
-
-Assume the reader may know the ideas but is unfamiliar with the codebase. Use
-concrete, consistent terms and short sentences. Define technical terms,
-abbreviations, and symbols beside their first use, including units where relevant.
-Explain what a component does before naming its code. Introduce only the terms
-needed for the current concept, including in diagrams. Connect selective, short,
-annotated code examples to the visual, using pseudocode for architectural behavior.
-
-Recall reusable HTML first. For new visuals, author self-contained UTF-8 HTML or
-HTM, at most 5 MiB, with inline CSS, JavaScript, and assets. Avoid companion files
-and relative imports. Render diagrams as inline SVG with short, precise labels
-and single-sentence captions. Split complex diagrams rather than using vague
-shorthand to fit more information. Use
-responsive layouts and BB variables such as `var(--background)` and
-`var(--foreground)`. With a browser, check rendering at 360px and in dark mode,
-interactions, and console errors. Otherwise inspect the file and disclose that
-rendering was not verified.
-
-Save and explicitly present visual explanations, charts, diagrams, mockups, and
-reports in the calling thread's Explainers panel rather than embedding them in
-chat. For an existing record:
-
-```js
-knowledge_save({
-  id: "request-handoff",
-  artifacts: [{
-    name: "overview.html",
-    path: "explainers/overview.html",
-    source: "thread-storage"
-  }],
-  present: [{ name: "overview.html", title: "How request handoff works" }]
-})
-```
-
-To reuse saved HTML, omit artifacts. Choose a descriptive presentation title of
-at most 80 characters and reuse the artifact name when revising an explainer.
-Add a sentence describing the visual to the record body so recall can find it.
-`threadId` selects the source, never the destination for `present`.
-
-Check `presented[].attached`. If false, retry once with only `id` and `present`,
-then report any remaining error. Always include the returned `reference` in the
-reply. Never put it in a record body or link a scratch file as the finished
-explainer.
 
 If Knowledge is unavailable, keep necessary evidence in the project's established
 location, mention the gap, and continue the task.
