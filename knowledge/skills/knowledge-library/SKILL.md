@@ -139,12 +139,21 @@ JSON metrics. Read its `--help` before use.
 
 ## Create or reuse an explainer
 
-Create an explainer for an explicit visual request or when a diagram, comparison,
-or interactive view would substantially clarify the answer. Keep routine updates
-and simple answers in chat. Saving useful findings does not require creating HTML.
+Proactively create or reuse an explainer when the user requests a visual, or when
+relationships, behavior, tradeoffs, or results would be substantially clearer
+visually. Keep routine updates, simple facts, and short answers in chat. Saving
+useful findings does not require creating HTML.
+
+Make explainers predominantly visual and interactive, with short supporting prose.
+Let the reader step through a process, change an input, compare alternatives, or
+select a component to reveal details when that helps explain the subject. Use
+diagrams and charts to carry the explanation, with short labels and captions.
+Avoid walls of text, including long reports split into cards. Keep the chat reply
+to a brief takeaway and the explainer reference, using compact tables when helpful.
 
 Use `knowledge_save` with `present` to make saved HTML available in the calling
-thread's Explainers panel.
+thread's Explainers panel. Present visual explanations, charts, diagrams, mockups,
+and reports there as saved HTML rather than embedding them in chat.
 
 - Recall a suitable saved explainer first. Reuse it with
   `knowledge_save({ id: "request-handoff", present: [{ name: "overview.html", title: "How request handoff works" }] })`.
