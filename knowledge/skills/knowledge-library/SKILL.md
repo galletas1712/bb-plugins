@@ -151,6 +151,8 @@ diagrams and charts to carry the explanation, with short labels and captions.
 Avoid walls of text, including long reports split into cards. Keep the chat reply
 to a brief takeaway and the explainer reference, using compact tables when helpful.
 
+Assume the reader may know the underlying ideas but is unfamiliar with the
+codebase. Connect implementation details to those ideas as you introduce them.
 Use precise, self-explanatory terms consistently rather than vague shorthand.
 Define technical terms and abbreviations at first use. Explain what each symbol
 represents, including units for quantities where relevant. Introduce methods,
