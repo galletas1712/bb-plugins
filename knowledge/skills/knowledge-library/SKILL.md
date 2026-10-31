@@ -117,12 +117,13 @@ expansion away.
    part. Draw the actual components, state, or data rather than boxes in an
    outline. Let controls change inputs or advance events with visible consequences.
    Use arrows only for real relationships.
-2. Mechanism: expanding a part shows how it works, as a sequence, state change,
-   before/after view, or chart, with two or three sentences.
+2. Mechanism: expanding a part opens with its own visual, such as a sequence,
+   state change, before/after view, or chart, plus two or three sentences. Every
+   layer leads with a visual, not prose.
 3. Detail: expanding a mechanism shows the exact names, formulas, numbers, dates,
-   conditions, and each failure with its cause and fix. Give each idea its own
-   expandable item instead of one dense paragraph, and keep expanding while a
-   section still hides a distinct idea.
+   conditions, and each failure with its cause and fix. Write it as short items,
+   one fact per line, never a paragraph over three sentences. Give each idea its
+   own expandable item and keep expanding while a section still hides one.
 
 The deepest layer is complete: every result, limit, caveat, and open question that
 matters in the source records is reachable, and upper layers never contradict it.
@@ -132,8 +133,7 @@ reference data inside the detail layer.
 Write simply and precisely for someone who may know the ideas but not the
 codebase. Use plain role names in diagrams. Explain roles before code names, and
 define terms and symbols where first used. Where exact implementation matters,
-include a brief annotated snippet in the detail layer. Use pseudocode for
-architecture.
+add a brief annotated snippet to the detail item. Use pseudocode for architecture.
 
 Recall reusable HTML first. Author new visuals as self-contained UTF-8 HTML under
 5 MiB with inline CSS, JavaScript, and assets, and no companion files or relative
