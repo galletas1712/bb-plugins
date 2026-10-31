@@ -91,9 +91,9 @@ Scratch files need no preservation. Use safe basenames for artifact names. List
 each name once in `artifacts`. Reusing a name replaces its current copy.
 Capture limits are 16 MiB per file and 64 MiB total.
 
-Provenance defaults to the calling thread's latest event. Set `threadId` for
-another source thread or when saving outside a thread, and `sourceSequence` only
-when an earlier point matters. The source sets project identity and source bytes.
+A new record's provenance is the calling thread's latest event, and rewrites keep
+it. Set `threadId` to cite another source thread or when saving outside a thread,
+and `sourceSequence` only when an earlier point matters. The source sets project identity and source bytes.
 Use `global: true` for cross-project knowledge. Cite supporting threads in the
 body when combining sources.
 
@@ -112,29 +112,34 @@ and updates, and simple answers in chat. Saving findings does not require HTML.
 An explainer teaches, it does not list. Organize it around the problem: what was
 being attempted, why the obvious approach fails, how the solution removes that
 obstacle, what evidence shows it works, and which pitfalls were hit, each with
-its cause and fix. Show the failing case next to the fixed one wherever possible.
+its cause and fix. Split a substantial subject into chapters along that arc, with
+a chapter navigator, rather than one long page.
 
-Build it as layers the reader expands, each more precise than the one above.
+Explain with many diagrams, not one. Give each mechanism, failure, and fix its
+own drawn diagram in inline SVG or CSS, and make most of them interactive:
+stepping through a sequence, toggling between the failing and fixed case, or
+changing an input. Show the failing case next to the fixed one wherever possible.
+
+Diagrams must be visual. Never put sentences or strings of phrases inside one,
+such as "Cache warm. Two retries left. Lock held by worker 3." A label names one
+component, value, or state in a few words. Show conditions with shape, color,
+position, and arrows, for example an idle worker drawn greyed out. Give each
+diagram at most a one-sentence caption. Do not use vague terms to shrink a
+diagram. Split it into more diagrams when there is more to show. Draw the actual
+components, state, or data rather than boxes in an outline, and use arrows only
+for real relationships.
+
+Within each chapter, layer the detail so the reader expands into precision.
 Simplifying at the top is acceptable only because the detail is one expansion
-away.
-
-1. Overview: an interactive visual of the problem and its solution with one short
-   claim per part. Draw the actual components, state, or data rather than boxes
-   in an outline. Let controls reproduce the failure and the fix, with visible
-   consequences. Use arrows only for real relationships.
-2. Mechanism: expanding a part opens with its own drawn diagram, such as a
-   sequence, state change, before/after view, or chart, in inline SVG or CSS,
-   followed by two or three sentences. A list is not a visual.
-3. Detail: expanding a mechanism shows the exact names, formulas, numbers, dates,
-   conditions, and each failure with its cause and fix. Write it as short items,
-   one fact per line, never a paragraph over three sentences. Give each idea its
-   own expandable item and keep expanding while a section still hides one.
+away. A chapter opens with its diagrams and two or three sentences. Expandable
+items below hold the exact names, formulas, numbers, dates, conditions, and each
+failure with its cause and fix, as short items with one fact per line. Give each
+idea its own item and keep expanding while a section still hides one.
 
 The deepest layer is complete: every result, limit, caveat, and open question that
 matters in the source records is reachable, and upper layers never contradict it.
-Before saving, check coverage against the records and confirm every mechanism
-section contains a diagram. Use tables only for compact reference data inside
-the detail layer.
+Before saving, check coverage against the records and check that no diagram holds
+a sentence. Use tables only for compact reference data inside the detail layer.
 
 Write simply and precisely for someone who may know the ideas but not the
 codebase. Use plain role names in diagrams. Explain roles before code names, and
@@ -143,11 +148,10 @@ add a brief annotated snippet to the detail item. Use pseudocode for architectur
 
 Recall reusable HTML first. Author new visuals as self-contained UTF-8 HTML under
 5 MiB with inline CSS, JavaScript, and assets, and no companion files or relative
-imports. Use HTML/CSS or inline SVG for diagrams, with short, precise labels and
-single-sentence captions. Reflow or split diagrams at narrow widths
-instead of shrinking their labels. Use BB variables such as `var(--background)` and
+imports. Reflow or split diagrams at narrow widths instead of shrinking their
+labels. Use BB variables such as `var(--background)` and
 `var(--foreground)`. With a browser, check rendering at 360px and in dark mode,
-every expandable layer and control, and console errors. Otherwise inspect the file
+every chapter, expandable layer, and control, and console errors. Otherwise inspect the file
 and disclose that rendering was not verified.
 
 Present visuals, charts, diagrams, mockups, and reports in the calling thread's

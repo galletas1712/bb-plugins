@@ -122,6 +122,23 @@ describe("saved thread explainers", () => {
     );
   });
 
+  it("keeps the original source when another thread rewrites the text", async () => {
+    await save(capture, "origin");
+    const original = library.read("handoff").source;
+    expect(original.threadId).toBe("origin");
+    const rewritten = await save(
+      { id: "handoff", title: "Handoff", body: "Revised notes" },
+      "maintainer",
+    );
+    expect(rewritten.source).toEqual(original);
+    expect(library.read("handoff").body).toBe("Revised notes");
+    const cited = await save(
+      { id: "handoff", title: "Handoff", body: "Cited", threadId: "cited" },
+      "maintainer",
+    );
+    expect(cited.source).toEqual({ threadId: "cited", sequence: 42 });
+  });
+
   it("keeps scope, provenance and body mtime for attachment-only saves", async () => {
     await save({ ...capture, global: true });
     const original = library.read("handoff");

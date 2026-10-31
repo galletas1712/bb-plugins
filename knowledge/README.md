@@ -84,8 +84,10 @@ button returns to the source thread without writing metadata or opening a raw fi
 of artifact bytes and new record text, never the presentation destination.
 Attachment-only saves preserve record provenance, scope and body mtime. Pure
 presentation writes neither the body nor manifest. New records require title and
-body. Full text saves cite the source thread's latest event unless a valid
-`sourceSequence` is given. Use `global: true` for cross-project records.
+body. A new record cites the source thread's latest event unless a valid
+`sourceSequence` is given. Rewriting an existing record's text keeps its original
+source unless `threadId` or `sourceSequence` cites a new one. Use `global: true`
+for cross-project records.
 
 ## Storage and reading
 

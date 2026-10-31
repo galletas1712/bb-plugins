@@ -51,16 +51,23 @@ export async function saveRecord(
   if (!threadId)
     throw new Error("Provide threadId when saving outside a BB thread");
   const thread = await bb.sdk.threads.get({ threadId });
-  const sequence =
-    input.title !== undefined
-      ? ((
-          await bb.sdk.threads.events.list({
-            threadId,
-            order: "desc",
-            limit: "1",
-          })
-        )[0]?.seq ?? 0)
-      : 0;
+  // A record keeps the thread that produced it. Rewriting its text from
+  // another thread is maintenance, so only a new record or an explicit
+  // threadId or sourceSequence sets the source.
+  const cite =
+    input.title !== undefined &&
+    (!previous ||
+      input.threadId !== undefined ||
+      input.sourceSequence !== undefined);
+  const sequence = cite
+    ? ((
+        await bb.sdk.threads.events.list({
+          threadId,
+          order: "desc",
+          limit: "1",
+        })
+      )[0]?.seq ?? 0)
+    : 0;
   if (input.sourceSequence !== undefined && input.sourceSequence > sequence)
     throw new Error("Source sequence is ahead of the thread history");
   const evidence = [];
@@ -118,17 +125,9 @@ export async function saveRecord(
       sourcePath: filePath,
     });
   }
-  // Metadata-only saves keep the original source: when the caller does not
-  // cite a thread and the content is unchanged, the record still originates
-  // from the thread that produced the content, not from the maintainer.
-  let source = { threadId, sequence: input.sourceSequence ?? sequence };
-  if (
-    previous &&
-    input.threadId === undefined &&
-    previous.title === input.title &&
-    previous.body === input.body
-  )
-    source = previous.source;
+  const source = cite
+    ? { threadId, sequence: input.sourceSequence ?? sequence }
+    : previous!.source;
   const record = library.save(
     input,
     previous ? previous.projectId : input.global ? null : thread.projectId,
