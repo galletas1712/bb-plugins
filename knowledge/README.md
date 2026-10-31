@@ -29,6 +29,9 @@ Back up the library. Uninstalling preserves library files.
 The [knowledge-library skill](skills/knowledge-library/SKILL.md) guides recall,
 maintenance, and visual authoring. Knowledge contributes a short instruction for
 publishing saved visuals in Explainers.
+Agents create or reuse an explainer for a requested visual or when a visual would
+substantially clarify the answer. Routine updates and simple answers stay in chat.
+Preserving useful Knowledge does not require creating an explainer.
 New instructions take effect when a provider session is next constructed.
 For an Explainers-only setup, disable the competing inline-vis plugin:
 

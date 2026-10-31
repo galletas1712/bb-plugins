@@ -139,6 +139,10 @@ JSON metrics. Read its `--help` before use.
 
 ## Create or reuse an explainer
 
+Create an explainer for an explicit visual request or when a diagram, comparison,
+or interactive view would substantially clarify the answer. Keep routine updates
+and simple answers in chat. Saving useful findings does not require creating HTML.
+
 Use `knowledge_save` with `present` to make saved HTML available in the calling
 thread's Explainers panel.
 
