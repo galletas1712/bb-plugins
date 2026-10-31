@@ -1,6 +1,6 @@
 ---
 name: knowledge-library
-description: Recall and maintain project context and evidence, and create or reuse saved HTML explainers when explaining work visually.
+description: Recall and maintain project context and evidence. Create or reuse saved HTML explainers for substantial explanations of system behavior, architecture, tradeoffs, or results, and explicit visual requests.
 ---
 
 # Knowledge library
@@ -136,7 +136,8 @@ the library location. The body is canonical text.
 Attachments copy the source bytes into the library. Use `source: "thread-storage"`
 for files there, or `source: "workspace"` for workspace files. Thread storage dies
 with its thread, so attach reports, visuals, and evidence that should survive.
-Scratch files need no preservation. Use unique safe basenames for artifact names.
+Scratch files need no preservation. Use safe basenames for artifact names. List
+each name once in `artifacts`. Reusing a name replaces its current copy.
 Capture limits are 16 MiB per file and 64 MiB total.
 
 Source provenance defaults to the calling thread and its latest event. Set
