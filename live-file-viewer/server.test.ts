@@ -48,6 +48,71 @@ it("refuses writes to thread-storage artifacts before resolving or touching any 
   ).rejects.toThrow("read-only");
   expect(harness.inspection.sdk.callsTo("files.write")).toHaveLength(0);
 });
+
+it("reads explicit host files within that host's home, including cross-directory symlinks", async () => {
+  const { bb, harness } = host();
+  harness.sdk.stub("hosts.directory", async () => ({
+    directory: "/home/remote-user",
+  }));
+  harness.sdk.stub("files.read", async () => ({
+    content: "instructions",
+    contentEncoding: "utf8",
+    sizeBytes: 12,
+    sha256: "a".repeat(64),
+  }));
+  plugin(bb);
+  const result = await harness.behavior.callRpc("read", {
+    path: "/home/remote-user/.bb/AGENTS.md",
+    source: {
+      kind: "host",
+      experimental_hostId: "remote",
+      threadId: null,
+      environmentId: null,
+      projectId: null,
+    },
+  });
+  expect(harness.inspection.sdk.callsTo("hosts.directory")[0]?.[0]).toEqual({
+    hostId: "remote",
+  });
+  expect(harness.inspection.sdk.callsTo("files.read")[0]?.[0]).toEqual({
+    hostId: "remote",
+    path: "/home/remote-user/.bb/AGENTS.md",
+    rootPath: "/home/remote-user",
+  });
+  expect(result).toMatchObject({
+    rootPath: "/home/remote-user",
+    readOnly: false,
+  });
+});
+
+it("keeps workspace reads confined to their workspace", async () => {
+  const { bb, harness } = host();
+  harness.sdk.stub("environments.get", async () => ({
+    path: "/workspace",
+    hostId: "remote",
+  }));
+  harness.sdk.stub("files.read", async () => ({
+    content: "notes",
+    contentEncoding: "utf8",
+    sizeBytes: 5,
+    sha256: "a".repeat(64),
+  }));
+  plugin(bb);
+  await harness.behavior.callRpc("read", {
+    path: "docs/notes.md",
+    source: {
+      kind: "workspace",
+      threadId: null,
+      environmentId: "env",
+      projectId: null,
+    },
+  });
+  expect(harness.inspection.sdk.callsTo("hosts.directory")).toHaveLength(0);
+  expect(harness.inspection.sdk.callsTo("files.read")[0]?.[0]).toMatchObject({
+    hostId: "remote",
+    rootPath: "/workspace",
+  });
+});
 it("passes the original hash and host to the write operation and returns conflicts unchanged", async () => {
   const { bb, harness } = host();
   harness.sdk.stub("files.write", async () => ({

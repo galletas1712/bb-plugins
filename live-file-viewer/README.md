@@ -38,6 +38,7 @@ BB's own panel maximize/restore control remains available. The split divider sup
 - Edits made while a save is running remain dirty after that save completes.
 - Reloading the browser discards in-memory drafts; a browser unload guard warns when editable documents are dirty. Drafts are not persisted to localStorage. Disabling/reloading the plugin also discards its in-memory sessions.
 - Thread-storage artifacts remain read-only, matching BB's artifact contract. Workspace and explicitly addressed host files are editable. Files are capped at 5 MiB.
+- Explicit host-file reads use that host's home directory as their read root. Symlinks such as `~/.bb/AGENTS.md` pointing into `~/agent-config` work within that boundary. Workspace and thread-storage reads retain their own roots. Writes and HTML asset previews retain their existing narrower roots.
 - HTML executes inside an opaque-origin iframe with `sandbox="allow-scripts"`; it cannot access BB's DOM or storage. Relative assets use a scoped BB preview URL renewed when saving or reloading (valid for one hour). External resources remain subject to browser policies. Each successful save restarts the document and its scripts; typing and switching view modes leave them unchanged.
 - SVG previews use an image element, so embedded SVG scripts do not execute. Relative external SVG resources are not loaded from the data URL.
 - Markdown uses BB's renderer. Workspace/thread-storage document context resolves local links; the current SDK does not offer that context for absolute host-file targets.

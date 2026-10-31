@@ -7,6 +7,10 @@ export default function plugin(bb: BbPluginApi) {
   bb.rpc.register(rpcContract, {
     async read(request) {
       const target = await resolveTarget(bb.sdk, request);
+      if (request.source.kind === "host") {
+        const home = await bb.sdk.hosts.directory({ hostId: target.hostId });
+        target.rootPath = home.directory;
+      }
       const file = await bb.sdk.files.read(target);
       if (file.contentEncoding !== "utf8")
         throw new Error("This file is not UTF-8 text");
