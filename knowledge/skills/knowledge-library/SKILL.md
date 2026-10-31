@@ -151,9 +151,13 @@ diagrams and charts to carry the explanation, with short labels and captions.
 Avoid walls of text, including long reports split into cards. Keep the chat reply
 to a brief takeaway and the explainer reference, using compact tables when helpful.
 
-When introducing a piece of code, explain what it does before referring to it by
-name. Use short code samples sparingly when they clarify the explanation, with
-pseudocode for higher-level or architectural behavior.
+Use precise, self-explanatory terms consistently rather than vague shorthand.
+Define technical terms and abbreviations at first use. Explain what each symbol
+represents, including units for quantities where relevant. Introduce methods,
+functions, and other code elements by explaining what they do before referring
+to them by name. Keep definitions close to where the terms or symbols appear,
+including in diagrams. Use short code samples sparingly when they clarify the
+explanation, with pseudocode for higher-level or architectural behavior.
 
 Use `knowledge_save` with `present` to make saved HTML available in the calling
 thread's Explainers panel. Present visual explanations, charts, diagrams, mockups,
