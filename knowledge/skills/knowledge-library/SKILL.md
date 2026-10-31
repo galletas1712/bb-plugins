@@ -18,12 +18,12 @@ request. Also honor explicit visual requests. Save and present it before the fin
 reply instead of merely offering to make one. Keep mundane queries, routine tasks
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
-Build a small interactive lesson, with one concept visible at a time. Each
-selection changes a diagram and its short caption to show what changes and why.
-Before saving, review every view. Replace fact lists, reference tables, and
-paragraph grids with diagrams showing what connects, changes, or fails. Keep code
-and reference material in optional detail, outside the visual teaching flow.
-Skip upfront glossaries.
+Build a small interactive lesson, with one concept visible at a time. Let the
+reader change an input or step through events and see the consequences in a
+diagram with a short caption. Before saving, replace fact lists and paragraph
+grids with diagrams of actual relationships. Use arrows only for real flow or
+dependency. Keep code and reference material in optional detail. Skip upfront
+glossaries.
 
 Write simply and precisely for someone who may know the ideas but not the
 codebase. Use plain role names in diagrams. Explain roles before code names, and
