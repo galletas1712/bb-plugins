@@ -18,8 +18,8 @@ request. Also honor explicit visual requests. Save and present it before the fin
 reply instead of merely offering to make one. Keep mundane queries, routine tasks
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
-Build a small interactive lesson, with one concept visible at a time. Let the
-reader change an input or step through events and see the consequences in a
+Cover the requested scope as an interactive lesson, with one concept visible at
+a time. Let the reader change an input or step through events and see the consequences in a
 diagram with a short caption. Before saving, replace fact lists and paragraph
 grids with diagrams of actual relationships. Use arrows only for real flow or
 dependency. Keep code and reference material in optional detail. Skip upfront
