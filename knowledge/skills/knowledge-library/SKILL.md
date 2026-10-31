@@ -151,6 +151,10 @@ diagrams and charts to carry the explanation, with short labels and captions.
 Avoid walls of text, including long reports split into cards. Keep the chat reply
 to a brief takeaway and the explainer reference, using compact tables when helpful.
 
+When introducing a piece of code, explain what it does before referring to it by
+name. Use short code samples sparingly when they clarify the explanation, with
+pseudocode for higher-level or architectural behavior.
+
 Use `knowledge_save` with `present` to make saved HTML available in the calling
 thread's Explainers panel. Present visual explanations, charts, diagrams, mockups,
 and reports there as saved HTML rather than embedding them in chat.
