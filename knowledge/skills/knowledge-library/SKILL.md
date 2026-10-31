@@ -18,20 +18,16 @@ request. Also honor explicit visual requests. Save and present it before the fin
 reply instead of merely offering to make one. Keep mundane queries, routine tasks
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
-Teach through interactive visuals, not a report behind tabs or accordions.
-Show one concept and a few short sentences at a time. Let selection or stepping
-show how a mechanism, relationship, or outcome changes in the visual. Put deeper
-detail behind those interactions. Use simple, precise terms. Skip long
-introductions and upfront glossaries. Reserve tables for compact reference or
-comparison. The final chat reply is only the opener and one short takeaway,
-without repeating the explainer.
+Build an interactive visual lesson. Keep only the selected concept visible,
+with a diagram and a few short sentences. Each step or selection must update
+the visual to explain the mechanism, relationship, or outcome. Keep supporting
+detail optional. Avoid scrolling reports, paragraph accordions, and upfront
+glossaries. Reserve tables for compact reference or comparison.
 
-Assume the reader may know the ideas but is unfamiliar with the codebase. Use
-concrete, consistent terms and short sentences. Define technical terms,
-abbreviations, and symbols beside their first use, including units where relevant.
-Explain what a component does before naming its code. Introduce only the terms
-needed for the current concept, including in diagrams. Connect selective, short,
-annotated code examples to the visual, using pseudocode for architectural behavior.
+Write simply and precisely for someone who may know the ideas but not the
+codebase. Define terms and symbols where used, including in diagrams. Explain
+a component's role before its code name. Pair key mechanisms with brief,
+annotated code, using pseudocode for architectural behavior.
 
 Recall reusable HTML first. For new visuals, author self-contained UTF-8 HTML or
 HTM, at most 5 MiB, with inline CSS, JavaScript, and assets. Avoid companion files
@@ -64,9 +60,9 @@ Add a sentence describing the visual to the record body so recall can find it.
 `threadId` selects the source, never the destination for `present`.
 
 Check `presented[].attached`. If false, retry once with only `id` and `present`,
-then report any remaining error. Always include the returned `reference` in the
-reply. Never put it in a record body or link a scratch file as the finished
-explainer.
+then report any remaining error. Reply with the returned `reference` and one
+short takeaway, without repeating the explainer. Never put the reference in a
+record body or link a scratch file as the finished explainer.
 
 ## Recall
 
