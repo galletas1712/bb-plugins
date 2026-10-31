@@ -54,15 +54,15 @@ Create a record and show a self-contained HTML document in the calling thread:
 {
   "id": "request-handoff",
   "title": "Request handoff",
-  "body": "The coordinator hands requests to workers. overview.html explains the lifecycle.",
+  "body": "## Current conclusion\nThe coordinator hands each request to the least-loaded worker and retries once on timeout (commit 3f2a91c, 2026-10-31, thr_abc123).\n\n## Findings\n...\n\nrequest-handoff.html explains the lifecycle for readers.",
   "artifacts": [
     {
-      "name": "overview.html",
-      "path": "explainers/overview.html",
+      "name": "request-handoff.html",
+      "path": "explainers/request-handoff.html",
       "source": "thread-storage"
     }
   ],
-  "present": [{ "name": "overview.html", "title": "How request handoff works" }]
+  "present": [{ "name": "request-handoff.html", "title": "How request handoff works" }]
 }
 ```
 
