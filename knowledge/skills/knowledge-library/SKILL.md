@@ -19,15 +19,16 @@ reply instead of merely offering to make one. Keep mundane queries, routine task
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
 For explanations, cover every requested topic with interactive visuals in HTML.
-Show one concrete idea at a time, with a diagram and two or three short sentences.
+Draw the actual components, state, or data, rather than an outline in boxes.
+Show one concrete idea at a time, with two or three short sentences.
 Let controls change inputs or advance events, with visible consequences. Use
 arrows only for real relationships. Keep supporting prose, code, and reference
 data collapsed by default. Check every selectable view before saving.
 
 Write simply and precisely for someone who may know the ideas but not the
 codebase. Use plain role names in diagrams. Explain roles before code names, and
-define terms and symbols where first used. Pair key mechanisms with brief,
-annotated code, using pseudocode for architectural behavior.
+define terms and symbols where first used. For code-based explanations, include
+a brief annotated snippet in optional detail. Use pseudocode for architecture.
 
 Recall reusable HTML first. For new visuals, author self-contained UTF-8 HTML or
 HTM, at most 5 MiB, with inline CSS, JavaScript, and assets. Avoid companion files
