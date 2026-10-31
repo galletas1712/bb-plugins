@@ -18,11 +18,11 @@ request. Also honor explicit visual requests. Save and present it before the fin
 reply instead of merely offering to make one. Keep mundane queries, routine tasks
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
-Build an interactive visual lesson. Keep only the selected concept visible,
-with a diagram and a few short sentences. Show cause and changed state in the
-diagram itself, rather than merely highlighting components or revealing prose.
-Keep supporting detail optional. Avoid scrolling reports, paragraph accordions,
-and upfront glossaries. Reserve tables for compact reference or comparison.
+Build a small interactive lesson, with one concept visible at a time. Each
+selection changes a diagram and its short caption to show what changes and why.
+Use spatial relationships, flows, or before/after states to explain. A list of
+components or facts is not an explanation. Keep code and reference material in
+optional detail, outside the visual teaching flow. Skip upfront glossaries.
 
 Write simply and precisely for someone who may know the ideas but not the
 codebase. Use plain role names in diagrams. Explain roles before code names, and
@@ -60,9 +60,9 @@ Add a sentence describing the visual to the record body so recall can find it.
 `threadId` selects the source, never the destination for `present`.
 
 Check `presented[].attached`. If false, retry once with only `id` and `present`,
-then report any remaining error. Reply with the returned `reference` and one
-short takeaway, without repeating the explainer. Never put the reference in a
-record body or link a scratch file as the finished explainer.
+then report any remaining error. Always include the returned `reference` in the
+reply. Never put it in a record body or link a scratch file as the finished
+explainer.
 
 ## Recall
 
