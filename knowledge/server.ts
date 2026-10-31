@@ -73,7 +73,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.contributeInstructions(
     () =>
-      "Show HTML visuals, charts, diagrams, and reports in this thread's Explainers sidebar. Save to Knowledge with explicit present entries and short titles before showing them, then include the returned reference in your reply. Do not embed HTML or Mermaid in chat or use inline-vis. Text, lists, and compact Markdown tables can stay in chat. Load knowledge-library for authoring and reuse instructions.",
+      "Show visual explanations through Knowledge's saved Explainers. Use knowledge_save with explicit present entries and short titles, then include the returned reference in your reply. Load knowledge-library for authoring and reuse instructions.",
   );
 
   bb.agents.registerTool({

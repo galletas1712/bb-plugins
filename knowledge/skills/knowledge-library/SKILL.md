@@ -139,8 +139,8 @@ JSON metrics. Read its `--help` before use.
 
 ## Create or reuse an explainer
 
-Do not embed HTML or Mermaid in chat or use inline-vis. Use `knowledge_save` with
-`present` to make saved HTML available in the calling thread's Explainers panel.
+Use `knowledge_save` with `present` to make saved HTML available in the calling
+thread's Explainers panel.
 
 - Recall a suitable saved explainer first. Reuse it with
   `knowledge_save({ id: "request-handoff", present: [{ name: "overview.html", title: "How request handoff works" }] })`.

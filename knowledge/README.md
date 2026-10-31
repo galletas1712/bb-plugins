@@ -27,10 +27,18 @@ Back up the library. Uninstalling preserves library files.
 ## Save and present
 
 The [knowledge-library skill](skills/knowledge-library/SKILL.md) guides recall,
-maintenance, and visual authoring. Knowledge contributes a short routing rule to
-agent instructions: show visuals in Explainers rather than embedding them in chat.
+maintenance, and visual authoring. Knowledge contributes a short instruction for
+publishing saved visuals in Explainers.
 New instructions take effect when a provider session is next constructed.
-The bundled inline-vis renderer remains available for historic messages.
+For an Explainers-only setup, disable the competing inline-vis plugin:
+
+```sh
+bb plugin disable inline-vis
+```
+
+This removes its skill from future agent configurations and stops rendering
+historic inline-vis blocks. Existing messages and saved files remain intact.
+Already loaded instructions remain until the provider session is restarted.
 
 Native tools are `knowledge_recall`, `knowledge_save`, and `knowledge_delete`.
 The CLI also reads records:
