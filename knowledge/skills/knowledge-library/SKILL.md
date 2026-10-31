@@ -96,11 +96,11 @@ the PR merges. Deletion moves the record and evidence to recoverable library tra
 
 ## Create or reuse an explainer
 
-Create or reuse a saved explainer when the user requests a visual or when
-relationships, behavior, tradeoffs, or results would be substantially clearer
-visually. In those cases, save and present it before the final reply instead of
-merely offering to make one. Keep mundane queries, routine tasks and updates,
-and simple answers in chat. Saving findings does not require HTML.
+Create or reuse a saved explainer for substantial explanations of system behavior,
+architecture, tradeoffs, or experimental results, even without an explicit visual
+request. Also honor explicit visual requests. Save and present it before the final
+reply instead of merely offering to make one. Keep mundane queries, routine tasks
+and updates, and simple answers in chat. Saving findings does not require HTML.
 
 Favor interactive diagrams and charts with brief supporting prose. Let readers
 step through behavior, change inputs, or compare alternatives when useful. Avoid
