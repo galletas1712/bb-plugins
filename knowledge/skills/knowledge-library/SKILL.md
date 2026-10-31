@@ -109,14 +109,19 @@ request. Also honor explicit visual requests. Save and present it before the fin
 reply instead of merely offering to make one. Keep mundane queries, routine tasks
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
-Build the explainer as layers the reader expands, each more precise than the one
-above. Simplifying at the top is acceptable only because the detail is one
-expansion away.
+An explainer teaches, it does not list. Organize it around the problem: what was
+being attempted, why the obvious approach fails, how the solution removes that
+obstacle, what evidence shows it works, and which pitfalls were hit, each with
+its cause and fix. Show the failing case next to the fixed one wherever possible.
 
-1. Overview: an interactive visual of the whole subject with one short claim per
-   part. Draw the actual components, state, or data rather than boxes in an
-   outline. Let controls change inputs or advance events with visible consequences.
-   Use arrows only for real relationships.
+Build it as layers the reader expands, each more precise than the one above.
+Simplifying at the top is acceptable only because the detail is one expansion
+away.
+
+1. Overview: an interactive visual of the problem and its solution with one short
+   claim per part. Draw the actual components, state, or data rather than boxes
+   in an outline. Let controls reproduce the failure and the fix, with visible
+   consequences. Use arrows only for real relationships.
 2. Mechanism: expanding a part opens with its own drawn diagram, such as a
    sequence, state change, before/after view, or chart, in inline SVG or CSS,
    followed by two or three sentences. A list is not a visual.
