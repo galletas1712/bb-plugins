@@ -117,8 +117,9 @@ function useThemeCss() {
   return theme;
 }
 
-function themedHtml(html: string, css: string) {
+function themedHtml(html: string, css: string, colorScheme: string) {
   const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.documentElement.style.colorScheme = colorScheme;
   const style = doc.createElement("style");
   style.textContent = css;
   doc.head.prepend(style);
@@ -139,8 +140,11 @@ function ExplainerReader({
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const srcDoc = useMemo(
-    () => (document && theme ? themedHtml(document.html, theme.css) : null),
-    [document?.html, theme?.css],
+    () =>
+      document && theme
+        ? themedHtml(document.html, theme.css, theme.colorScheme)
+        : null,
+    [document?.html, theme?.css, theme?.colorScheme],
   );
   const request = useRef(0);
   const refresh = useCallback(async () => {

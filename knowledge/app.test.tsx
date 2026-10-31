@@ -121,6 +121,28 @@ it("leaves the reader intact on unrelated refreshes and loads new saved bytes", 
   await waitFor(() => expect(frame.srcdoc).toContain("Updated handoff"));
 });
 
+it("keeps BB's chosen scheme when saved HTML declares automatic colors", async () => {
+  document.documentElement.style.colorScheme = "dark";
+  const slot = renderSlot({ component: ExplainersPanel }, props, {
+    rpc: {
+      listThreadExplainers: () => [first],
+      readExplainer: () => ({
+        ...saved,
+        html: "<style>:root{color-scheme:light dark}</style><h1>Handoff</h1>",
+      }),
+    },
+  });
+  fireEvent.click(await slot.findByRole("button", { name: first.title }));
+  const frame = (await slot.findByTitle(first.title)) as HTMLIFrameElement;
+  const content = frame.contentDocument!;
+  content.open();
+  content.write(frame.srcdoc);
+  content.close();
+  expect(
+    frame.contentWindow!.getComputedStyle(content.documentElement).colorScheme,
+  ).toBe("dark");
+});
+
 it("opens a fixed-tab target and clears it on Back", async () => {
   const slot = renderSlot({ component: ExplainersPanel }, props, {
     rpc: {
