@@ -7,6 +7,7 @@ import { rpcContract } from "./contract";
 import { Library } from "./library";
 import { Recall } from "./qmd";
 import { saveRecord } from "./capture";
+import { Explainers } from "./explainers";
 import { idSchema, saveSchema, searchSchema } from "./schema";
 
 export default async function plugin(bb: BbPluginApi) {
@@ -27,6 +28,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   const config = await settings.get();
   const library = new Library(config.libraryPath);
+  const explainers = new Explainers(bb, library);
   const abort = new AbortController();
   bb.onDispose(() => abort.abort());
   const recall = new Recall(library, config.qmdExecutable, abort.signal);
@@ -46,6 +48,13 @@ export default async function plugin(bb: BbPluginApi) {
     search: (input) => recall.search(input),
     read: ({ id }) => read(id),
     save: (input) => saveRecord(bb, library, input),
+    listThreadExplainers: ({ threadId }) => explainers.list(threadId),
+    readExplainer: async (ref) => ({
+      ...explainers.read(ref),
+      hostId: (await bb.sdk.system.config()).primaryHostId,
+    }),
+    attachThreadExplainer: ({ threadId, title, ...ref }) =>
+      explainers.attach(threadId, ref, title),
     edit: (input) => {
       const previous = library.read(input.id);
       const record = library.save(
@@ -65,6 +74,11 @@ export default async function plugin(bb: BbPluginApi) {
     sync: ({ embed }) => recall.sync(embed),
   });
 
+  bb.agents.contributeInstructions(
+    () =>
+      "Show HTML visuals, charts, diagrams, and reports in this thread's Explainers sidebar. Save to Knowledge with explicit present entries and short titles before showing them. Do not embed visuals in chat or use inline-vis. Load knowledge-library for authoring and reuse instructions.",
+  );
+
   bb.agents.registerTool({
     name: "knowledge_recall",
     description:
@@ -82,7 +96,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "knowledge_save",
     description:
-      "Create a record, fully rewrite one, or attach evidence files. Records are plain folders: body.md (frontmatter plus Markdown) and artifacts/. To update an existing record's text, prefer editing its body.md directly with your file tools instead of calling this tool. Source defaults to the current thread at save time. Set threadId or sourceSequence only to cite a different thread or a specific point in its history.",
+      "Create or rewrite a record, attach evidence, or present saved HTML in the current thread's Explainers sidebar. Existing records may omit title/body. Use present: [{name, title}] explicitly for new or reused HTML. It returns a compact opener reference and whether attachment succeeded. Record text is body.md, prefer editing it directly. threadId selects the source of bytes and new record text, never the destination for present. Attachment-only saves preserve provenance and scope.",
     parameters: saveSchema,
     async execute(input, context) {
       return JSON.stringify(

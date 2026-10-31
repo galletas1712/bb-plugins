@@ -1,12 +1,13 @@
 # Knowledge
 
-A personal BB library for project context and evidence. Agents recall useful
-knowledge, read it, and update matching records or save new material. Records are
-portable Markdown and JSON files. QMD provides search.
+A file library for agent context and evidence, with a thread **Explainers** panel
+for readers. The panel lists short titles. Select one to read it, then go Back to
+the list. Agents manage preservation and reuse. The existing Knowledge page is
+available for record maintenance.
 
 ## Install
 
-Requires BB 0.44+, Plugin SDK 0.5.29+, Node 22+, and QMD 2.8.3+ on the BB server.
+Requires BB 0.48.1+, Plugin SDK 0.6.104+, Node 22+, and QMD 2.8.3+ on the BB server.
 Install from a persistent directory so workspace retirement cannot remove it.
 
 ```sh
@@ -23,86 +24,102 @@ The library defaults to `~/.local/share/bb-knowledge` on the server. Set
 `libraryPath` and reload to select another directory. This does not move files.
 Back up the library. Uninstalling preserves library files.
 
-## Use
+## Save and present
 
-The [knowledge-library skill](skills/knowledge-library/SKILL.md) guides agents to
-recall relevant knowledge and preserve missing context and evidence as they work.
-This includes explanations of prior work and routine tasks that become interesting.
-Already covered material is reused. A matching record is updated before another
-is created. Useful older behavior stays in the current text with its code versions,
-conditions, and sources.
+The [knowledge-library skill](skills/knowledge-library/SKILL.md) guides recall,
+maintenance, and visual authoring. Knowledge contributes a short routing rule to
+agent instructions: show visuals in Explainers rather than embedding them in chat.
+New instructions take effect when a provider session is next constructed.
+The bundled inline-vis renderer remains available for historic messages.
 
-Native tools expose `knowledge_recall`, `knowledge_read`, and `knowledge_save`.
-Agents can also use the equivalent CLI. Open **Knowledge** to browse, search, and
-read records and edit their text with the pencil icon. New records are saved
-through agents.
-Edits stay in the Knowledge view and retain the source, project, artifacts, and
-previous versions, even when the source session no longer exists. Concurrent
-changes are rejected rather than overwritten.
+Native tools are `knowledge_recall`, `knowledge_save`, and `knowledge_delete`.
+The CLI also reads records:
 
 ```sh
 bb knowledge search "worker reconnect" --json
-bb knowledge search "why does the worker stall" --engine hybrid --json
 bb knowledge read worker-reconnect --json
-bb knowledge save --input-stdin < capture.json
+bb knowledge save capture.json
 ```
 
-Save input requires `id`, `expectedVersion`, `title`, and `body`. Use version 0 to
-create, or the record's current version to update. `threadId` defaults to the
-calling agent's BB thread. `sourceSequence` defaults to its latest event at save
-time. Explicit values can cite another thread or an earlier point in its history.
-The citation boundary does not imply every event was read. Outside a BB thread,
-provide `threadId`.
+Create a record and show a self-contained HTML document in the calling thread:
 
-For `--input-stdin`, `capture.json` must contain a single line of JSON. `global`
-and `artifacts` are optional. The personal `AGENTS.md` directs agents to load the
-plugin's skill when available.
+```json
+{
+  "id": "request-handoff",
+  "title": "Request handoff",
+  "body": "The coordinator hands requests to workers. overview.html explains the lifecycle.",
+  "artifacts": [
+    {
+      "name": "overview.html",
+      "path": "explainers/overview.html",
+      "source": "thread-storage"
+    }
+  ],
+  "present": [{ "name": "overview.html", "title": "How request handoff works" }]
+}
+```
 
-## Storage and evidence
+Existing records may omit both title and body to attach files or present current
+HTML. Reuse needs only `id` and `present`. Capturing HTML alone does not present it.
+Titles are single-line plain text, up to 80 characters. Identity is the record ID
+and artifact name. Re-presenting updates that thread's title without duplicating
+the entry. Separate threads can use different titles for the same saved document.
 
-Records contain a title and Markdown body, with source, project, dates, and optional
-artifacts. Put conditions, uncertainty, and measurements in the text. QMD ranks
-relevance. Agents reconcile claims from evidence, not edit timestamps alone.
+Save returns the record plus `presented` results with `attached`, a compact
+`::explainer` opener reference, and an error on failure. Copy the returned reference
+into chat when an opener is useful. It renders a button, never an inline document.
+If metadata attachment fails, saved bytes remain preserved. Clicking the opener
+retries attachment. It never falls back to scratch files. In an embedded chat with
+no Explainers destination, it opens the saved file through BB's file preview.
 
-Each `records/<id>/` contains a HEAD pointer, checksummed artifacts, and immutable
-version folders with `record.json` and `report.md`. Complete versions publish
-atomically. Exact retries are idempotent and conflicting updates fail. All records
-can be revised while retaining prior versions. Edit through the plugin, not by
-changing published folders. The plugin does not maintain a separate review database.
+`present` requires a calling BB thread. An explicit `threadId` selects the source
+of artifact bytes and new record text, never the presentation destination.
+Attachment-only saves preserve record provenance, scope and body mtime. Pure
+presentation writes neither the body nor manifest. New records require title and
+body. Full text saves cite the source thread's latest event unless a valid
+`sourceSequence` is given. Use `global: true` for cross-project records.
 
-Files are copied from the source thread's actual host and confined to its workspace
-or thread-storage root. Only explicitly listed files are preserved. Limits are
-16 MiB per artifact, 64 MiB per capture, and 256 KiB of inline metadata. Larger
-assets need a separate durable destination.
+## Storage and reading
 
-Retrievable code can be referenced by repository, commit, and paths. Preserve
-uncommitted changes and manifests, inputs, logs, and other evidence needed to
-reproduce or interpret experiments. Durable external copies can be referenced.
+Each `records/<id>/` contains `body.md`, `artifacts.json`, and `artifacts/`.
+The body has JSON-valued frontmatter followed by Markdown. Edit it directly for
+text updates, keeping the frontmatter intact except the title. The agent tool can
+also replace its full text. There is no version pointer or edit conflict token.
+
+Files are copied from the source thread's host and confined to its workspace or
+thread-storage root. Limits are 16 MiB per artifact, 64 MiB per capture, and
+256 KiB of inline metadata. The manifest is authoritative. Replacing a logical
+name publishes new checksummed bytes and retains old bytes on disk. Unlisted
+files are never rediscovered. A malformed manifest leaves the record's notes
+readable and blocks artifact updates until repaired.
+
+Thread plugin metadata stores only references, short titles and the time added.
+There is no historical-thread migration or implicit inheritance by forks and
+side chats. Agents explicitly present relevant saved files in each thread.
+The panel destination is always available and does not open automatically.
+Targets are session-only, so a page reload starts at the list.
+
+The reader accepts current HTML up to 5 MiB, verifies its hash and UTF-8 encoding,
+and renders it in a sandbox without same-origin access. Scripts and external-link
+popups work. BB theme variables and color scheme are injected. Theme changes may
+reload a document. Other refreshes keep the frame intact when its hash is unchanged.
+Use self-contained HTML with inline CSS, JavaScript and assets. Companion files are
+not served by the reader. Saving is preservation, not filesystem write protection.
 
 ## Search and maintenance
 
-QMD indexes the latest record text in the rebuildable `search/` Markdown projection,
-using isolated config and cache under `.qmd/`. Opening the library lists records
-directly without indexing or waiting for QMD jobs. Indexes refresh before search when
-records change. Hybrid search also refreshes embeddings as needed and may download
-local models. Keyword search needs no model downloads. Calls serialize, time out
-after three minutes, and cancel on disposal. Failures are surfaced without a
-fallback search engine.
+QMD indexes `body.md` directly, using isolated config and cache under `.qmd/`.
+Artifact contents are not indexed. Describe what each explainer shows in its
+record body. Search defaults to the current project plus global records. Agents
+can reuse explainers from other projects through explicit recall.
 
-Recall takes up to 200 QMD candidates and filters by project scope, which can omit
-lower-ranked matches in large libraries. Default scope is the current BB project
-plus global records. Prior revisions and attachment contents are not indexed.
-Keep useful historical details and important artifact results in the current body.
+Opening the library lists records without waiting for QMD. Indexes refresh before
+search when records change. Hybrid search also refreshes embeddings and may
+download local models. Keyword search needs no model downloads. Failures surface
+without a fallback search engine. `bb knowledge sync [--embed]` forces a refresh.
+`bb knowledge delete <id>` moves the record into recoverable library trash.
 
-`bb knowledge status` shows the library location and record count.
-`bb knowledge sync [--embed]` forces a refresh for maintenance. Normal agent work
-does not require either command. BB handles thread archiving independently.
+The optional [benchmark runner](scripts/benchmark.mjs) preserves experiment
+context, logs and metrics. Read its `--help` before use.
 
-## Optional experiment runner
-
-Run [scripts/benchmark.mjs](scripts/benchmark.mjs) with `--help` for usage. It accepts
-workload/context JSON, runs a command with `KNOWLEDGE_RUN_DIR`, records elapsed time
-and workload-supplied metrics, preserves logs and failed-run evidence, and saves
-a record. Compare runs only after checking workload, hardware, units, and method.
-
-For development, use `npm run typecheck` and `npm run build`.
+For development, run `npm test`, `npm run typecheck`, and `npm run build`.

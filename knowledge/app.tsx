@@ -20,6 +20,11 @@ import type { rpcContract } from "./contract";
 import type { KnowledgeRecord, RecordSummary } from "./schema";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
+import {
+  ExplainersPanel,
+  ExplainerOpener,
+  explainersTab,
+} from "./explainer-ui";
 
 const fieldClass =
   "w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -273,8 +278,7 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
                           kind: "host",
                           hostId: detail.hostId,
                           path:
-                            detail.path.replace(/[\\/]body\.md$/, "/") +
-                            a.file,
+                            detail.path.replace(/[\\/]body\.md$/, "/") + a.file,
                         }}
                       >
                         {a.name}
@@ -398,6 +402,14 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
 }
 
 export default definePluginApp((app) => {
+  app.slots.experimental_tab({
+    ...explainersTab,
+    title: "Explainers",
+    icon: "BookOpen",
+    layout: "flush",
+    component: ExplainersPanel,
+  });
+  app.slots.messageDirective({ id: "explainer", component: ExplainerOpener });
   app.slots.navPanel({
     id: "library",
     title: "Knowledge",

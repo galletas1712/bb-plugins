@@ -6,6 +6,12 @@ import {
   saveSchema,
   searchSchema,
   summarySchema,
+  titleSchema,
+  bodySchema,
+  explainerRefSchema,
+  explainerTitleSchema,
+  threadExplainerSchema,
+  saveResultSchema,
 } from "./schema";
 
 export const rpcContract = defineRpcContract({
@@ -29,13 +35,32 @@ export const rpcContract = defineRpcContract({
       hostId: z.string().nullable(),
     }),
   },
-  save: { input: saveSchema, output: recordSchema },
+  save: { input: saveSchema, output: saveResultSchema },
+  listThreadExplainers: {
+    input: z.object({ threadId: idSchema }).strict(),
+    output: z.array(threadExplainerSchema),
+  },
+  readExplainer: {
+    input: explainerRefSchema.strict(),
+    output: z.object({
+      html: z.string(),
+      sha256: z.string(),
+      path: z.string(),
+      hostId: z.string().nullable(),
+    }),
+  },
+  attachThreadExplainer: {
+    input: explainerRefSchema
+      .extend({ threadId: idSchema, title: explainerTitleSchema })
+      .strict(),
+    output: threadExplainerSchema,
+  },
   edit: {
     input: z
       .object({
         id: idSchema,
-        title: saveSchema.shape.title,
-        body: saveSchema.shape.body,
+        title: titleSchema,
+        body: bodySchema,
       })
       .strict(),
     output: recordSchema,

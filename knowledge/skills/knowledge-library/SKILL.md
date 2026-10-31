@@ -1,6 +1,6 @@
 ---
 name: knowledge-library
-description: Recall and maintain durable project context, findings, decisions, and experiment evidence when working on a task or explaining prior work.
+description: Recall and maintain project context and evidence, and create or reuse saved HTML explainers when explaining work visually.
 ---
 
 # Knowledge library
@@ -136,6 +136,31 @@ in `name`. Limits are 16 MiB per file and 64 MiB per capture.
 
 The optional `scripts/benchmark.mjs` runner captures command context, logs, and
 JSON metrics. Read its `--help` before use.
+
+## Create or reuse an explainer
+
+Do not embed visuals in chat or use inline-vis. Use `knowledge_save` with
+`present` to make saved HTML available in the calling thread's Explainers panel.
+
+- Recall a suitable saved explainer first. Reuse it with
+  `knowledge_save({ id: "request-handoff", present: [{ name: "overview.html", title: "How request handoff works" }] })`.
+- For a new visual, write a self-contained `.html` or `.htm` file, valid UTF-8,
+  at most 5 MiB. Inline CSS, JavaScript and assets instead of using companion
+  files or relative imports. Use responsive layouts, short diagram labels,
+  and BB variables such as `var(--background)` and `var(--foreground)`.
+  Inspect it using the available file and browser tools.
+- Attach the file to a matching record and explicitly present it:
+  `knowledge_save({ id: "request-handoff", artifacts: [{ name: "overview.html", path: "explainers/overview.html", source: "thread-storage" }], present: [{ name: "overview.html", title: "How request handoff works" }] })`.
+  Include title and body when creating a new record. Omit both when only
+  attaching files to an existing record. Add a sentence to the record body
+  describing what the explainer shows so recall can find it.
+- Choose a short descriptive title, at most 80 characters. Reuse the artifact
+  name when revising the same explainer. `threadId` selects the source of bytes,
+  not the destination for `present`.
+- Check `presented[].attached`. If false, report the returned error. Saved bytes
+  remain preserved. Copy the returned `reference` into chat when an opener or
+  attachment retry is useful. Never put it in a record body or link a scratch
+  file as the finished explainer.
 
 At a natural stopping point, check that worthwhile context and evidence are saved.
 If Knowledge is unavailable, retain necessary material in the project's established
