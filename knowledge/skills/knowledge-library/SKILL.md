@@ -18,13 +18,13 @@ request. Also honor explicit visual requests. Save and present it before the fin
 reply instead of merely offering to make one. Keep mundane queries, routine tasks
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
-Design a visual teaching flow from the saved findings. The default view should
-show one visual and a few short sentences, with deeper concepts and technical
-detail opened through steps or selection. Explain mechanisms and relationships
-with sequences, diagrams, before/after views, or charts as appropriate. Use simple,
-precise terms. Avoid long introductions, upfront glossaries, and scrolling reports.
-Use tables only for compact reference or comparison. Return only the opener and
-one short paragraph in chat.
+Teach through interactive visuals, not a report behind tabs or accordions.
+Show one concept and a few short sentences at a time. Let selection or stepping
+show how a mechanism, relationship, or outcome changes in the visual. Put deeper
+detail behind those interactions. Use simple, precise terms. Skip long
+introductions and upfront glossaries. Reserve tables for compact reference or
+comparison. The final chat reply is only the opener and one short takeaway,
+without repeating the explainer.
 
 Assume the reader may know the ideas but is unfamiliar with the codebase. Use
 concrete, consistent terms and short sentences. Define technical terms,
@@ -35,10 +35,9 @@ annotated code examples to the visual, using pseudocode for architectural behavi
 
 Recall reusable HTML first. For new visuals, author self-contained UTF-8 HTML or
 HTM, at most 5 MiB, with inline CSS, JavaScript, and assets. Avoid companion files
-and relative imports. Render diagrams as inline SVG with short, precise labels
-and single-sentence captions. Split complex diagrams rather than using vague
-shorthand to fit more information. Use
-responsive layouts and BB variables such as `var(--background)` and
+and relative imports. Use HTML/CSS or inline SVG for diagrams, with short, precise
+labels and single-sentence captions. Reflow or split diagrams at narrow widths
+instead of shrinking their labels. Use BB variables such as `var(--background)` and
 `var(--foreground)`. With a browser, check rendering at 360px and in dark mode,
 interactions, and console errors. Otherwise inspect the file and disclose that
 rendering was not verified.
@@ -68,7 +67,6 @@ Check `presented[].attached`. If false, retry once with only `id` and `present`,
 then report any remaining error. Always include the returned `reference` in the
 reply. Never put it in a record body or link a scratch file as the finished
 explainer.
-
 
 ## Recall
 
@@ -153,7 +151,6 @@ Include supporting thread references in the body when combining sources.
 Use `knowledge_delete` or `bb knowledge delete <id>` only for records with no
 lasting value, such as review notes after their findings have been reconciled and
 the PR merges. Deletion moves the record and evidence to recoverable library trash.
-
 
 If Knowledge is unavailable, keep necessary evidence in the project's established
 location, mention the gap, and continue the task.
