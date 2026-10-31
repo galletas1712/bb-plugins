@@ -131,11 +131,12 @@ export class Library {
     const parsed = parse(id, raw, updatedAt);
     try {
       return { ...parsed, artifacts: this.readArtifacts(path.dirname(file)) };
-    } catch {
+    } catch (cause) {
+      const reason = cause instanceof Error ? cause.message : String(cause);
       return {
         ...parsed,
         artifacts: [],
-        artifactError: `Invalid artifact manifest for ${id}`,
+        artifactError: `Invalid artifact manifest for ${id}: ${reason}`,
       };
     }
   }

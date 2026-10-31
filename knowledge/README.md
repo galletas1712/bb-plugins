@@ -82,7 +82,7 @@ button returns to the source thread without writing metadata or opening a raw fi
 
 `present` requires a calling BB thread. An explicit `threadId` selects the source
 of artifact bytes and new record text, never the presentation destination.
-Attachment-only saves preserve record provenance, scope and body mtime. Pure
+Attachment-only saves keep the record's source thread, scope and body mtime. Pure
 presentation writes neither the body nor manifest. New records require title and
 body. A new record cites the source thread's latest event unless a valid
 `sourceSequence` is given. Rewriting an existing record's text keeps its original

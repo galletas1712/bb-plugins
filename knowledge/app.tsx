@@ -268,6 +268,11 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
                 Source thread
               </Button>
             </div>
+            {detail.record.artifactError && (
+              <p className="text-sm text-destructive">
+                {detail.record.artifactError}
+              </p>
+            )}
             {!!detail.record.artifacts.length && (
               <ul className="space-y-2 text-sm">
                 {detail.record.artifacts.map((a) => (

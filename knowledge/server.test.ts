@@ -317,13 +317,28 @@ describe("saved thread explainers", () => {
     fs.writeFileSync(manifest, "{broken");
     expect(library.all()).toHaveLength(2);
     expect(library.read("handoff")).toMatchObject({
-      artifactError: "Invalid artifact manifest for handoff",
+      artifactError: expect.stringMatching(
+        /^Invalid artifact manifest for handoff: .*JSON/,
+      ),
       artifacts: [],
     });
     await expect(
       save({ id: "handoff", artifacts: capture.artifacts }),
     ).rejects.toThrow("Invalid artifact manifest");
     expect(fs.readFileSync(manifest, "utf8")).toBe("{broken");
+    const sha256 = "a".repeat(64);
+    const listed = {
+      name: "a.txt",
+      file: `artifacts/${sha256}-a.txt`,
+      sha256,
+      bytes: 1,
+      sourcePath: "/a",
+      hostId: "host-one",
+    };
+    fs.writeFileSync(manifest, JSON.stringify([listed, listed]));
+    expect(library.read("handoff").artifactError).toBe(
+      "Invalid artifact manifest for handoff: Duplicate artifact names in manifest",
+    );
   });
 
   it("checks current bytes, path confinement, UTF-8 and reader size", async () => {

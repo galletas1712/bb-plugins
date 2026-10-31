@@ -44,7 +44,7 @@ export async function saveRecord(
   if (input.present.length)
     await bb.sdk.threads.get({ threadId: currentThreadId! });
   const explainers = new Explainers(bb, library);
-  // Pure presentation does not rewrite notes, provenance, or the manifest.
+  // Pure presentation does not rewrite notes, the source thread, or the manifest.
   if (previous && input.title === undefined && !input.artifacts.length)
     return present(previous);
   const threadId = input.threadId ?? currentThreadId;

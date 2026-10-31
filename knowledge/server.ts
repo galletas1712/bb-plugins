@@ -88,7 +88,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "knowledge_save",
     description:
-      "Create or rewrite a record, attach evidence, or present saved HTML in the current thread's Explainers sidebar. Existing records may omit title/body. Use present: [{name, title}] explicitly for new or reused HTML. It returns a compact opener reference and whether attachment succeeded. Record text is body.md, prefer editing it directly. threadId selects the source of bytes and new record text, never the destination for present. Updates keep the record's original provenance and scope unless threadId or sourceSequence cites a new source.",
+      "Create or rewrite a record, attach evidence, or present saved HTML in the current thread's Explainers sidebar. Existing records may omit title/body; a body you send replaces the old one in full. Use present: [{name, title}] explicitly for new or reused HTML. It returns a compact opener reference and whether attachment succeeded. Record text is body.md, prefer editing it directly. threadId selects the source of bytes and new record text, never the destination for present. Updates keep the record's original source thread and scope unless threadId or sourceSequence cites a new source.",
     parameters: saveSchema,
     async execute(input, context) {
       return JSON.stringify(
