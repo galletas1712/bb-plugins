@@ -117,9 +117,9 @@ expansion away.
    part. Draw the actual components, state, or data rather than boxes in an
    outline. Let controls change inputs or advance events with visible consequences.
    Use arrows only for real relationships.
-2. Mechanism: expanding a part opens with its own visual, such as a sequence,
-   state change, before/after view, or chart, plus two or three sentences. Every
-   layer leads with a visual, not prose.
+2. Mechanism: expanding a part opens with its own drawn diagram, such as a
+   sequence, state change, before/after view, or chart, in inline SVG or CSS,
+   followed by two or three sentences. A list is not a visual.
 3. Detail: expanding a mechanism shows the exact names, formulas, numbers, dates,
    conditions, and each failure with its cause and fix. Write it as short items,
    one fact per line, never a paragraph over three sentences. Give each idea its
@@ -127,8 +127,9 @@ expansion away.
 
 The deepest layer is complete: every result, limit, caveat, and open question that
 matters in the source records is reachable, and upper layers never contradict it.
-Check coverage against the records before saving. Use tables only for compact
-reference data inside the detail layer.
+Before saving, check coverage against the records and confirm every mechanism
+section contains a diagram. Use tables only for compact reference data inside
+the detail layer.
 
 Write simply and precisely for someone who may know the ideas but not the
 codebase. Use plain role names in diagrams. Explain roles before code names, and
@@ -151,16 +152,17 @@ Explainers panel, never embedded in chat. For an existing record:
 knowledge_save({
   id: "request-handoff",
   artifacts: [{
-    name: "overview.html",
-    path: "explainers/overview.html",
+    name: "request-handoff.html",
+    path: "explainers/request-handoff.html",
     source: "thread-storage"
   }],
-  present: [{ name: "overview.html", title: "How request handoff works" }]
+  present: [{ name: "request-handoff.html", title: "How request handoff works" }]
 })
 ```
 
-To reuse saved HTML, omit artifacts. Choose a descriptive presentation title of
-at most 80 characters and reuse the artifact name when revising an explainer.
+To reuse saved HTML, omit artifacts. Name the artifact after its subject, choose
+a descriptive title of at most 80 characters, and reuse the artifact name when
+revising an explainer.
 Add a sentence describing the visual to the record body so recall can find it.
 `threadId` selects the source, never the destination for `present`.
 
