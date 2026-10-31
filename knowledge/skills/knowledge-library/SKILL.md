@@ -102,21 +102,26 @@ request. Also honor explicit visual requests. Save and present it before the fin
 reply instead of merely offering to make one. Keep mundane queries, routine tasks
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
-Favor interactive diagrams and charts with brief supporting prose. Let readers
-step through behavior, change inputs, or compare alternatives when useful. Avoid
-walls of text, including long reports divided into cards. Put the detailed
-explanation in the explainer, with only a takeaway and opener in chat.
+Use interactive visuals to explain mechanisms, relationships, and changes, with
+brief supporting prose. Choose sequences for behavior, diagrams for structure,
+before/after views for changes, and charts for measurements. Use tables for compact
+reference or comparison, not as the main explanation. Avoid walls of text,
+including reports divided into cards. Keep the detailed explanation in the
+explainer, with only a takeaway and opener in chat.
 
 Assume the reader may know the ideas but is unfamiliar with the codebase. Use
 precise, self-explanatory terms consistently. Define technical terms,
 abbreviations, and symbols at first use, including units where relevant. Explain
 a component's role before introducing its code name. Keep definitions near their
-use, including in diagrams. Use short code samples sparingly, preferring
-pseudocode for architectural behavior.
+use, including in diagrams. Accompany key implementation concepts with short,
+annotated code or pseudocode when it makes the mechanism concrete. Connect each
+snippet to the visual and define its names first. Keep examples selective.
 
 Recall reusable HTML first. For new visuals, author self-contained UTF-8 HTML or
 HTM, at most 5 MiB, with inline CSS, JavaScript, and assets. Avoid companion files
-and relative imports. Render diagrams as inline SVG with short labels. Use
+and relative imports. Render diagrams as inline SVG with short, precise labels
+and single-sentence captions. Split complex diagrams rather than using vague
+shorthand to fit more information. Use
 responsive layouts and BB variables such as `var(--background)` and
 `var(--foreground)`. With a browser, check rendering at 360px and in dark mode,
 interactions, and console errors. Otherwise inspect the file and disclose that
