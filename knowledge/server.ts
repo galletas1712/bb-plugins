@@ -71,11 +71,6 @@ export default async function plugin(bb: BbPluginApi) {
     sync: ({ embed }) => recall.sync(embed),
   });
 
-  bb.agents.contributeInstructions(
-    () =>
-      "Use saved Explainers when a visual would substantially clarify the answer or the user requests one. Use knowledge_save with explicit present entries and short titles, then include the returned reference in your reply. Load knowledge-library for authoring and reuse instructions.",
-  );
-
   bb.agents.registerTool({
     name: "knowledge_recall",
     description:

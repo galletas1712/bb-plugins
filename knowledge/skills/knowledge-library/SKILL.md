@@ -20,9 +20,10 @@ and updates, and simple answers in chat. Saving findings does not require HTML.
 
 Build a small interactive lesson, with one concept visible at a time. Each
 selection changes a diagram and its short caption to show what changes and why.
-Use spatial relationships, flows, or before/after states to explain. A list of
-components or facts is not an explanation. Keep code and reference material in
-optional detail, outside the visual teaching flow. Skip upfront glossaries.
+Before saving, review every view. Replace fact lists, reference tables, and
+paragraph grids with diagrams showing what connects, changes, or fails. Keep code
+and reference material in optional detail, outside the visual teaching flow.
+Skip upfront glossaries.
 
 Write simply and precisely for someone who may know the ideas but not the
 codebase. Use plain role names in diagrams. Explain roles before code names, and
