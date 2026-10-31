@@ -4,7 +4,7 @@ import {
   makeThreadResponse,
   type ExperimentalFakeHostRpcCall,
 } from "@get-bb/plugin-sdk/testing";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import plugin from "./server.js";
 
 const PROJECT = "/src/dynamo";
@@ -184,11 +184,62 @@ describe("workspaces provider", () => {
       projects: {
         get: async () => ({ sources: [{ hostId: "host_1", type: "local_path", path: PROJECT }] }),
       },
+      environments: { list: async () => [] },
     });
 
     expect(await harness.behavior.callRpc("listRepos", { projectId: "proj_1", hostId: "host_1" })).toEqual({
       repos: OFFERED,
+      previous: null,
     });
+  });
+
+  it("remembers successful initial selections and refs separately for each project", async () => {
+    const { harness, provider } = await load({
+      projects: { get: async () => ({ sources: [{ hostId: "host_1", type: "local_path", path: PROJECT }] }) },
+    });
+    await provider.create(createContext({ inputs: { repos: ["alpha@origin/topic", "beta@#12"] } }));
+    await provider.create(createContext({ project: { id: "proj_2" }, pathKey: "other", inputs: { repos: [] } }));
+
+    expect(await harness.behavior.callRpc("listRepos", { projectId: "proj_1", hostId: "host_1" })).toEqual({
+      repos: OFFERED, previous: ["alpha@origin/topic", "beta@#12"],
+    });
+    expect(await harness.behavior.callRpc("listRepos", { projectId: "proj_2", hostId: "host_1" })).toEqual({
+      repos: OFFERED, previous: [],
+    });
+  });
+
+  it("keeps the newer workspace selection when an older create finishes later or is retried", async () => {
+    const { bb, provider } = await load();
+    const older = createContext({ pathKey: "older", thread: makeThreadResponse({ createdAt: 10 }), inputs: { repos: ["alpha"] } });
+    const newer = createContext({ pathKey: "newer", thread: makeThreadResponse({ createdAt: 20 }), inputs: { repos: ["beta@main"] } });
+    await provider.create(older);
+    await provider.create(newer);
+    await provider.create(older);
+    expect(await bb.storage.kv.get("selection:proj_1")).toMatchObject({ repos: ["beta@main"] });
+  });
+
+  it("does not remember a failed workspace creation", async () => {
+    const { bb, provider } = await load();
+    await provider.create(createContext({ inputs: { repos: ["gamma"] } }));
+    expect(await bb.storage.kv.get("selection:proj_1")).toBeUndefined();
+  });
+
+  it("uses the latest completed existing workspace before a project has a saved selection", async () => {
+    const list = vi.fn(async ({ offset }: { offset: number }) => offset === 0
+      ? [
+          { createdAt: 10, status: "ready", environmentProviderSelection: { inputs: { repos: ["alpha@main"] } } },
+          { createdAt: 30, status: "error", environmentProviderSelection: { inputs: { repos: ["alpha"] } } },
+          { createdAt: 20, status: "destroyed", environmentProviderSelection: { inputs: { repos: ["beta@#7"] } } },
+        ]
+      : []);
+    const { harness } = await load({
+      projects: { get: async () => ({ sources: [{ hostId: "host_1", type: "local_path", path: PROJECT }] }) },
+      environments: { list },
+    });
+    expect(await harness.behavior.callRpc("listRepos", { projectId: "proj_1", hostId: "host_1" })).toEqual({
+      repos: OFFERED, previous: ["beta@#7"],
+    });
+    expect(list).toHaveBeenCalledWith({ projectId: "proj_1", environmentProviderId: "workspaces", limit: 100, offset: 0 });
   });
 });
 

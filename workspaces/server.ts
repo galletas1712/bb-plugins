@@ -28,12 +28,51 @@ interface WorkspaceState {
 }
 
 const stateKey = (pathKey: string) => `workspace:${pathKey}`;
+const selectionKey = (projectId: string) => `selection:${projectId}`;
+
+interface ProjectSelection {
+  createdAt: number;
+  pathKey: string;
+  repos: string[];
+}
 
 export default async function workspacesPlugin(bb: BbPluginApi): Promise<void> {
   const host = bb.hosts.experimental_client({ contract: hostContract });
   const kv = bb.storage.kv;
   // Adds to one workspace run one at a time so neither overwrites the other's repo list.
   const perWorkspace = keyedQueue();
+  const perProject = keyedQueue();
+
+  async function rememberSelection(projectId: string, selection: ProjectSelection) {
+    await perProject(projectId, async () => {
+      const previous = await kv.get<ProjectSelection>(selectionKey(projectId));
+      if (previous === undefined || selection.createdAt > previous.createdAt ||
+          (selection.createdAt === previous.createdAt && selection.pathKey > previous.pathKey)) {
+        await kv.set(selectionKey(projectId), selection);
+      }
+    });
+  }
+
+  async function previousSelection(projectId: string): Promise<string[] | null> {
+    const saved = await kv.get<ProjectSelection>(selectionKey(projectId));
+    if (saved !== undefined) return saved.repos;
+
+    // Existing environments retain their original provider inputs. Use the
+    // latest completed one until this project creates a workspace with this version.
+    let latest: { createdAt: number; repos: string[] } | null = null;
+    const limit = 100;
+    for (let offset = 0; ; offset += limit) {
+      const page = await bb.sdk.environments.list({ projectId, environmentProviderId: PROVIDER_ID, limit, offset });
+      for (const environment of page) {
+        if (environment.status !== "ready" && environment.status !== "destroyed") continue;
+        const parsed = inputsSchema.safeParse(environment.environmentProviderSelection?.inputs);
+        if (parsed.success && (latest === null || environment.createdAt > latest.createdAt)) {
+          latest = { createdAt: environment.createdAt, repos: parsed.data.repos };
+        }
+      }
+      if (page.length < limit) return latest?.repos ?? null;
+    }
+  }
 
   function ensure(hostId: string, pathKey: string, state: WorkspaceState, signal?: AbortSignal) {
     return host.call("ensure", { pathKey, ...state }, { hostId, signal, timeoutMs: PROVISION_TIMEOUT_MS });
@@ -76,7 +115,13 @@ export default async function workspacesPlugin(bb: BbPluginApi): Promise<void> {
           await kv.set(stateKey(context.pathKey), state);
         }
         if (state.repos.length > 0) context.report.step(`Fetching ${state.repos.map(formatRepoSpec).join(", ")}`);
-        return ensure(context.host.id, context.pathKey, state, context.signal);
+        const result = await ensure(context.host.id, context.pathKey, state, context.signal);
+        await rememberSelection(context.project.id, {
+          createdAt: context.thread.createdAt,
+          pathKey: context.pathKey,
+          repos: state.repos.map(formatRepoSpec),
+        });
+        return result;
       }),
     restore: (context) =>
       created(context.signal, async () => {
@@ -124,8 +169,13 @@ export default async function workspacesPlugin(bb: BbPluginApi): Promise<void> {
       const source = project.sources.find(
         (candidate) => candidate.hostId === hostId && candidate.type === "local_path",
       );
-      if (source === undefined) return { repos: [] };
-      return host.call("scan", { projectPath: source.path }, { hostId, timeoutMs: SCAN_TIMEOUT_MS });
+      const [listing, previous] = await Promise.all([
+        source === undefined
+          ? Promise.resolve({ repos: [] })
+          : host.call("scan", { projectPath: source.path }, { hostId, timeoutMs: SCAN_TIMEOUT_MS }),
+        previousSelection(projectId),
+      ]);
+      return { ...listing, previous };
     },
     async changes({ threadId, mode }) {
       const environment = await readyEnvironment(threadId);

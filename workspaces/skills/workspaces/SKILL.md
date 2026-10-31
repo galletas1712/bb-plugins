@@ -10,6 +10,7 @@ The thread's working directory is a plain folder. Each subfolder is a git worktr
 - Run git inside a repo folder (`git -C <repo> ...` or `cd <repo>`). At the top level git reports "not a git repository", which is expected.
 - Read a repo's own `AGENTS.md` or `CLAUDE.md` before working in it.
 - The branch tracks nothing. Committing and pushing are your job. Push to whichever remote and branch the task needs, for example `git push -u <remote> HEAD`, or `git push <remote> HEAD:<their-branch>` to update the branch the repo started from.
+- The new-thread picker defaults to the project's most recently created workspace's initial repo selections and start points. Repos added later do not change that default. An empty selection is remembered too.
 - When the workspace is removed, its folders are deleted, uncommitted work included. Commit anything worth keeping. Branches and commits stay in the repos.
 
 ## Adding a repo

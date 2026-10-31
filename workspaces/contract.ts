@@ -112,7 +112,7 @@ export const rpcContract = defineRpcContract({
     input: z
       .object({ projectId: z.string().min(1), hostId: z.string().min(1) })
       .strict(),
-    output: z.object({ repos: z.array(repoNameSchema) }).strict(),
+    output: z.object({ repos: z.array(repoNameSchema), previous: z.array(repoSpecSchema).nullable() }).strict(),
   },
   changes: {
     input: z.object({ threadId: z.string().min(1), mode: modeSchema }).strict(),

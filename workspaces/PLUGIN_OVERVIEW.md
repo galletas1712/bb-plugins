@@ -4,7 +4,7 @@ Runs each thread in its own folder of git worktrees, one per repo you pick from 
 
 ## What you get
 
-- A "Workspace" environment choice with a repo picker in the new-thread composer. Each picked repo takes an optional start point: a branch, `remote/branch`, tag, commit, or `#pr`. Picking no repo gives an empty workspace.
+- A "Workspace" environment choice with a repo picker in the new-thread composer. Each picked repo takes an optional start point: a branch, `remote/branch`, tag, commit, or `#pr`. Each project remembers its last initial selection and start points. Picking no repo gives an empty workspace.
 - Every repo gets a new branch `<you>/<thread-slug>`, so a workspace never shares a checkout with anything else.
 - `bb workspaces add <repo>[@<start>]` adds more repos mid-session. Agents can run it themselves.
 - A **Changes** panel tab lists each repo's uncommitted changes or branch commits, with diffs. It also works in threads that use other environments.

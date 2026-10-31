@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   useRpc,
   type JsonValue,
@@ -7,7 +8,6 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Icon } from "@/components/ui/icon";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import type { rpcContract } from "./contract";
 import { formatRepoSpec, isRepoSpec, parseRepoSpec } from "./repo-spec";
@@ -47,6 +47,11 @@ export function decideInputs(args: {
 
 export function RepoPicker({ projectId, target, value, onChange }: PluginEnvironmentProviderInputsProps) {
   const hostId = target.kind === "existing-host" ? target.hostId : null;
+  return <ScopedRepoPicker key={`${projectId}\n${hostId}`} projectId={projectId} target={target} value={value} onChange={onChange} />;
+}
+
+function ScopedRepoPicker({ projectId, target, value, onChange }: PluginEnvironmentProviderInputsProps) {
+  const hostId = target.kind === "existing-host" ? target.hostId : null;
   const rpc = useRpc<typeof rpcContract>();
   const scope = `${projectId}\n${hostId}`;
   const [listing, setListing] = useState<{
@@ -55,14 +60,74 @@ export function RepoPicker({ projectId, target, value, onChange }: PluginEnviron
     error: string | null;
   } | null>(null);
   const [picked, setPicked] = useState(() => pickedRepos(value));
+  const initialValue = useRef(value);
+  const initialized = useRef(false);
   const [attempt, setAttempt] = useState(0);
   const emitted = useRef("");
+  const anchor = useRef<HTMLSpanElement>(null);
+  const [container, setContainer] = useState<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    // BB mounts provider inputs inside its footer row. Put the list after that
+    // row when available, and keep it inline if a different host omits it.
+    const footer = anchor.current?.closest("[data-new-thread-footer]");
+    if (!footer) {
+      setContainer(null);
+      return;
+    }
+    const node = document.createElement("div");
+    const pluginRoot = anchor.current?.closest("[data-bb-plugin-root]");
+    node.setAttribute("data-bb-plugin-root", "");
+    const pluginId = pluginRoot?.getAttribute("data-bb-plugin");
+    if (pluginId) node.setAttribute("data-bb-plugin", pluginId);
+    footer.after(node);
+    setContainer(node);
+
+    // On compact screens BB pins the entire composer to the bottom. Let the
+    // composer scroll as a whole when its contents are taller than the screen.
+    let scrolling: { element: HTMLElement; maxHeight: string; overflowY: string } | null = null;
+    const restore = () => {
+      if (!scrolling) return;
+      scrolling.element.style.maxHeight = scrolling.maxHeight;
+      scrolling.element.style.overflowY = scrolling.overflowY;
+      scrolling = null;
+    };
+    const updateScroll = () => {
+      let element = footer.closest("[data-app-composer]")?.parentElement ?? null;
+      while (element && element !== document.body) {
+        const style = getComputedStyle(element);
+        if (style.position === "absolute" && style.bottom === "0px") break;
+        element = element.parentElement;
+      }
+      if (element === scrolling?.element) return;
+      restore();
+      if (element && element !== document.body) {
+        scrolling = { element, maxHeight: element.style.maxHeight, overflowY: element.style.overflowY };
+        element.style.maxHeight = "100%";
+        element.style.overflowY = "auto";
+      }
+    };
+    updateScroll();
+    window.addEventListener("resize", updateScroll);
+    return () => {
+      window.removeEventListener("resize", updateScroll);
+      restore();
+      node.remove();
+    };
+  }, [listing]);
 
   useEffect(() => {
     if (projectId === null || hostId === null) return;
     let live = true;
     rpc.call("listRepos", { projectId, hostId }).then(
-      ({ repos }) => live && setListing({ scope, repos, error: null }),
+      ({ repos, previous }) => {
+        if (!live) return;
+        if (!initialized.current && initialValue.current === null && previous !== null) {
+          setPicked(pickedRepos({ repos: previous }));
+        }
+        initialized.current = true;
+        setListing({ scope, repos, error: null });
+      },
       (error: unknown) =>
         live &&
         setListing({
@@ -87,7 +152,6 @@ export function RepoPicker({ projectId, target, value, onChange }: PluginEnviron
         : (current?.error ?? null),
   });
   const chosen = change.status === "ready" ? [...pickedRepos(change.value).keys()] : [...picked.keys()];
-  const label = change.status === "ready" ? (change.value as { repos: string[] }).repos.join(", ") : "";
 
   useEffect(() => {
     const key = JSON.stringify(change);
@@ -127,34 +191,16 @@ export function RepoPicker({ projectId, target, value, onChange }: PluginEnviron
       return next;
     });
 
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className={cn(TRIGGER_CLASS_NAME, "hover:text-foreground")}
-          title={change.status === "blocked" ? change.reason : label || "Empty workspace"}
-        >
-          <Icon name={change.status === "blocked" ? "AlertCircle" : "FolderGit"} className="size-3.5 shrink-0" />
-          <span className={cn("min-w-0 truncate", label !== "" && "font-medium text-foreground")}>
-            {change.status === "blocked" ? change.reason : label || "No repos"}
-          </span>
-          <Icon name="ChevronDown" className="size-3.5 shrink-0" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        align="start"
-        sideOffset={6}
-        collisionPadding={16}
-        mobileTitle="Repos"
-        className="max-h-[60vh] overflow-y-auto p-1 md:w-80"
-      >
+  const picker = (
+    <fieldset className="mt-1 min-w-0 px-3.5 max-md:px-1">
+      <legend className="text-xs font-medium text-muted-foreground">Repositories</legend>
+      <div className="flex flex-col gap-y-1 py-1">
         {available.map((name) => {
           const on = chosen.includes(name);
           const from = picked.get(name) ?? "";
           return (
-            <div key={name} className="rounded-sm px-2 py-1.5 hover:bg-accent">
-              <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <div key={name} className="min-w-0 max-w-full rounded-sm py-1">
+              <label className="flex cursor-pointer items-center gap-2 text-xs">
                 <Checkbox
                   checked={on}
                   disabled={available.length === 1}
@@ -169,7 +215,7 @@ export function RepoPicker({ projectId, target, value, onChange }: PluginEnviron
                   placeholder="default branch, or branch, remote/branch, tag, sha, #pr"
                   spellCheck={false}
                   className={cn(
-                    "mt-1 ml-6 h-7 w-[calc(100%-1.5rem)] rounded-md border bg-transparent px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                    "mt-1 ml-6 h-7 w-56 max-w-[calc(100%-1.5rem)] rounded-md border bg-transparent px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring",
                     from.trim() === "" || isRepoSpec(`${name}@${from.trim()}`) ? "border-input" : "border-destructive",
                   )}
                 />
@@ -177,7 +223,9 @@ export function RepoPicker({ projectId, target, value, onChange }: PluginEnviron
             </div>
           );
         })}
-      </PopoverContent>
-    </Popover>
+      </div>
+      {change.status === "blocked" && <p className="text-xs text-destructive">{change.reason}</p>}
+    </fieldset>
   );
+  return <><span ref={anchor} />{container ? createPortal(picker, container) : picker}</>;
 }
