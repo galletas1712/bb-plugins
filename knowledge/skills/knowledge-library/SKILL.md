@@ -19,14 +19,14 @@ reply instead of merely offering to make one. Keep mundane queries, routine task
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
 Build an interactive visual lesson. Keep only the selected concept visible,
-with a diagram and a few short sentences. Each step or selection must update
-the visual to explain the mechanism, relationship, or outcome. Keep supporting
-detail optional. Avoid scrolling reports, paragraph accordions, and upfront
-glossaries. Reserve tables for compact reference or comparison.
+with a diagram and a few short sentences. Show cause and changed state in the
+diagram itself, rather than merely highlighting components or revealing prose.
+Keep supporting detail optional. Avoid scrolling reports, paragraph accordions,
+and upfront glossaries. Reserve tables for compact reference or comparison.
 
 Write simply and precisely for someone who may know the ideas but not the
-codebase. Define terms and symbols where used, including in diagrams. Explain
-a component's role before its code name. Pair key mechanisms with brief,
+codebase. Use plain role names in diagrams. Explain roles before code names, and
+define terms and symbols where first used. Pair key mechanisms with brief,
 annotated code, using pseudocode for architectural behavior.
 
 Recall reusable HTML first. For new visuals, author self-contained UTF-8 HTML or
