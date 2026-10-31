@@ -124,10 +124,9 @@ export async function saveRecord(
   let source = { threadId, sequence: input.sourceSequence ?? sequence };
   if (
     previous &&
-    (input.title === undefined ||
-      (input.threadId === undefined &&
-        previous.title === input.title &&
-        previous.body === input.body))
+    input.threadId === undefined &&
+    previous.title === input.title &&
+    previous.body === input.body
   )
     source = previous.source;
   const record = library.save(

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   experimental_useAppPanel,
   experimental_useFixedTabTarget,
@@ -11,9 +11,9 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./contract";
 import {
-  explainerRefSchema,
-  explainerTitleSchema,
+  explainerTargetSchema,
   type ExplainerRef,
+  type ExplainerTarget,
   type ThreadExplainer,
 } from "./schema";
 import { Button } from "./components/ui/button";
@@ -23,13 +23,27 @@ export const explainersTab = {
   context: { kind: "thread" },
   availability: "fixed",
   experimental_target: {
-    validate: (value: unknown): value is ExplainerRef =>
-      explainerRefSchema.safeParse(value).success,
+    validate: (value: unknown): value is ExplainerTarget =>
+      explainerTargetSchema.safeParse(value).success,
   },
 } as const;
 
 const message = (cause: unknown) =>
   cause instanceof Error ? cause.message : String(cause);
+
+// Keep common inline-vis color names usable with BB's theme tokens.
+const themeAliases: Record<string, string> = {
+  "card-foreground": "foreground",
+  "surface-raised": "surface-raised-solid",
+  "surface-recessed": "surface-recessed-solid",
+  brand: "timeline-accent",
+  "chart-1": "timeline-accent",
+  "chart-2": "success",
+  "chart-3": "warning",
+  "chart-4": "destructive",
+  "chart-5": "attention",
+  "chart-6": "secondary-foreground",
+};
 
 function LoadError({ error, retry }: { error: string; retry: () => void }) {
   return (
@@ -54,24 +68,43 @@ function useThemeCss() {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const update = () => {
       const style = getComputedStyle(root);
-      const variables = Array.from(style)
-        .filter((name) => name.startsWith("--"))
-        .map((name) => `${name}:${style.getPropertyValue(name)};`)
-        .join("");
+      const variables =
+        `background foreground muted muted-foreground subtle-foreground
+        card card-foreground popover popover-foreground primary primary-foreground
+        secondary secondary-foreground accent accent-foreground border input ring
+        surface-raised surface-recessed brand destructive destructive-foreground
+        destructive-text warning warning-text success attention diff-added diff-removed
+        shadow-xs shadow-sm shadow-md shadow-lg radius font-sans font-mono
+        chart-1 chart-2 chart-3 chart-4 chart-5 chart-6`
+          .split(/\s+/)
+          .map((name) => {
+            const value =
+              style.getPropertyValue(`--${name}`) ||
+              (themeAliases[name]
+                ? style.getPropertyValue(`--${themeAliases[name]}`)
+                : "");
+            return value.trim() ? `--${name}:${value};` : "";
+          })
+          .join("");
       const scheme =
         style.colorScheme && style.colorScheme !== "normal"
           ? style.colorScheme
           : root.classList.contains("dark") || media.matches
             ? "dark"
             : "light";
-      setTheme({
-        css: `:root{${variables}color-scheme:${scheme};}`,
-        colorScheme: scheme,
-      });
+      const css = `:root{${variables}color-scheme:${scheme};}`;
+      setTheme((previous) =>
+        previous?.css === css ? previous : { css, colorScheme: scheme },
+      );
     };
     update();
     const observer = new MutationObserver(update);
     observer.observe(root, { attributes: true });
+    observer.observe(document.head, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
     media.addEventListener("change", update);
     return () => {
       observer.disconnect();
@@ -102,6 +135,10 @@ function ExplainerReader({
     sha256: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const srcDoc = useMemo(
+    () => (document && theme ? themedHtml(document.html, theme.css) : null),
+    [document?.html, theme?.css],
+  );
   const request = useRef(0);
   const refresh = useCallback(async () => {
     const current = ++request.current;
@@ -127,7 +164,7 @@ function ExplainerReader({
   }, [refresh, connection]);
   useRealtime("changed", refresh);
   if (error) return <LoadError error={error} retry={() => void refresh()} />;
-  if (!document || !theme)
+  if (!srcDoc || !theme)
     return (
       <p role="status" className="p-4 text-sm text-muted-foreground">
         Loading…
@@ -139,7 +176,7 @@ function ExplainerReader({
       className="min-h-0 w-full flex-1 border-0 bg-background"
       style={{ colorScheme: theme.colorScheme }}
       sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
-      srcDoc={themedHtml(document.html, theme.css)}
+      srcDoc={srcDoc}
     />
   );
 }
@@ -151,6 +188,12 @@ function ThreadExplainers({ threadId }: { threadId: string }) {
   const [selected, setSelected] = useState<
     (ExplainerRef & { title: string }) | null
   >(null);
+  const [targetResult, setTargetResult] = useState<{
+    sequence: number;
+    entry?: ThreadExplainer;
+    error?: string;
+  } | null>(null);
+  const [attempt, retryTarget] = useState(0);
   const [items, setItems] = useState<ThreadExplainer[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -175,39 +218,66 @@ function ThreadExplainers({ threadId }: { threadId: string }) {
   }, [refresh, connection]);
   useRealtime("changed", refresh);
   useEffect(() => {
-    if (target) setSelected({ ...target.target, title: "Explainer" });
-  }, [target?.sequence]);
+    if (!target) return;
+    let active = true;
+    setTargetResult(null);
+    rpc.call("attachThreadExplainer", { threadId, ...target.target }).then(
+      (entry) => {
+        if (active) setTargetResult({ sequence: target.sequence, entry });
+      },
+      (cause) => {
+        if (active)
+          setTargetResult({ sequence: target.sequence, error: message(cause) });
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [target?.sequence, attempt, rpc, threadId]);
+  const resolvedTarget =
+    targetResult?.sequence === target?.sequence ? targetResult : null;
+  const requested = target ? resolvedTarget?.entry : selected;
   const current =
-    selected &&
+    requested &&
     (items.find(
       (item) =>
-        item.recordId === selected.recordId && item.name === selected.name,
+        item.recordId === requested.recordId && item.name === requested.name,
     ) ??
-      selected);
+      requested);
+  const title = current?.title ?? target?.target.title;
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {current ? (
-        <>
-          <div className="flex shrink-0 items-center gap-2 border-b border-border p-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                target?.clear();
-                setSelected(null);
-              }}
-            >
-              ← Back
-            </Button>
-            <span className="truncate text-sm font-medium">
-              {current.title}
-            </span>
-          </div>
-          <ExplainerReader
-            key={`${current.recordId}/${current.name}`}
-            selected={current}
+      {title && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-border p-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              target?.clear();
+              setSelected(null);
+            }}
+          >
+            ← Back
+          </Button>
+          <span className="truncate text-sm font-medium">{title}</span>
+        </div>
+      )}
+      {target && !current ? (
+        resolvedTarget?.error ? (
+          <LoadError
+            error={resolvedTarget.error}
+            retry={() => retryTarget((value) => value + 1)}
           />
-        </>
+        ) : (
+          <p role="status" className="p-4 text-sm text-muted-foreground">
+            Loading…
+          </p>
+        )
+      ) : current ? (
+        <ExplainerReader
+          key={`${current.recordId}/${current.name}`}
+          selected={current}
+        />
       ) : error ? (
         <LoadError error={error} retry={() => void refresh()} />
       ) : !loaded ? (
@@ -242,62 +312,27 @@ export function ExplainerOpener({
   attributes,
   message: sourceMessage,
 }: PluginMessageDirectiveProps) {
-  const rpc = useRpc<typeof rpcContract>();
   const panel = experimental_useAppPanel();
   const navigate = useBbNavigate();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const ref = explainerRefSchema.safeParse({
+  const ref = explainerTargetSchema.safeParse({
     recordId: attributes.record,
     name: attributes.artifact,
+    title: attributes.title,
   });
-  const title = explainerTitleSchema.safeParse(attributes.title);
-  if (!ref.success || !title.success)
+  if (!ref.success)
     return (
       <p className="text-sm text-destructive">Invalid explainer reference</p>
     );
-  async function open() {
-    if (!ref.success || !title.success) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await rpc.call("attachThreadExplainer", {
-        threadId: sourceMessage.threadId,
-        ...ref.data,
-        title: title.data,
-      });
-      if (!panel.openTab({ tab: explainersTab, target: ref.data })) {
-        const saved = await rpc.call("readExplainer", ref.data);
-        if (
-          !saved.hostId ||
-          !navigate.experimental_openFilePreview({
-            target: { kind: "host", hostId: saved.hostId, path: saved.path },
-            location: null,
-          })
-        )
-          throw new Error("Could not open this explainer here");
-      }
-    } catch (cause) {
-      setError(message(cause));
-    } finally {
-      setBusy(false);
-    }
-  }
   return (
-    <div>
-      <Button
-        variant="outline"
-        size="sm"
-        disabled={busy}
-        onClick={() => void open()}
-      >
-        {title.data}
-      </Button>
-      {error && (
-        <p role="alert" className="mt-1 text-sm text-destructive">
-          {error}
-        </p>
-      )}
-    </div>
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => {
+        if (!panel.openTab({ tab: explainersTab, target: ref.data }))
+          navigate.toThread(sourceMessage.threadId);
+      }}
+    >
+      {ref.data.title}
+    </Button>
   );
 }

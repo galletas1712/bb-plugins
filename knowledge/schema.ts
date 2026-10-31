@@ -21,11 +21,14 @@ export const explainerRefSchema = z.object({
   recordId: idSchema,
   name: artifactNameSchema,
 });
-export const threadExplainerSchema = explainerRefSchema.extend({
+export const explainerTargetSchema = explainerRefSchema.extend({
   title: explainerTitleSchema,
+});
+export const threadExplainerSchema = explainerTargetSchema.extend({
   addedAt: z.iso.datetime(),
 });
 export type ExplainerRef = z.infer<typeof explainerRefSchema>;
+export type ExplainerTarget = z.infer<typeof explainerTargetSchema>;
 export type ThreadExplainer = z.infer<typeof threadExplainerSchema>;
 export const isHtml = (name: string) => /\.html?$/i.test(name);
 

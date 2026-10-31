@@ -49,10 +49,7 @@ export default async function plugin(bb: BbPluginApi) {
     read: ({ id }) => read(id),
     save: (input) => saveRecord(bb, library, input),
     listThreadExplainers: ({ threadId }) => explainers.list(threadId),
-    readExplainer: async (ref) => ({
-      ...explainers.read(ref),
-      hostId: (await bb.sdk.system.config()).primaryHostId,
-    }),
+    readExplainer: (ref) => explainers.read(ref),
     attachThreadExplainer: ({ threadId, title, ...ref }) =>
       explainers.attach(threadId, ref, title),
     edit: (input) => {
@@ -76,7 +73,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.contributeInstructions(
     () =>
-      "Show HTML visuals, charts, diagrams, and reports in this thread's Explainers sidebar. Save to Knowledge with explicit present entries and short titles before showing them. Do not embed visuals in chat or use inline-vis. Load knowledge-library for authoring and reuse instructions.",
+      "Show HTML visuals, charts, diagrams, and reports in this thread's Explainers sidebar. Save to Knowledge with explicit present entries and short titles before showing them, then include the returned reference in your reply. Do not embed HTML or Mermaid in chat or use inline-vis. Text, lists, and compact Markdown tables can stay in chat. Load knowledge-library for authoring and reuse instructions.",
   );
 
   bb.agents.registerTool({

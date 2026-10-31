@@ -139,7 +139,7 @@ JSON metrics. Read its `--help` before use.
 
 ## Create or reuse an explainer
 
-Do not embed visuals in chat or use inline-vis. Use `knowledge_save` with
+Do not embed HTML or Mermaid in chat or use inline-vis. Use `knowledge_save` with
 `present` to make saved HTML available in the calling thread's Explainers panel.
 
 - Recall a suitable saved explainer first. Reuse it with
@@ -148,7 +148,9 @@ Do not embed visuals in chat or use inline-vis. Use `knowledge_save` with
   at most 5 MiB. Inline CSS, JavaScript and assets instead of using companion
   files or relative imports. Use responsive layouts, short diagram labels,
   and BB variables such as `var(--background)` and `var(--foreground)`.
-  Inspect it using the available file and browser tools.
+  With a browser tool, check it renders at 360px and in dark mode without
+  console errors. If no browser is available, check the file and state that
+  rendering was not verified.
 - Attach the file to a matching record and explicitly present it:
   `knowledge_save({ id: "request-handoff", artifacts: [{ name: "overview.html", path: "explainers/overview.html", source: "thread-storage" }], present: [{ name: "overview.html", title: "How request handoff works" }] })`.
   Include title and body when creating a new record. Omit both when only
@@ -157,10 +159,10 @@ Do not embed visuals in chat or use inline-vis. Use `knowledge_save` with
 - Choose a short descriptive title, at most 80 characters. Reuse the artifact
   name when revising the same explainer. `threadId` selects the source of bytes,
   not the destination for `present`.
-- Check `presented[].attached`. If false, report the returned error. Saved bytes
-  remain preserved. Copy the returned `reference` into chat when an opener or
-  attachment retry is useful. Never put it in a record body or link a scratch
-  file as the finished explainer.
+- Check `presented[].attached`. If false, retry `knowledge_save({id, present})`
+  once without reattaching files, then report any remaining error. Include the
+  returned `reference` in the reply whenever presenting an explainer. Never put
+  it in a record body or link a scratch file as the finished explainer.
 
 At a natural stopping point, check that worthwhile context and evidence are saved.
 If Knowledge is unavailable, retain necessary material in the project's established

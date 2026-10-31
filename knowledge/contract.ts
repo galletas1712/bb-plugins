@@ -45,8 +45,6 @@ export const rpcContract = defineRpcContract({
     output: z.object({
       html: z.string(),
       sha256: z.string(),
-      path: z.string(),
-      hostId: z.string().nullable(),
     }),
   },
   attachThreadExplainer: {

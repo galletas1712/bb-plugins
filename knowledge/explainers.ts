@@ -47,7 +47,6 @@ export class Explainers {
     return {
       html: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
       sha256: saved.artifact.sha256,
-      path: saved.path,
     };
   }
 
@@ -84,9 +83,10 @@ export class Explainers {
     const parsed = threadExplainerSchema.safeParse(metadata[key(ref)]);
     const previous =
       parsed.success && key(parsed.data) === key(ref) ? parsed.data : null;
+    if (previous && (!retitle || previous.title === title)) return previous;
     const entry: ThreadExplainer = {
       ...ref,
-      title: previous && !retitle ? previous.title : title,
+      title,
       addedAt: previous ? previous.addedAt : new Date().toISOString(),
     };
     await this.bb.sdk.threads.updatePluginMetadata({

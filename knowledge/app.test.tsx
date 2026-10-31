@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { ExplainersPanel, ExplainerOpener } from "./explainer-ui";
 
@@ -20,10 +20,9 @@ const props = { threadId: "thread-one", environment: null };
 const saved = {
   html: '<h1 style="color:var(--foreground)">Handoff</h1><script>window.count=1</script>',
   sha256: "a".repeat(64),
-  path: "/library/saved.html",
-  hostId: "host-one",
 };
 const ref = { recordId: first.recordId, name: first.name };
+const target = { ...ref, title: first.title };
 
 beforeEach(() => {
   window.matchMedia = vi.fn(
@@ -38,6 +37,8 @@ beforeEach(() => {
     "--foreground",
     "rgb(230, 230, 230)",
   );
+  document.documentElement.style.setProperty("--timeline-accent", "cyan");
+  document.documentElement.style.setProperty("--success", "green");
 });
 afterEach(() => {
   cleanup();
@@ -70,6 +71,8 @@ it("shows just short titles, reads in the panel and returns to the list", async 
   fireEvent.click(await slot.findByRole("button", { name: first.title }));
   const frame = (await slot.findByTitle(first.title)) as HTMLIFrameElement;
   expect(frame.srcdoc).toContain("--foreground:rgb(230, 230, 230)");
+  expect(frame.srcdoc).toContain("--brand:cyan");
+  expect(frame.srcdoc).toContain("--chart-2:green");
   expect(frame.srcdoc).toContain("<script>window.count=1</script>");
   expect(frame.getAttribute("sandbox")).toBe(
     "allow-scripts allow-popups allow-popups-to-escape-sandbox",
@@ -84,20 +87,28 @@ it("shows just short titles, reads in the panel and returns to the list", async 
 });
 
 it("leaves the reader intact on unrelated refreshes and loads new saved bytes", async () => {
-  let document = saved;
+  const parse = vi.spyOn(DOMParser.prototype, "parseFromString");
+  let savedDocument = saved;
   const slot = renderSlot({ component: ExplainersPanel }, props, {
     rpc: {
       listThreadExplainers: () => [first],
-      readExplainer: () => document,
+      readExplainer: () => savedDocument,
     },
   });
   fireEvent.click(await slot.findByRole("button", { name: first.title }));
   const frame = (await slot.findByTitle(first.title)) as HTMLIFrameElement;
   const original = frame.srcdoc;
+  const parses = parse.mock.calls.length;
+  await act(async () => {
+    document.documentElement.style.setProperty("--panel-width", "420px");
+    document.documentElement.setAttribute("data-layout", "changed");
+  });
+  expect(parse).toHaveBeenCalledTimes(parses);
   await slot.behavior.emitRealtime("changed", {});
   expect(slot.getByTitle(first.title)).toBe(frame);
   expect(frame.srcdoc).toBe(original);
-  document = {
+  expect(parse).toHaveBeenCalledTimes(parses);
+  savedDocument = {
     ...saved,
     html: "<h1>Updated handoff</h1>",
     sha256: "b".repeat(64),
@@ -111,10 +122,15 @@ it("opens a fixed-tab target and clears it on Back", async () => {
     rpc: {
       listThreadExplainers: () => [first],
       readExplainer: () => saved,
+      attachThreadExplainer: () => first,
     },
-    experimental_fixedTabTarget: { tabId: "explainers", target: ref },
+    experimental_fixedTabTarget: { tabId: "explainers", target },
   });
   await slot.findByTitle(first.title);
+  expect(slot.inspection.rpcCalls).toContainEqual({
+    method: "attachThreadExplainer",
+    input: { threadId: "thread-one", ...target },
+  });
   fireEvent.click(slot.getByRole("button", { name: "← Back" }));
   await slot.findByRole("button", { name: first.title });
   await slot.behavior.emitRealtime("changed", {});
@@ -153,10 +169,9 @@ const directiveProps = {
   openWorkspaceFile: null,
 };
 
-it("renders no inline document and opens the thread reader after association", async () => {
+it("renders only an opener and leaves association to the receiving panel", async () => {
   const openTab = vi.fn(() => true);
   const slot = renderSlot({ component: ExplainerOpener }, directiveProps, {
-    rpc: { attachThreadExplainer: () => first },
     experimental_panel: { openTab },
   });
   expect(slot.container.querySelector("iframe")).toBeNull();
@@ -164,46 +179,41 @@ it("renders no inline document and opens the thread reader after association", a
   await waitFor(() =>
     expect(openTab).toHaveBeenCalledWith({
       tab: expect.objectContaining({ id: "explainers" }),
-      target: ref,
+      target,
     }),
   );
-  expect(slot.inspection.rpcCalls[0]).toMatchObject({
-    method: "attachThreadExplainer",
-    input: { ...ref, threadId: "actual-thread", title: first.title },
-  });
+  expect(slot.inspection.rpcCalls).toEqual([]);
 });
 
-it("falls back to the saved file when an embedded chat has no registered tab", async () => {
-  const slot = renderSlot({ component: ExplainerOpener }, directiveProps, {
-    rpc: { attachThreadExplainer: () => first, readExplainer: () => saved },
-    openFilePreview: () => true,
-  });
+it("opens the source thread when an embedded chat has no registered tab", async () => {
+  const slot = renderSlot({ component: ExplainerOpener }, directiveProps);
   fireEvent.click(slot.getByRole("button", { name: first.title }));
   await waitFor(() =>
     expect(slot.inspection.navigateCalls).toContainEqual({
-      method: "experimental_openFilePreview",
-      options: {
-        target: { kind: "host", hostId: "host-one", path: saved.path },
-        location: null,
-      },
+      method: "toThread",
+      threadId: "actual-thread",
     }),
   );
+  expect(slot.inspection.rpcCalls).toEqual([]);
 });
 
-it("keeps failed attachment local and never falls back to scratch HTML", async () => {
-  const openTab = vi.fn(() => true);
-  const slot = renderSlot({ component: ExplainerOpener }, directiveProps, {
+it("retries failed panel attachment without opening an unlisted document", async () => {
+  let fail = true;
+  const slot = renderSlot({ component: ExplainersPanel }, props, {
     rpc: {
+      listThreadExplainers: () => [],
+      readExplainer: () => saved,
       attachThreadExplainer: () => {
-        throw new Error("Saved file missing");
+        if (fail) throw new Error("Metadata offline");
+        return first;
       },
     },
-    experimental_panel: { openTab },
+    experimental_fixedTabTarget: { tabId: "explainers", target },
   });
-  fireEvent.click(slot.getByRole("button", { name: first.title }));
-  expect((await slot.findByRole("alert")).textContent).toBe(
-    "Saved file missing",
-  );
-  expect(openTab).not.toHaveBeenCalled();
+  expect((await slot.findByRole("alert")).textContent).toBe("Metadata offline");
+  expect(slot.container.querySelector("iframe")).toBeNull();
   expect(slot.inspection.navigateCalls).toEqual([]);
+  fail = false;
+  fireEvent.click(slot.getByRole("button", { name: "Retry" }));
+  await slot.findByTitle(first.title);
 });

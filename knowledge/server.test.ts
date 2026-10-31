@@ -235,6 +235,9 @@ describe("saved thread explainers", () => {
       id: "handoff",
       present: [{ name: ref.name, title: "New short title" }],
     });
+    const writes = host.harness.inspection.sdk.callsTo(
+      "threads.updatePluginMetadata",
+    ).length;
     await host.harness.behavior.callRpc("attachThreadExplainer", {
       ...ref,
       threadId: "caller",
@@ -243,6 +246,16 @@ describe("saved thread explainers", () => {
     expect(
       (await new Explainers(host.bb, library).list("caller"))[0],
     ).toMatchObject({ title: "New short title", addedAt: first.addedAt });
+    expect(
+      host.harness.inspection.sdk.callsTo("threads.updatePluginMetadata"),
+    ).toHaveLength(writes);
+    await save({
+      id: "handoff",
+      present: [{ name: ref.name, title: "New short title" }],
+    });
+    expect(
+      host.harness.inspection.sdk.callsTo("threads.updatePluginMetadata"),
+    ).toHaveLength(writes);
   });
 
   it("merges concurrent captures and keeps sessions independent", async () => {

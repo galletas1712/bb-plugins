@@ -66,11 +66,12 @@ and artifact name. Re-presenting updates that thread's title without duplicating
 the entry. Separate threads can use different titles for the same saved document.
 
 Save returns the record plus `presented` results with `attached`, a compact
-`::explainer` opener reference, and an error on failure. Copy the returned reference
-into chat when an opener is useful. It renders a button, never an inline document.
+`::explainer` opener reference, and an error on failure. Include the reference
+in the reply when presenting. It renders a button, never an inline document.
 If metadata attachment fails, saved bytes remain preserved. Clicking the opener
-retries attachment. It never falls back to scratch files. In an embedded chat with
-no Explainers destination, it opens the saved file through BB's file preview.
+opens the panel, which attaches the reference to its own thread and offers Retry
+if attachment fails. In an embedded chat with no Explainers destination, the
+button returns to the source thread without writing metadata or opening a raw file.
 
 `present` requires a calling BB thread. An explicit `threadId` selects the source
 of artifact bytes and new record text, never the presentation destination.
