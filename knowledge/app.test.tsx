@@ -72,7 +72,11 @@ it("shows just short titles, reads in the panel and returns to the list", async 
   const frame = (await slot.findByTitle(first.title)) as HTMLIFrameElement;
   expect(frame.srcdoc).toContain("--foreground:rgb(230, 230, 230)");
   expect(frame.srcdoc).toContain("--brand:cyan");
-  expect(frame.srcdoc).toContain("--chart-2:green");
+  expect(frame.srcdoc).toContain("--chart-2:#0d9488");
+  await act(async () => {
+    document.documentElement.style.colorScheme = "dark";
+  });
+  await waitFor(() => expect(frame.srcdoc).toContain("--chart-2:#2dd4bf"));
   expect(frame.srcdoc).toContain("<script>window.count=1</script>");
   expect(frame.getAttribute("sandbox")).toBe(
     "allow-scripts allow-popups allow-popups-to-escape-sandbox",

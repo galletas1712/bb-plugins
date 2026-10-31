@@ -146,7 +146,7 @@ Do not embed HTML or Mermaid in chat or use inline-vis. Use `knowledge_save` wit
   `knowledge_save({ id: "request-handoff", present: [{ name: "overview.html", title: "How request handoff works" }] })`.
 - For a new visual, write a self-contained `.html` or `.htm` file, valid UTF-8,
   at most 5 MiB. Inline CSS, JavaScript and assets instead of using companion
-  files or relative imports. Use responsive layouts, short diagram labels,
+  files or relative imports. Render diagrams as inline SVG. Use responsive layouts, short diagram labels,
   and BB variables such as `var(--background)` and `var(--foreground)`.
   With a browser tool, check it renders at 360px and in dark mode without
   console errors. If no browser is available, check the file and state that

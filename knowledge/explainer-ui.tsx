@@ -38,11 +38,10 @@ const themeAliases: Record<string, string> = {
   "surface-recessed": "surface-recessed-solid",
   brand: "timeline-accent",
   "chart-1": "timeline-accent",
-  "chart-2": "success",
-  "chart-3": "warning",
-  "chart-4": "destructive",
-  "chart-5": "attention",
-  "chart-6": "secondary-foreground",
+};
+const chartColors = {
+  light: ["#0d9488", "#d97706", "#9333ea", "#e11d48", "#65a30d"],
+  dark: ["#2dd4bf", "#fbbf24", "#c084fc", "#fb7185", "#a3e635"],
 };
 
 function LoadError({ error, retry }: { error: string; retry: () => void }) {
@@ -75,7 +74,7 @@ function useThemeCss() {
         surface-raised surface-recessed brand destructive destructive-foreground
         destructive-text warning warning-text success attention diff-added diff-removed
         shadow-xs shadow-sm shadow-md shadow-lg radius font-sans font-mono
-        chart-1 chart-2 chart-3 chart-4 chart-5 chart-6`
+        chart-1`
           .split(/\s+/)
           .map((name) => {
             const value =
@@ -87,12 +86,16 @@ function useThemeCss() {
           })
           .join("");
       const scheme =
-        style.colorScheme && style.colorScheme !== "normal"
+        style.colorScheme === "dark" || style.colorScheme === "light"
           ? style.colorScheme
           : root.classList.contains("dark") || media.matches
             ? "dark"
             : "light";
-      const css = `:root{${variables}color-scheme:${scheme};}`;
+      // Match inline-vis's categorical palette for existing saved charts.
+      const palette = chartColors[scheme]
+        .map((color, index) => `--chart-${index + 2}:${color};`)
+        .join("");
+      const css = `:root{${variables}${palette}color-scheme:${scheme};}`;
       setTheme((previous) =>
         previous?.css === css ? previous : { css, colorScheme: scheme },
       );
