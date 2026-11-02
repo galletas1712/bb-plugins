@@ -16,10 +16,16 @@ import {
   useSdk,
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
+import { disposeExplainerFrames } from "./explainer-frames";
 import type { rpcContract } from "./contract";
 import type { KnowledgeRecord, RecordSummary } from "./schema";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
+import {
+  ExplainersPanel,
+  ExplainerOpener,
+  explainersTab,
+} from "./explainer-ui";
 
 const fieldClass =
   "w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -263,6 +269,11 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
                 Source thread
               </Button>
             </div>
+            {detail.record.artifactError && (
+              <p className="text-sm text-destructive">
+                {detail.record.artifactError}
+              </p>
+            )}
             {!!detail.record.artifacts.length && (
               <ul className="space-y-2 text-sm">
                 {detail.record.artifacts.map((a) => (
@@ -273,8 +284,7 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
                           kind: "host",
                           hostId: detail.hostId,
                           path:
-                            detail.path.replace(/[\\/]body\.md$/, "/") +
-                            a.file,
+                            detail.path.replace(/[\\/]body\.md$/, "/") + a.file,
                         }}
                       >
                         {a.name}
@@ -398,6 +408,18 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
 }
 
 export default definePluginApp((app) => {
+  app.contentScripts.register({
+    id: "explainer-readers",
+    mount: ({ pluginId }) => () => disposeExplainerFrames(pluginId),
+  });
+  app.slots.experimental_tab({
+    ...explainersTab,
+    title: "Explainers",
+    icon: "BookOpen",
+    layout: "flush",
+    component: ExplainersPanel,
+  });
+  app.slots.messageDirective({ id: "explainer", component: ExplainerOpener });
   app.slots.navPanel({
     id: "library",
     title: "Knowledge",

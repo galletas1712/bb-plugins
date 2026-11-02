@@ -1,10 +1,13 @@
 import path from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { Library, hash } from "./library";
+import { Explainers, explainerReference } from "./explainers";
 import {
   MAX_ARTIFACT_BYTES,
   MAX_CAPTURE_BYTES,
   saveSchema,
+  isHtml,
+  type KnowledgeRecord,
   type SaveInput,
 } from "./schema";
 
@@ -15,16 +18,56 @@ export async function saveRecord(
   currentThreadId?: string,
 ) {
   const input = saveSchema.parse(raw);
+  const previous = library.find(input.id);
+  if (previous?.artifactError) throw new Error(previous.artifactError);
+  if (!previous && input.title === undefined)
+    throw new Error("New records require title and body");
+  if (
+    previous &&
+    input.global !== undefined &&
+    input.global !== (previous.projectId === null)
+  )
+    throw new Error("A record cannot move between project and global scopes");
+  if (input.present.length && !currentThreadId)
+    throw new Error("Present requires a calling BB thread");
+  for (const item of input.present) {
+    if (
+      !isHtml(item.name) ||
+      ![...input.artifacts, ...(previous?.artifacts ?? [])].some(
+        (a) => a.name === item.name,
+      )
+    )
+      throw new Error(
+        `Present requires a current or incoming HTML artifact: ${item.name}`,
+      );
+  }
+  if (input.present.length)
+    await bb.sdk.threads.get({ threadId: currentThreadId! });
+  const explainers = new Explainers(bb, library);
+  // Pure presentation does not rewrite notes, the source thread, or the manifest.
+  if (previous && input.title === undefined && !input.artifacts.length)
+    return present(previous);
   const threadId = input.threadId ?? currentThreadId;
   if (!threadId)
     throw new Error("Provide threadId when saving outside a BB thread");
   const thread = await bb.sdk.threads.get({ threadId });
-  const sequence =
-    (await bb.sdk.threads.events.list({
-      threadId,
-      order: "desc",
-      limit: "1",
-    }))[0]?.seq ?? 0;
+  // A record keeps the thread that produced it. Rewriting its text from
+  // another thread is maintenance, so only a new record or an explicit
+  // threadId or sourceSequence sets the source.
+  const cite =
+    input.title !== undefined &&
+    (!previous ||
+      input.threadId !== undefined ||
+      input.sourceSequence !== undefined);
+  const sequence = cite
+    ? ((
+        await bb.sdk.threads.events.list({
+          threadId,
+          order: "desc",
+          limit: "1",
+        })
+      )[0]?.seq ?? 0)
+    : 0;
   if (input.sourceSequence !== undefined && input.sourceSequence > sequence)
     throw new Error("Source sequence is ahead of the thread history");
   const evidence = [];
@@ -82,25 +125,35 @@ export async function saveRecord(
       sourcePath: filePath,
     });
   }
-  // Metadata-only saves keep the original source: when the caller does not
-  // cite a thread and the content is unchanged, the record still originates
-  // from the thread that produced the content, not from the maintainer.
-  let source = { threadId, sequence: input.sourceSequence ?? sequence };
-  if (input.threadId === undefined) {
-    try {
-      const previous = library.read(input.id);
-      if (previous.title === input.title && previous.body === input.body)
-        source = previous.source;
-    } catch {
-      // New record: the caller is the source.
-    }
-  }
+  const source = cite
+    ? { threadId, sequence: input.sourceSequence ?? sequence }
+    : previous!.source;
   const record = library.save(
     input,
-    input.global ? null : thread.projectId,
+    previous ? previous.projectId : input.global ? null : thread.projectId,
     evidence,
     source,
   );
   bb.realtime.publish("changed", {});
-  return record;
+  return present(record);
+
+  async function present(record: KnowledgeRecord) {
+    const presented = [];
+    for (const { name, title } of input.present) {
+      const ref = { recordId: input.id, name };
+      const reference = explainerReference(ref, title);
+      try {
+        await explainers.attach(currentThreadId!, ref, title, true);
+        presented.push({ name, attached: true, reference });
+      } catch (cause) {
+        presented.push({
+          name,
+          attached: false,
+          reference,
+          error: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
+    }
+    return { ...record, presented };
+  }
 }

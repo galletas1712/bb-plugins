@@ -17,7 +17,7 @@ measured. stdout.log and stderr.log are preserved. On completion the wrapper wri
 manifest.json, results.json, report.md, capture.json, and a capture receipt.
 
 Requires a BB thread and the Knowledge plugin. Failed capture leaves all run files
-for retry with: bb knowledge save --input-stdin < RUN_DIR/capture.json
+for retry with: bb knowledge save RUN_DIR/capture.json
 A nonzero workload exit is preserved even if evidence capture succeeds.`);
   process.exit(0);
 }
@@ -135,7 +135,6 @@ const body = [
 write("report.md", `# ${context.title}\n\n${body}\n`);
 const capture = {
   id: `benchmark-${randomUUID()}`,
-  expectedVersion: 0,
   title: context.title,
   body,
   threadId,
@@ -147,9 +146,8 @@ write("capture.json", JSON.stringify(capture) + "\n");
 try {
   const receipt = execFileSync(
     "bb",
-    ["knowledge", "save", "--input-stdin", "--json"],
+    ["knowledge", "save", path.join(output, "capture.json"), "--json"],
     {
-      input: JSON.stringify(capture),
       encoding: "utf8",
       maxBuffer: 1024 * 1024,
     },

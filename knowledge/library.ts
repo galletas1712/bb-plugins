@@ -102,46 +102,60 @@ export class Library {
     return path.join(this.directory(id), "body.md");
   }
 
-  /** The artifacts folder is canonical. artifacts.json carries provenance,
-   * but files copied directly onto disk are picked up too: their hash comes
-   * from the filename prefix when present, otherwise from the bytes. */
+  find(id: string): KnowledgeRecord | null {
+    return fs.existsSync(this.bodyPath(id)) ? this.read(id) : null;
+  }
+
+  /** Only the manifest publishes current artifacts. Superseded or interrupted
+   * captures can leave bytes on disk without making them current again. */
   private readArtifacts(dir: string): Artifact[] {
     const file = path.join(dir, "artifacts.json");
     const listed: Artifact[] = fs.existsSync(file)
-      ? artifactSchema
-          .array()
-          .parse(JSON.parse(fs.readFileSync(file, "utf8")))
+      ? artifactSchema.array().parse(JSON.parse(fs.readFileSync(file, "utf8")))
       : [];
-    const artifactsDir = path.join(dir, "artifacts");
-    const seen = new Set(listed.map((a) => a.file));
-    const derived: Artifact[] = [];
-    if (fs.existsSync(artifactsDir)) {
-      for (const name of fs.readdirSync(artifactsDir)) {
-        if (name.startsWith(".")) continue;
-        const rel = `artifacts/${name}`;
-        if (seen.has(rel)) continue;
-        const full = path.join(artifactsDir, name);
-        if (!fs.statSync(full).isFile()) continue;
-        const match = /^([a-f0-9]{64})-(.+)$/.exec(name);
-        derived.push({
-          name: match ? match[2] : name,
-          file: rel,
-          sha256: match ? match[1] : hash(fs.readFileSync(full)),
-          bytes: fs.statSync(full).size,
-          sourcePath: "unknown (copied directly into artifacts/)",
-          hostId: "unknown",
-        });
-      }
-    }
-    return [...listed, ...derived];
+    if (new Set(listed.map((a) => a.name)).size !== listed.length)
+      throw new Error("Duplicate artifact names in manifest");
+    return listed;
   }
 
   read(id: string): KnowledgeRecord {
     const file = this.bodyPath(id);
     const raw = fs.readFileSync(file, "utf8");
-    const updatedAt = fs.statSync(file).mtime.toISOString();
+    const manifest = path.join(path.dirname(file), "artifacts.json");
+    const updatedAt = new Date(
+      Math.max(
+        fs.statSync(file).mtimeMs,
+        fs.existsSync(manifest) ? fs.statSync(manifest).mtimeMs : 0,
+      ),
+    ).toISOString();
     const parsed = parse(id, raw, updatedAt);
-    return { ...parsed, artifacts: this.readArtifacts(path.dirname(file)) };
+    try {
+      return { ...parsed, artifacts: this.readArtifacts(path.dirname(file)) };
+    } catch (cause) {
+      const reason = cause instanceof Error ? cause.message : String(cause);
+      return {
+        ...parsed,
+        artifacts: [],
+        artifactError: `Invalid artifact manifest for ${id}: ${reason}`,
+      };
+    }
+  }
+
+  /** Resolve only a current, content-addressed artifact inside this record. */
+  artifact(id: string, name: string) {
+    const record = this.read(id);
+    if (record.artifactError) throw new Error(record.artifactError);
+    const artifact = record.artifacts.find((a) => a.name === name);
+    if (!artifact) throw new Error(`No saved artifact named ${name}`);
+    if (artifact.file !== `artifacts/${artifact.sha256}-${artifact.name}`)
+      throw new Error("Invalid saved artifact path");
+    const directory = fs.realpathSync(
+      path.join(this.directory(id), "artifacts"),
+    );
+    const file = fs.realpathSync(path.join(this.directory(id), artifact.file));
+    if (path.dirname(file) !== directory)
+      throw new Error("Saved artifact is outside its record");
+    return { artifact, path: file };
   }
 
   all(): KnowledgeRecord[] {
@@ -152,8 +166,8 @@ export class Library {
       .map((entry) => this.read(entry.name));
   }
 
-  /** Create or fully replace a record. Small updates should edit body.md
-   * directly instead of going through this method. */
+  /** Keep the merge synchronous: asynchronous capture happens before this
+   * method, so concurrent captures cannot overwrite each other's entries. */
   save(
     input: SaveInput,
     projectId: string | null,
@@ -166,9 +180,10 @@ export class Library {
     source: KnowledgeRecord["source"],
   ): KnowledgeRecord {
     const dir = this.directory(input.id);
-    const previous = fs.existsSync(this.bodyPath(input.id))
-      ? this.read(input.id)
-      : null;
+    const previous = this.find(input.id);
+    if (previous?.artifactError) throw new Error(previous.artifactError);
+    if (!previous && (input.title === undefined || input.body === undefined))
+      throw new Error("New records require title and body");
     if (previous && previous.projectId !== projectId)
       throw new Error("A record cannot move between project and global scopes");
     const artifacts = evidence.map((a) => {
@@ -187,10 +202,10 @@ export class Library {
     const now = new Date().toISOString();
     const record: KnowledgeRecord = {
       id: input.id,
-      title: input.title,
-      body: input.body,
+      title: input.title ?? previous!.title,
+      body: input.body ?? previous!.body,
       projectId,
-      source,
+      source: input.title === undefined ? previous!.source : source,
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
       artifacts: [
@@ -200,13 +215,17 @@ export class Library {
         ...artifacts,
       ],
     };
-    atomicWrite(this.bodyPath(input.id), serialize(record));
-    if (record.artifacts.length)
-      atomicWrite(
-        path.join(dir, "artifacts.json"),
-        JSON.stringify(record.artifacts, null, 2) + "\n",
-      );
-    return record;
+    const body = serialize(record);
+    if (!previous || body !== serialize(previous))
+      atomicWrite(this.bodyPath(input.id), body);
+    const manifest = JSON.stringify(record.artifacts, null, 2) + "\n";
+    const manifestPath = path.join(dir, "artifacts.json");
+    if (
+      !fs.existsSync(manifestPath) ||
+      fs.readFileSync(manifestPath, "utf8") !== manifest
+    )
+      atomicWrite(manifestPath, manifest);
+    return this.read(input.id);
   }
 
   /** Move a record into a trash folder at the library root, outside the QMD
