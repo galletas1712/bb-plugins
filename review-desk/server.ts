@@ -688,7 +688,6 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`remove worktree for ${row.owner}/${row.repo}#${row.number}: ${errorMessage(cause)}`);
     }
   }
-  void (async () => { for (const row of q.reviews.all()) await removeLegacyWorktree(row); })();
 
   function releaseReview(row: ReviewRow, reason: string): void {
     publish(row.id, reason);
@@ -1844,6 +1843,16 @@ export default async function plugin(bb: BbPluginApi) {
         }
       } catch (cause) {
         return { exitCode: 1, stderr: errorMessage(cause) };
+      }
+    },
+  });
+
+  // Host calls are unavailable while the plugin registers, so startup cleanup runs as a service.
+  bb.background.service("remove-legacy-worktrees", {
+    async start(signal) {
+      for (const row of q.reviews.all()) {
+        if (signal.aborted) return;
+        await removeLegacyWorktree(row);
       }
     },
   });

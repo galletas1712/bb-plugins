@@ -198,16 +198,15 @@ test("cached merge actions survive reload, return while GitHub is slow, and refr
   } finally { release?.(null); Date.now = now; await f.harness.lifecycle.dispose(); }
 });
 
-test("startup removes worktrees that earlier versions kept for each review", async () => {
+test("a startup service removes worktrees that earlier versions kept for each review", async () => {
   const f = await fixture();
   try {
     f.setStack(null);
     const review = await f.open(1);
     f.bb.storage.database().prepare<[string]>("UPDATE reviews SET worktree = '/old/worktrees/o__r__1' WHERE id = ?").run(review.id);
-    let released!: () => void; const release = new Promise<void>((resolve) => { released = resolve; });
-    f.onRead((method) => { if (method === "repo_release") released(); return undefined; });
     await f.reload();
-    await release; await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(f.calls.filter((call) => call.method === "repo_release").length, 0, "registration makes no host calls");
+    await f.harness.behavior.runService("remove-legacy-worktrees").done;
     assert.deepEqual(f.calls.filter((call) => call.method === "repo_release").map((call) => call.input), [{ repoPath: "/repo", worktree: "/old/worktrees/o__r__1" }]);
     assert.equal(f.bb.storage.database().prepare<[string], { worktree: string }>("SELECT worktree FROM reviews WHERE id = ?").get(review.id)?.worktree, "");
     assert.equal((await f.list()).length, 1);
