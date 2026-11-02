@@ -181,34 +181,34 @@ diagram. Split it into more diagrams when there is more to show. Draw the actual
 components, state, or data rather than boxes in an outline, and use arrows only
 for real relationships.
 
-Within each chapter, layer the detail so the reader expands into precision.
-Simplifying at the top is acceptable only because the detail is one expansion
-away. A chapter opens with its diagrams and two or three sentences. Expandable
-items below hold the exact names, formulas, numbers, conditions, and each failure
-with its cause and fix, as short items with one fact per line. Give each idea its
-own item and keep expanding while a section still hides one.
+Keep each chapter's essential ideas, reasoning, results, and qualifications visible,
+with diagrams and short prose. Give a substantial idea its own section or chapter.
+Reserve expanders for optional minutiae that readers can skip without losing the
+explanation. Use visuals within optional detail when they clarify a mechanism or
+relationship. Hiding and revealing text alone is not an interactive explanation.
 
-The deepest layer is complete: every result, limit, caveat, and open question that
-matters in the source records is reachable, and upper layers never contradict it.
+The explainer is complete: every result, limit, caveat, and open question that
+matters in the source records is covered, and optional detail agrees with the main
+explanation.
 Every fact an explainer shows must also be in a record body, so add any missing
 finding to the record first. Mark inferred causes as inferred. Before saving,
 check coverage against the records and check that no diagram holds a sentence. Use
-tables only for compact reference data inside the detail layer.
+tables only for compact reference data in optional detail.
 
 Write simply and precisely for someone who may know the ideas but not the
 codebase. Use plain role names in diagrams. Explain roles before code names, and
 define terms and symbols where first used. Leave commit SHAs, thread references,
 and check dates to the record, since readers of an explainer do not need them.
-Where exact implementation matters, add a brief annotated snippet to the detail
-item. Use pseudocode for architecture.
+Where exact implementation matters, add a brief annotated snippet alongside the
+explanation. Use pseudocode for architecture.
 
 Recall reusable HTML first, and check it against the current record before
 presenting it again. Author new visuals as self-contained UTF-8 HTML under 5 MiB
 with inline CSS, JavaScript, and assets, and no companion files or relative
 imports. Reflow or split diagrams at narrow widths instead of shrinking their
 labels. Use BB variables such as `var(--background)` and `var(--foreground)`. With
-a browser, check rendering at 360px and in dark mode, every chapter, expandable
-layer, and control, and console errors. Otherwise inspect the file and disclose
+a browser, check rendering at 360px and in dark mode, every chapter, expander,
+and control, and console errors. Otherwise inspect the file and disclose
 that rendering was not verified.
 
 Present visuals, charts, diagrams, mockups, and reports as self-contained HTML in
