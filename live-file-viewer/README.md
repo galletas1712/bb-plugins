@@ -1,6 +1,6 @@
 # Live File Viewer
 
-A BB file opener for `.md`, `.markdown`, `.html`, `.htm`, and `.svg`. Documents open in rendered preview by default; icon controls switch to editing or a resizable editor/preview split. A line-targeted open selects the editor and scrolls to the requested lines.
+A BB file opener for `.md`, `.markdown`, `.html`, `.htm`, and `.svg`. Documents open in rendered preview by default; icon controls switch to editing or a resizable editor/preview split. The editor loads when first requested. A line-targeted open selects the editor and scrolls to the requested lines.
 
 Previews show the last saved document and refresh only after a successful save or explicit reload from disk. Unsaved edits and view-mode switches do not restart the preview. The editor uses CodeMirror 6; other file extensions continue using their configured BB opener. The plugin uses public SDK APIs and does not replace BB's panel layout or inline visualization plugin.
 
@@ -18,18 +18,17 @@ In BB Settings → File openers, select **Live File Viewer** for the supported e
 
 ## Controls
 
-All toolbar actions are icon buttons with hover tooltips and accessible labels. Editor mode also shows a Copy icon that copies the entire buffer, including unsaved changes; it briefly changes to a checkmark on success. Copy is hidden in Preview and Split modes:
+Toolbar actions use icon buttons with hover tooltips and accessible labels. Editor mode also shows a Copy icon that copies the entire buffer, including unsaved changes; it briefly changes to a checkmark on success. Copy is hidden in Preview and Split modes. Read-only artifacts label the editor **Source** and omit Save.
 
 | Icon                   | Action                                                        |
 | ---------------------- | ------------------------------------------------------------- |
 | Eye                    | Rendered preview                                              |
-| Code                   | Editor                                                        |
+| Code                   | Editor, or Source for read-only artifacts                     |
 | Columns                | Resizable editor/preview split                                |
 | Save                   | Save, also Ctrl/⌘ S                                           |
-| Counterclockwise arrow | Reload from disk, confirming before discarding edits          |
-| Expand / contract      | Browser fullscreen / exit, where supported; Escape also exits |
+| Refresh arrows         | Reload from disk, confirming before discarding edits          |
 
-BB's own panel maximize/restore control remains available. The split divider supports dragging and Left/Right arrow keys. The file name and save/read-only status appear beside the controls.
+Use BB's panel maximize/restore control for more space. The split divider supports dragging and Left/Right arrow keys. The toolbar shows status only for unsaved changes, saving, or read-only files. Reload confirmation uses explicit **Discard changes** and **Keep editing** buttons.
 
 ## Drafts, saving, and isolation
 
@@ -52,6 +51,6 @@ npm test
 npm run build
 ```
 
-Tests use BB's official frontend/backend harnesses and a real CodeMirror editor under jsdom. They cover saved HTML/Markdown/SVG previews, sandbox attributes, selection and undo preservation, explicit saves, edits during saves, conflicts, tab-remount draft retention, reload confirmation, source/host routing, path confinement, and the public-SDK boundary. Browser layout and fullscreen still need a live BB smoke test.
+Tests use BB's official frontend/backend harnesses and a real CodeMirror editor under jsdom. They cover saved HTML/Markdown/SVG previews, sandbox attributes, lazy editor loading, selection and undo preservation, read-only line navigation, explicit saves, edits during saves, conflicts, tab-remount draft retention, reload confirmation, source/host routing, path confinement, and the public-SDK boundary. Browser layout still needs a live BB smoke test.
 
 Try [demo.html](examples/demo.html), [demo.md](examples/demo.md), and [demo.svg](examples/demo.svg).

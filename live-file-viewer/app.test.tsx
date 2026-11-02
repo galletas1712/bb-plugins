@@ -2,6 +2,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
+import type { PluginFileOpenerProps } from "@get-bb/plugin-sdk/app";
 import { EditorView } from "@codemirror/view";
 import { undo } from "@codemirror/commands";
 import { htmlDocument } from "./preview";
@@ -10,7 +11,13 @@ Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
 Range.prototype.getBoundingClientRect = () => new DOMRect();
 afterEach(cleanup);
 let sequence = 0;
-async function mount(extension = "html") {
+async function mount(
+  extension = "html",
+  options: {
+    readOnly?: boolean;
+    lineRange?: PluginFileOpenerProps["experimental_lineRange"];
+  } = {},
+) {
   const app = await loadPluginApp(() => import("./app"));
   const writes = vi.fn(async (_input: unknown) => ({
     outcome: "written",
@@ -21,11 +28,12 @@ async function mount(extension = "html") {
     {
       path: `test-${sequence++}.${extension}`,
       source: {
-        kind: "workspace",
+        kind: options.readOnly ? "thread-storage" : "workspace",
         threadId: "thread",
         environmentId: "env",
         projectId: "project",
       },
+      experimental_lineRange: options.lineRange,
       Original: () => null,
     },
     {
@@ -34,7 +42,7 @@ async function mount(extension = "html") {
           content: "<h1>Saved</h1>",
           sha256: "a".repeat(64),
           rootPath: "/work",
-          readOnly: false,
+          readOnly: options.readOnly ?? false,
         }),
         assets: () => ({
           baseUrl: "https://bb.test/assets/token/",
@@ -44,10 +52,7 @@ async function mount(extension = "html") {
       },
     },
   );
-  await slot.findByRole("button", { name: "Editor" });
-  await waitFor(() =>
-    expect(slot.container.querySelector(".cm-editor")).not.toBeNull(),
-  );
+  await slot.findByRole("button", { name: options.readOnly ? "Source" : "Editor" });
   return { slot, writes };
 }
 it("keeps the saved preview in a sandbox and preserves selection and undo across modes", async () => {
@@ -55,12 +60,18 @@ it("keeps the saved preview in a sandbox and preserves selection and undo across
   expect(
     slot.getByRole("button", { name: "Preview" }).getAttribute("aria-pressed"),
   ).toBe("true");
+  expect(slot.container.querySelector(".cm-editor")).toBeNull();
+  for (const label of ["Save (Ctrl/⌘ S)", "Reload from disk"]) {
+    const button = slot.getByRole("button", { name: label });
+    expect(button.querySelectorAll("svg path").length).toBeGreaterThan(0);
+    expect(button.getAttribute("title")).toBe(label);
+  }
   fireEvent.click(slot.getByRole("button", { name: "Editor" }));
   await waitFor(() =>
     expect(slot.container.querySelector(".cm-editor")).not.toBeNull(),
   );
   const element = slot.container.querySelector(".cm-editor")!;
-  const view = EditorView.findFromDOM(element as HTMLElement)!;
+  let view = EditorView.findFromDOM(element as HTMLElement)!;
   act(() =>
     view.dispatch({
       changes: {
@@ -80,11 +91,9 @@ it("keeps the saved preview in a sandbox and preserves selection and undo across
   expect(writes).not.toHaveBeenCalled();
   fireEvent.click(slot.getByRole("button", { name: "Preview" }));
   fireEvent.click(slot.getByRole("button", { name: "Editor" }));
-  expect(
-    EditorView.findFromDOM(
-      slot.container.querySelector(".cm-editor") as HTMLElement,
-    ),
-  ).toBe(view);
+  view = EditorView.findFromDOM(
+    slot.container.querySelector(".cm-editor") as HTMLElement,
+  )!;
   expect(view.state.selection.main.anchor).toBe(5);
   act(() => {
     undo(view);
@@ -167,17 +176,26 @@ it("keeps Markdown preview unchanged while editing and requires confirmation bef
   fireEvent.click(slot.getByRole("button", { name: "Keep editing" }));
   expect(view.state.doc.toString()).toBe("# Unsaved markdown");
   fireEvent.click(slot.getByRole("button", { name: "Reload from disk" }));
-  fireEvent.click(slot.getByRole("button", { name: "Discard and reload" }));
+  fireEvent.click(slot.getByRole("button", { name: "Discard changes" }));
   await waitFor(() => expect(view.state.doc.toString()).toBe("<h1>Saved</h1>"));
   expect(writes).not.toHaveBeenCalled();
 });
 
-it("renders explicit action glyphs rather than the host fallback", async () => {
-  const { slot } = await mount();
-  for (const [label, icon] of [["Save (Ctrl/⌘ S)", "Save"], ["Reload from disk", "RotateCcw"]]) {
-    const button = slot.getByRole("button", { name: label });
-    expect(button.querySelector("svg")?.getAttribute("data-viewer-icon")).toBe(icon);
-    expect(button.querySelectorAll("svg path").length).toBeGreaterThan(0);
-    expect(button.getAttribute("title")).toBe(label);
-  }
+it("opens read-only line targets in source view without exposing Save", async () => {
+  const { slot, writes } = await mount("html", {
+    readOnly: true,
+    lineRange: { startLineNumber: 1, endLineNumber: 1 },
+  });
+  const view = EditorView.findFromDOM(
+    slot.container.querySelector(".cm-editor") as HTMLElement,
+  )!;
+  expect(
+    slot.getByRole("button", { name: "Source" }).getAttribute("aria-pressed"),
+  ).toBe("true");
+  const selection = view.state.selection.main;
+  expect(view.state.sliceDoc(selection.from, selection.to)).toBe("<h1>Saved</h1>");
+  expect(view.state.readOnly).toBe(true);
+  expect(slot.queryByRole("button", { name: "Save (Ctrl/⌘ S)" })).toBeNull();
+  fireEvent.keyDown(view.contentDOM, { key: "s", ctrlKey: true });
+  expect(writes).not.toHaveBeenCalled();
 });

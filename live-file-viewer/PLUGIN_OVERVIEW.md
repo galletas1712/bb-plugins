@@ -2,7 +2,7 @@
 
 This plugin supplies a `fileOpener` for Markdown, HTML, and SVG. It does not register a sidebar replacement or alter inline-vis.
 
-- `app.tsx` owns accessible icon controls, modes, split resizing, reload confirmation, and browser fullscreen.
+- `app.tsx` owns accessible controls, modes, split resizing, and reload confirmation. It loads the editor on first use and uses BB's panel maximize control.
 - `document.ts` owns in-memory draft sessions and race-safe, conflict-checked saves.
 - `editor.tsx` embeds CodeMirror with retained editor state and line navigation.
 - `preview.tsx` renders the saved document using BB Markdown, a sandboxed HTML iframe, or an SVG image.

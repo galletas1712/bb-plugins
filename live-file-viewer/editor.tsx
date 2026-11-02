@@ -54,7 +54,7 @@ export function Editor({
               indentWithTab,
             ]),
             EditorView.contentAttributes.of({
-              "aria-label": `Edit ${doc.request.path}`,
+              "aria-label": `${doc.readOnly ? "Source of" : "Edit"} ${doc.request.path}`,
               spellcheck: "false",
             }),
             EditorView.theme({

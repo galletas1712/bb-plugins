@@ -53,13 +53,16 @@ export function DocumentView({
 }) {
   useSyncExternalStore(doc.subscribe, doc.snapshot);
   const rpc = useRpc<typeof rpcContract>();
-  const root = useRef<HTMLDivElement>(null);
   const panes = useRef<HTMLDivElement>(null);
   const [ratio, setRatio] = useState(50);
-  const [full, setFull] = useState(false);
+  const [editorLoaded, setEditorLoaded] = useState(false);
+  const editorRequested = doc.mode !== "preview" || !!lineRange;
   const [confirmReload, setConfirmReload] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (editorRequested) setEditorLoaded(true);
+  }, [editorRequested]);
   useEffect(() => { setCopied(false); }, [doc.content, doc.mode]);
   useEffect(() => {
     if (!copied) return;
@@ -79,21 +82,6 @@ export function DocumentView({
   };
   const save = () => {
     void doc.save((request) => rpc.call("write", request));
-  };
-  useEffect(() => {
-    const changed = () => setFull(document.fullscreenElement === root.current);
-    document.addEventListener("fullscreenchange", changed);
-    return () => document.removeEventListener("fullscreenchange", changed);
-  }, []);
-  const fullscreen = async () => {
-    try {
-      if (document.fullscreenElement === root.current)
-        await document.exitFullscreen();
-      else await root.current?.requestFullscreen();
-    } catch (error) {
-      doc.error = error instanceof Error ? error.message : String(error);
-      doc.notify();
-    }
   };
   const reload = async () => {
     setConfirmReload(false);
@@ -115,12 +103,18 @@ export function DocumentView({
   };
   const modes: [Mode, IconName, string][] = [
     ["preview", "Eye", "Preview"],
-    ["editor", "Code", "Editor"],
+    ["editor", "Code", doc.readOnly ? "Source" : "Editor"],
     ["split", "Columns2", "Split view"],
   ];
+  const status = doc.readOnly
+    ? "Read-only artifact"
+    : doc.saving
+      ? "Saving"
+      : doc.dirty
+        ? "Unsaved changes"
+        : null;
   return (
     <div
-      ref={root}
       className="lfv-root"
       onKeyDown={(event) => {
         if (
@@ -136,42 +130,20 @@ export function DocumentView({
         <span className="lfv-filename" title={doc.request.path}>
           {doc.request.path.split(/[\\/]/).at(-1)}
         </span>
-        <span
-          className="lfv-status"
-          role="status"
-          aria-live="polite"
-          title={
-            doc.readOnly
-              ? "Read-only artifact"
-              : doc.saving
-                ? "Saving"
-                : doc.dirty
-                  ? "Unsaved changes"
-                  : "Saved"
-          }
-          aria-label={
-            doc.readOnly
-              ? "Read-only artifact"
-              : doc.saving
-                ? "Saving"
-                : doc.dirty
-                  ? "Unsaved changes"
-                  : "Saved"
-          }
-        >
-          <Icon
-            name={
-              doc.readOnly
-                ? "Lock"
-                : doc.saving
-                  ? "Loading"
-                  : doc.dirty
-                    ? "Circle"
-                    : "Check"
-            }
-            className={`size-3 ${doc.saving ? "animate-spin" : ""}`}
-          />
-        </span>
+        {status && (
+          <span
+            className="lfv-status"
+            role="status"
+            aria-live="polite"
+            title={status}
+            aria-label={status}
+          >
+            <Icon
+              name={doc.readOnly ? "Lock" : doc.saving ? "Loading" : "Circle"}
+              className={`size-3 ${doc.saving ? "animate-spin" : ""}`}
+            />
+          </span>
+        )}
         <div className="lfv-modes" role="group" aria-label="Document view">
           {modes.map(([mode, icon, label]) => (
             <Tool
@@ -190,25 +162,20 @@ export function DocumentView({
             onClick={() => void copy()}
           />
         )}
-        <Tool
-          label="Save (Ctrl/⌘ S)"
-          icon="Save"
-          disabled={doc.readOnly || doc.saving || reloading}
-          onClick={save}
-        />
+        {!doc.readOnly && (
+          <Tool
+            label="Save (Ctrl/⌘ S)"
+            icon="Save"
+            disabled={doc.saving || reloading}
+            onClick={save}
+          />
+        )}
         <Tool
           label="Reload from disk"
-          icon="RotateCcw"
+          icon="RefreshCw"
           disabled={doc.saving || reloading}
           onClick={() => (doc.dirty ? setConfirmReload(true) : void reload())}
         />
-        {typeof document !== "undefined" && document.fullscreenEnabled && (
-          <Tool
-            label={full ? "Exit full screen" : "Full screen"}
-            icon={full ? "Minimize2" : "Maximize2"}
-            onClick={() => void fullscreen()}
-          />
-        )}
       </div>
       {(doc.error || doc.conflict) && (
         <div className="lfv-notice" role="alert">
@@ -232,16 +199,20 @@ export function DocumentView({
           aria-label="Discard unsaved changes"
         >
           Discard unsaved changes and reload?
-          <Tool
-            label="Discard and reload"
-            icon="Check"
+          <button
+            type="button"
+            className="lfv-tool lfv-text-button"
             onClick={() => void reload()}
-          />
-          <Tool
-            label="Keep editing"
-            icon="X"
+          >
+            Discard changes
+          </button>
+          <button
+            type="button"
+            className="lfv-tool lfv-text-button"
             onClick={() => setConfirmReload(false)}
-          />
+          >
+            Keep editing
+          </button>
         </div>
       )}
       <div
@@ -253,7 +224,9 @@ export function DocumentView({
           className="lfv-editor-pane"
           inert={doc.mode === "preview" || reloading}
         >
-          <Editor doc={doc} save={save} lineRange={lineRange} />
+          {(editorRequested || editorLoaded) && (
+            <Editor doc={doc} save={save} lineRange={lineRange} />
+          )}
         </div>
         {doc.mode === "split" && (
           <div

@@ -8,7 +8,7 @@
   },
   "bb": {
     "name": "Live File Viewer",
-    "description": "Preview, edit, and compare live Markdown, HTML, and SVG documents.",
+    "description": "Preview and edit Markdown, HTML, and SVG documents side by side.",
     "branding": {
       "icon": "PanelsTopLeft"
     },
