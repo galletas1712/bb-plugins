@@ -151,7 +151,6 @@ function timelineEvent(event: TimelineEvent, index: number, owner: string, repo:
     event.rename ? `${event.rename.from} → ${event.rename.to}` : null,
     issue ? `#${issue.number} ${issue.title}` : null,
     event.message ?? event.body, event.dismissed_review?.dismissal_message, event.lock_reason,
-    sha,
   ].filter((value): value is string => typeof value === "string" && value !== "").join("\n");
   return {
     id: String(event.id ?? `${event.event}:${sha ?? index}`),
@@ -160,6 +159,7 @@ function timelineEvent(event: TimelineEvent, index: number, owner: string, repo:
     createdAt: event.created_at ?? event.submitted_at ?? event.committer?.date ?? event.author?.date ?? null,
     url: event.html_url ?? issue?.html_url ?? (sha ? `https://github.com/${owner}/${repo}/commit/${sha}` : `https://github.com/${owner}/${repo}/pull/${number}#event-${event.id ?? ""}`),
     details,
+    sha: sha ?? null,
   };
 }
 

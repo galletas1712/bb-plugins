@@ -25,7 +25,7 @@ const resize = async (width) => act(() => {
 const { fireEvent, act, waitFor } = await import("@testing-library/react");
 const { loadPluginApp, renderSlot: sdkRenderSlot } = await import("@get-bb/plugin-sdk/testing/app");
 const mergeOptions = { methods: ["squash"], defaultMethod: "squash", reason: null, headSha: "head", baseRefName: "main", prs: [{ number: 1, headSha: "head" }] };
-const renderSlot = (slot, props, options) => sdkRenderSlot(slot, props, { ...options, rpc: { review_merge_options: () => mergeOptions, ...options?.rpc } });
+const renderSlot = (slot, props, options) => sdkRenderSlot(slot, props, { ...options, rpc: { review_merge_options: () => mergeOptions, review_description: () => ({ body: "Description", canEdit: false }), review_conversation: () => ({ comments: [], reviews: [], events: [], fetchedAt: 0 }), ...options?.rpc } });
 const app = await loadPluginApp(() => import("../app.tsx"));
 const { queryClient, reviewKey } = await import("../lib/query-client.ts");
 afterEach(() => queryClient.clear());
@@ -230,7 +230,7 @@ test("conversation shows the latest mixed activity and repeatedly prepends earli
     const common = { id, author: `author-${id}`, body: `Activity ${id}`, url: review.url, canEdit: false };
     if (id % 3 === 1) conversation.comments.push({ ...common, createdAt: activityTime(id) });
     else if (id % 3 === 2) conversation.reviews.push({ ...common, state: "COMMENTED", submittedAt: activityTime(id) });
-    else conversation.events.push({ id: String(id), event: "labeled", details: common.body, actor: common.author, createdAt: activityTime(id), url: review.url });
+    else conversation.events.push({ id: String(id), event: "reopened", details: common.body, actor: common.author, createdAt: activityTime(id), url: review.url });
   }
   const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
     reviews_list: () => ({ reviews: [] }), reviews_get: () => ({ ...detail, threads: [] }), review_seen: () => ({ ok: true }),
@@ -434,6 +434,50 @@ test("Recent uses one status per PR, only offers stack-level removal, and opens 
     await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Remove stack reviews" })); });
     assert.deepEqual(removed, { key: "gh:o/r#7" });
   } finally { slot.lifecycle.unmount(); window.confirm = previousConfirm; }
+});
+
+test("front-page buttons copy GitHub links, mark unopened layers ready and confirm closing without navigation", async () => {
+  let reviews = summaries.filter((pr) => pr.state === "OPEN");
+  const actions = []; const copied = [];
+  const previousConfirm = window.confirm;
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: async (url) => { copied.push(url); } } } });
+  let confirm = false;
+  window.confirm = () => confirm;
+  let release;
+  const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: {
+    reviews_list: () => ({ reviews }),
+    pr_action: async (input) => {
+      actions.push(input);
+      if (input.action === "ready") await new Promise((resolve) => { release = resolve; });
+      reviews = input.action === "close" ? reviews.filter((pr) => pr.number !== input.number) : reviews.map((pr) => pr.number === input.number ? { ...pr, isDraft: false } : pr);
+      return { ok: true };
+    },
+  } });
+  try {
+    await slot.findByRole("button", { name: "Copy GitHub link for #4" });
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Copy GitHub link for #4" })); });
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Copy GitHub link for #3" })); });
+    assert.deepEqual(copied, ["https://github.com/o/r/pull/4", "https://github.com/o/r/pull/3"]);
+    assert.equal(slot.queryByRole("button", { name: "Mark #4 ready for review" }), null);
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Mark #3 ready for review" })); });
+    assert.equal(slot.getByRole("button", { name: "Mark #3 ready for review" }).disabled, true);
+    assert.equal(slot.getByRole("button", { name: "Close PR #3" }).disabled, true);
+    await act(async () => { release(); });
+    await waitFor(() => assert.ok(slot.queryByRole("button", { name: "Mark #3 ready for review" }) === null));
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Close PR #3" })); });
+    assert.equal(actions.length, 1, "cancelled close sends no mutation");
+    confirm = true;
+    await act(async () => { fireEvent.click(slot.getByRole("button", { name: "Close PR #3" })); });
+    await waitFor(() => assert.ok(slot.queryByText("Draft layer") === null));
+    assert.deepEqual(actions, [{ owner: "o", repo: "r", number: 3, action: "ready" }, { owner: "o", repo: "r", number: 3, action: "close" }]);
+    assert.equal(slot.inspection.navigateCalls.length, 0);
+    assert.equal(slot.inspection.rpcCalls.some((call) => call.method === "reviews_open"), false);
+  } finally {
+    release?.(); slot.lifecycle.unmount(); window.confirm = previousConfirm;
+    if (previousNavigator) Object.defineProperty(globalThis, "navigator", previousNavigator);
+    else delete globalThis.navigator;
+  }
 });
 
 test("stack checkmarks use full-stack readiness rather than the most recently active approved PR", async () => {
@@ -659,7 +703,7 @@ test("repository groups sort by latest PR activity and nest stacks independently
     assert.ok(slot.getAllByLabelText("Diff: 40 additions, 8 deletions").length > 0);
     fireEvent.click(stack.querySelector("summary"));
     assert.equal(stack.open, true);
-    const layers = [...stack.querySelectorAll("ul button")];
+    const layers = [...stack.querySelectorAll("ul > li")].map((layer) => layer.querySelector("button"));
     assert.ok(layers[0].textContent.includes("Stack bottom"));
     assert.ok(layers[1].textContent.includes("Stack top"));
     assert.equal(stack.parentElement.querySelectorAll('button[aria-label="Remove stack reviews"]').length, 1);
@@ -673,5 +717,67 @@ test("repository groups sort by latest PR activity and nest stacks independently
     assert.equal(slot.getByLabelText("Repository same/shared"), repo);
     assert.equal(repo.open, false);
     assert.equal(stack.open, true);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test("PRs open in Conversation with GitHub's tab order and Changes still opens the diff", async () => {
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => ({ ...detail, threads: [] }), review_seen: () => ({ ok: true }),
+  } });
+  try {
+    await slot.findByRole("region", { name: "Pull request description" });
+    const nav = slot.getByRole("navigation", { name: "Pull request" });
+    assert.deepEqual([...nav.querySelectorAll("button")].map((button) => button.textContent), ["Conversation", "Commits", "Changes"]);
+    assert.equal(slot.getByRole("button", { name: "Conversation", exact: true }).getAttribute("aria-current"), "page");
+    fireEvent.click(slot.getByRole("button", { name: "Changes", exact: true }));
+    assert.equal(slot.queryByRole("region", { name: "Pull request description" }), null);
+    assert.equal(slot.getByRole("button", { name: "Changes", exact: true }).getAttribute("aria-current"), "page");
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test("branch updates collapse together, expose latest hashes and keep feedback and force-push history", async () => {
+  const event = (id, type = "committed") => ({ id: String(id), event: type, actor: "author", createdAt: activityTime(id), details: `Commit title ${id}`, sha: String(id).repeat(40), url: `https://github.com/o/r/commit/${String(id).repeat(40)}` });
+  const conversation = { comments: [{ id: 1, author: "reviewer", createdAt: activityTime(6), body: "Please keep this conversation visible", canEdit: false, url: review.url }], reviews: [{ id: 1, author: "reviewer", submittedAt: activityTime(8), state: "APPROVED", body: "", canEdit: false, url: review.url }], events: [event(1), event(2), event(3), event(4), event(5, "review_requested"), event(7, "head_ref_force_pushed"), event(9, "labeled"), event(10, "assigned")], fetchedAt: 0 };
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => ({ ...detail, threads: [] }), review_seen: () => ({ ok: true }), review_conversation: () => conversation,
+  } });
+  try {
+    const activity = await slot.findByRole("region", { name: "Conversation activity" });
+    assert.equal(activity.querySelectorAll("[data-conversation-activity]").length, 4);
+    const group = slot.getByText("added 4 commits").closest("details");
+    assert.equal(group.open, false);
+    assert.deepEqual([...group.nextElementSibling.querySelectorAll("a")].map((link) => link.textContent), ["2222222", "3333333", "4444444"]);
+    fireEvent.click(group.querySelector("summary"));
+    assert.ok(slot.getByText("Commit title 1"));
+    assert.ok(slot.getByRole("link", { name: "1111111", exact: true }));
+    assert.ok(slot.getByText("Please keep this conversation visible"));
+    assert.ok(slot.getByText("approved these changes"));
+    assert.ok(slot.getByText(/including a force-push/));
+    for (const id of [5, 9, 10]) assert.equal(slot.queryByText(`Commit title ${id}`), null);
+    await act(async () => queryClient.setQueryData(reviewKey(review.id, "conversation"), { ...conversation, events: [...conversation.events, { ...event(11), createdAt: activityTime(4.5) }] }));
+    assert.equal(group.open, true, "a refreshed group keeps its disclosure open");
+    await slot.findByText("added 5 commits");
+  } finally { slot.lifecycle.unmount(); }
+});
+
+test("checks summarize the latest head, expand job details and never treat pending or unknown checks as success", async () => {
+  const check = (name, status, conclusion = null) => ({ name, status, conclusion, url: `https://github.com/o/r/actions/${name}` });
+  const slot = renderSlot(app.navPanels[0], { subPath: "review" }, { rpc: {
+    reviews_list: () => ({ reviews: [] }), reviews_get: () => ({ ...detail, threads: [], review: { ...review, headSha: "abcdef0123456789", checks: [check("lint", "COMPLETED", "SUCCESS"), check("build", "IN_PROGRESS"), check("tests", "FAILURE")] } }), review_seen: () => ({ ok: true }),
+  } });
+  try {
+    const checks = await slot.findByRole("region", { name: "Checks" });
+    assert.ok(slot.getByText("Some checks were not successful"));
+    assert.ok(slot.getByText("1 unsuccessful, 1 pending, 1 successful"));
+    assert.equal(slot.getByRole("link", { name: "abcdef0" }).getAttribute("href"), "https://github.com/o/r/commit/abcdef0123456789");
+    const disclosure = checks.querySelector("details");
+    assert.equal(disclosure.open, false);
+    fireEvent.click(disclosure.querySelector("summary"));
+    assert.equal(slot.getByRole("link", { name: "Details for tests" }).getAttribute("href"), "https://github.com/o/r/actions/tests");
+    assert.ok(slot.getByText("in progress"));
+    for (const [jobs, expected] of [[[], "No checks reported"], [[check("tests", "SUCCESS")], "All checks have passed"], [[check("tests", "COMPLETED")], "Some checks are pending"], [[check("tests", "PENDING", "PENDING")], "Some checks are pending"], [[check("tests", "COMPLETED", "CANCELLED")], "Some checks were not successful"]]) {
+      await act(async () => queryClient.setQueryData(reviewKey(review.id, "detail"), { ...detail, threads: [], review: { ...review, checks: jobs } }));
+      await slot.findByText(expected);
+    }
   } finally { slot.lifecycle.unmount(); }
 });

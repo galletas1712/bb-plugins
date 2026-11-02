@@ -134,3 +134,16 @@ test("a failed timeline request fails the conversation fetch instead of returnin
   };
   await assert.rejects(fetchConversation(run, "o", "r", 1), /GitHub rate limit/);
 });
+
+test("timeline preserves structured commit hashes and force-push targets without adding hashes to prose", async () => {
+  const sha = "abcdef0123456789abcdef0123456789abcdef01";
+  const run = async (_cmd: string, args: string[]) => ({ stdout: JSON.stringify(args.at(-1)?.includes("/timeline?") ? [[
+    { event: "committed", sha, author: { name: "Author" }, committer: { date: "2026-10-22T17:00:00Z" }, message: "Commit headline\n\nCommit body" },
+    { id: 2, event: "head_ref_force_pushed", commit_id: sha, actor: { login: "author" }, created_at: "2026-10-22T17:01:00Z" },
+  ]] : [[]]) });
+  const conversation = await fetchConversation(run, "o", "r", 1);
+  assert.deepEqual(conversation.events.map((event) => event.sha), [sha, sha]);
+  assert.equal(conversation.events[0].details, "Commit headline\n\nCommit body");
+  assert.equal(conversation.events[0].url, `https://github.com/o/r/commit/${sha}`);
+  assert.equal(conversation.events[1].details, "");
+});

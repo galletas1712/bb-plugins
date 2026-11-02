@@ -7,9 +7,11 @@ import {
   ArrowUp01Icon,
   BubbleChatIcon,
   Cancel01Icon,
+  Copy01Icon,
   Delete02Icon,
   Folder02Icon,
   FolderIcon,
+  GitCommitIcon,
   GitMergeIcon,
   GitPullRequestArrow,
   GitPullRequestClosedIcon,
@@ -28,6 +30,7 @@ import {
 
 const icons = {
   Check: Tick02Icon,
+  Copy: Copy01Icon,
   ChevronDown: ArrowDown01Icon,
   ChevronLeft: ArrowLeft01Icon,
   ChevronRight: ArrowRight01Icon,
@@ -36,6 +39,7 @@ const icons = {
   Folder: FolderIcon,
   FolderOpen: Folder02Icon,
   GitMerge: GitMergeIcon,
+  GitCommit: GitCommitIcon,
   GitPullRequest: GitPullRequestIcon,
   GitPullRequestArrow,
   GitPullRequestClosed: GitPullRequestClosedIcon,

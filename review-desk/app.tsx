@@ -21,6 +21,10 @@ import type { ChangedFile } from "./host-contract";
 import type { GhThread } from "./host-contract";
 import { EditableBody } from "./components/editable-body";
 import { MergePr } from "./components/merge-pr";
+import { PrActions } from "./components/pr-actions";
+import { Checks } from "./components/checks";
+import { CommitActivity } from "./components/commit-activity";
+import { conversationActivity, compareActivity, timelineLabels, type ActivityCursor } from "./lib/conversation";
 import { DiffViewer, type MarkdownView, type SourceTarget } from "./components/diff-viewer";
 import { diffStats } from "./lib/diff-stats";
 import { orderThreadComments } from "./lib/thread-comments";
@@ -110,12 +114,12 @@ function timeAgo(iso: string | number): string {
   if (!Number.isFinite(ms)) return "";
   const diff = Math.max(0, Date.now() - ms);
   const m = Math.round(diff / 60_000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
+  if (m < 1) return "now";
+  if (m < 60) return `${m} min`;
   const h = Math.round(m / 60);
-  if (h < 48) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  if (h < 48) return `${h} hr`;
   const d = Math.round(h / 24);
-  return `${d} day${d === 1 ? "" : "s"} ago`;
+  return `${d} d`;
 }
 
 function shortSha(sha: string): string {
@@ -438,7 +442,7 @@ function LayerMark({ position, size, className, title }: { position: number; siz
 
 function reviewStateTone(state: string): string {
   switch (state) {
-    case "APPROVED": return "text-primary";
+    case "APPROVED": return "text-emerald-600 dark:text-emerald-400";
     case "CHANGES_REQUESTED": return "text-destructive";
     default: return "text-muted-foreground";
   }
@@ -547,13 +551,13 @@ function CommentBody({ body, className }: { body: string; className?: string }) 
 }
 
 function CommentDetails({ header, actions, children }: { header: ReactNode; actions?: ReactNode; children: ReactNode }) {
-  return <details open className="group/comment min-w-0">
-    <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-muted-foreground [&::-webkit-details-marker]:hidden">
+  return <details open className="group/comment min-w-0 overflow-hidden rounded-md border border-border bg-card">
+    <summary className="flex cursor-pointer list-none items-center gap-2 bg-muted/30 px-3 py-2 text-xs text-muted-foreground group-open/comment:border-b group-open/comment:border-border [&::-webkit-details-marker]:hidden">
       <Icon name="ChevronRight" className="size-3.5 shrink-0 transition-transform group-open/comment:rotate-90" />
       <span className="flex min-w-0 flex-1 flex-wrap items-center gap-3">{header}</span>
       <span className="flex shrink-0 items-center gap-2" onClick={(event) => event.stopPropagation()}>{actions}</span>
     </summary>
-    <div className="pt-2">{children}</div>
+    <div className="p-3">{children}</div>
   </details>;
 }
 
@@ -820,7 +824,8 @@ function annotationLocation(anno: Anno): string {
 // Review page
 // ---------------------------------------------------------------------------
 
-function Description({ reviewId, body }: { reviewId: string; body: string }) {
+function Description({ review }: { review: Review }) {
+  const { id: reviewId, body } = review;
   const rpc = useRpc<Contract>();
   const key = reviewKey(reviewId, "description");
   const query = useQuery({ queryKey: key, queryFn: () => rpc.call("review_description", { reviewId }) });
@@ -829,15 +834,18 @@ function Description({ reviewId, body }: { reviewId: string; body: string }) {
   const refresh = useCallback(() => { void query.refetch(); }, [query.refetch]);
   useRefreshFallback(refresh);
   useRealtime(REVIEW_CHANGED, (payload) => { if (payloadReview(payload)?.reviewId === reviewId) refresh(); });
-  return <div>
+  return <section aria-label="Pull request description" className="overflow-hidden rounded-md border border-border bg-card">
     {error !== null ? <div role="alert" className="mb-2 flex items-center gap-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="h-6 px-2" onClick={refresh}>Retry</Button></div> : null}
     <EditableBody body={description?.body ?? body} canEdit={description?.canEdit ?? false} label="PR description" allowEmpty renderBody={(content) => <DescriptionPreview body={content} />} onCancel={refresh} onSave={async (content, expectedBody) => {
       const result = await rpc.call("review_edit_body", { reviewId, target: { kind: "description" }, body: content, expectedBody });
       queryClient.setQueryData(key, { ...description, body: result.body });
       toast.success("Description updated");
       return result;
-    }} />
-  </div>;
+    }} renderLayout={(editButton, content) => <>
+      <header className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-muted/30 px-4 py-2 text-xs"><span className="font-medium">{review.author}</span><span className="text-muted-foreground">opened this pull request</span><time dateTime={review.createdAt} title={review.createdAt} className="text-muted-foreground">{timeAgo(review.createdAt)}</time><span className="ml-auto">{editButton}</span></header>
+      <div className="p-4">{content}</div>
+    </>} />
+  </section>;
 }
 
 function DescriptionPreview({ body }: { body: string }) {
@@ -868,8 +876,6 @@ function DescriptionPreview({ body }: { body: string }) {
 }
 
 const ACTIVITY_PAGE_SIZE = 20;
-type ActivityCursor = { key: string; when: string };
-const compareActivity = (a: ActivityCursor, b: ActivityCursor) => (Date.parse(a.when) || 0) - (Date.parse(b.when) || 0) || a.key.localeCompare(b.key);
 
 function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string; threads: GhThread[]; onJump: JumpFn; onRefresh(): void }) {
   const rpc = useRpc<Contract>();
@@ -895,14 +901,7 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
   };
   const outdatedThreads = threads.filter((thread) => thread.isOutdated);
   const resolvedThreads = threads.filter((thread) => thread.isResolved && !thread.isOutdated);
-  type Item = { key: string; when: string; author: string; body: string; state?: string; url: string; thread?: GhThread; event?: string; target?: { kind: "review" | "comment"; id: string }; canEdit?: boolean };
-  const items: Item[] = [
-    ...(conversation?.reviews ?? []).map((r) => ({ key: "review-" + r.id, author: r.author, when: r.submittedAt ?? "", body: r.body, state: r.state, url: r.url, canEdit: r.canEdit, target: r.nodeId ? { kind: "review" as const, id: r.nodeId } : undefined })),
-    ...(conversation?.comments ?? []).map((c) => ({ key: "comment-" + c.id, author: c.author, when: c.createdAt, body: c.body, url: c.url, canEdit: c.canEdit, target: c.nodeId ? { kind: "comment" as const, id: c.nodeId } : undefined })),
-    ...threads.filter((thread) => !thread.isOutdated && !thread.isResolved).map((thread) => ({ key: "thread-" + thread.id, author: "", when: thread.comments.reduce((latest, comment) => (Date.parse(comment.createdAt) || 0) > (Date.parse(latest) || 0) ? comment.createdAt : latest, ""), body: "", url: "", thread })),
-    ...(conversation?.events ?? []).map((event) => ({ key: "event-" + event.id, author: event.actor ?? "", when: event.createdAt ?? "", body: event.details, url: event.url ?? "", event: event.event })),
-  ];
-  items.sort(compareActivity);
+  const items = conversationActivity(conversation, threads);
   const boundary = activityStart === null ? -1 : items.findIndex((item) => compareActivity(item, activityStart) >= 0);
   const start = boundary < 0 ? Math.max(0, items.length - ACTIVITY_PAGE_SIZE) : boundary;
   const first = items[start];
@@ -930,9 +929,9 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
     {items.slice(start).map((item) => item.thread ? <div key={item.key} data-conversation-activity={item.key}>
       <button type="button" className="break-all text-left font-mono text-xs text-muted-foreground hover:underline" onClick={() => onJump(item.thread!.path, item.thread!.isOutdated ? null : item.thread!.line, item.thread!.side === "LEFT" ? "old" : "new")}>{item.thread.path}{item.thread.line !== null ? ":" + item.thread.line : ""}</button>
       <ThreadCard thread={item.thread} actions={actions} />
-    </div> : item.event ? <div key={item.key} data-conversation-activity={item.key} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground">
+    </div> : item.commits ? <div key={item.key} data-conversation-activity={item.key}><CommitActivity events={item.commits} timeAgo={timeAgo} /></div> : item.event ? <div key={item.key} data-conversation-activity={item.key} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground">
       {item.author ? <span className="font-medium text-foreground">{item.author}</span> : null}
-      <span className="min-w-0 whitespace-pre-wrap break-words">{item.event.replace(/_/g, " ")}{item.body ? ": " + item.body : ""}</span>
+      <span className="min-w-0 whitespace-pre-wrap break-words">{timelineLabels[item.event.event]}{item.body ? ": " + item.body : ""}</span>
       {item.when ? <time dateTime={item.when} className="ml-auto shrink-0">{timeAgo(item.when)}</time> : null}
       {item.url ? <UrlLink href={item.url} className="hover:underline">GitHub</UrlLink> : null}
     </div> : item.body.replace(/<!--[\s\S]*?-->/g, "").trim() === "" ? <div key={item.key} data-conversation-activity={item.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
@@ -940,7 +939,7 @@ function Discussion({ reviewId, threads, onJump, onRefresh }: { reviewId: string
       <span className={item.state ? reviewStateTone(item.state) : undefined}>{item.state === "APPROVED" ? "approved these changes" : item.state === "CHANGES_REQUESTED" ? "requested changes" : item.state === "DISMISSED" ? "had their review dismissed" : item.state ? "reviewed" : "commented"}</span>
       {item.when ? <time dateTime={item.when}>{timeAgo(item.when)}</time> : null}
       <UrlLink href={item.url} className="hover:underline">{item.state ? "View reviewed changes" : "GitHub"}</UrlLink>
-    </div> : <article key={item.key} data-conversation-activity={item.key} className="border-b border-border pb-5 last:border-0">
+    </div> : <article key={item.key} data-conversation-activity={item.key}>
       <EditableBody body={item.body} canEdit={Boolean(item.canEdit && item.target)} label={`comment by ${item.author}`} renderBody={(body) => <CommentBody body={body} />} onCancel={() => load(true)} onSave={async (body, expectedBody) => {
         const result = await rpc.call("review_edit_body", { reviewId, target: item.target!, body, expectedBody });
         queryClient.setQueryData<typeof conversation>(key, (current) => !current ? current : { ...current, comments: current.comments.map((comment) => comment.nodeId === item.target?.id ? { ...comment, body: result.body } : comment), reviews: current.reviews.map((review) => review.nodeId === item.target?.id ? { ...review, body: result.body } : review) });
@@ -1142,7 +1141,7 @@ interface DiffDisplay { style: "unified" | "split"; wrap: boolean }
 function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarget | null }) {
   const { rpc, detail, error, refetch } = useReview(reviewId);
   const navigate = useBbNavigate();
-  const [tab, setTab] = useState<Tab>(commit ? "commits" : "changes");
+  const [tab, setTab] = useState<Tab>(commit ? "commits" : "conversation");
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const narrowStack = useNarrow(container, 960);
   const narrowHeader = useNarrow(container);
@@ -1211,8 +1210,9 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
     {tab !== "changes" ? <div data-review-conversation-scroll className="min-h-0 flex-1 overflow-y-auto">
       {tab === "commits" && commit ? <CommitView reviewId={reviewId} review={review} target={commit} rpc={rpc} onNavigate={openCommit} onOpenDiff={() => setTab("changes")} /> : <div className="mx-auto max-w-4xl space-y-6 px-5 py-6">
         {tab === "commits" ? <Commits review={review} seen={detail.seen} onOpen={openCommit} /> : <>
-          <section className="border-b border-border pb-6"><Description key={reviewId} reviewId={reviewId} body={review.body} /></section>
+          <Description key={reviewId} review={review} />
           <Discussion reviewId={reviewId} threads={threads} onRefresh={refetch} onJump={(path, line, side) => openPrDiff({ path, line, side })} />
+          <Checks review={review} />
         </>}
       </div>}
     </div> : null}
@@ -1227,6 +1227,7 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           <Button variant="outline" size="sm" aria-label={`Submit review${pending.length > 0 ? " (" + pending.length + ")" : ""}`} onClick={() => { setReviewOpened(true); setReviewOpen(true); }}>Review{pending.length > 0 ? " (" + pending.length + ")" : ""}</Button>
           <MergePr key={reviewId} review={review} compact={narrowHeader} />
+          <PrActions pr={review} onClosed={() => navigate.toPluginPanel(PANEL_PATH)} />
           <details className="relative">
             <summary className="flex cursor-pointer list-none rounded p-2 hover:bg-state-hover" aria-label="Review actions"><Icon name="MoreHorizontal" className="size-4" /></summary>
             <div className="absolute right-0 z-40 mt-2 w-64 rounded-md border border-border bg-card p-1 text-xs shadow-lg">
@@ -1242,10 +1243,10 @@ function ReviewView({ reviewId, commit }: { reviewId: string; commit: CommitTarg
           </details>
         </div>
       </div>
-      <nav className="flex min-h-9 items-center gap-1 px-3" aria-label="Pull request">
-        <Button variant={tab === "changes" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("changes")}>Changes</Button>
-        <Button variant={tab === "conversation" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("conversation")}>Conversation</Button>
-        <Button variant={tab === "commits" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("commits")}>Commits</Button>
+      <nav className="flex min-h-9 items-center gap-1 border-b border-border px-3" aria-label="Pull request">
+        <Button variant="ghost" size="sm" className={cn("h-9 rounded-none border-b-2", tab === "conversation" ? "border-orange-500 font-semibold" : "border-transparent")} aria-current={tab === "conversation" ? "page" : undefined} onClick={() => setTab("conversation")}>Conversation</Button>
+        <Button variant="ghost" size="sm" className={cn("h-9 rounded-none border-b-2", tab === "commits" ? "border-orange-500 font-semibold" : "border-transparent")} aria-current={tab === "commits" ? "page" : undefined} onClick={() => setTab("commits")}>Commits</Button>
+        <Button variant="ghost" size="sm" className={cn("h-9 rounded-none border-b-2", tab === "changes" ? "border-orange-500 font-semibold" : "border-transparent")} aria-current={tab === "changes" ? "page" : undefined} onClick={() => setTab("changes")}>Changes</Button>
         {!narrowHeader ? <span className="ml-auto min-w-0 truncate font-mono text-[11px] text-muted-foreground" title={`${review.author ?? ""} · ${review.headRefName} → ${review.baseRefName}`}>{review.headRefName} → {review.baseRefName}</span> : null}
         {stack ? <Button variant={stackSidebar.open ? "secondary" : "ghost"} size="sm" className={cn("h-7 w-7 shrink-0 px-0", narrowHeader && "ml-auto")} aria-label={stackSidebar.open ? "Hide stack sidebar" : "Show stack sidebar"} title={stackSidebar.open ? "Hide stack sidebar" : "Show stack sidebar"} aria-pressed={stackSidebar.open} onClick={stackSidebar.toggle}><Icon name="Layers" className="size-3.5" /></Button> : null}
       </nav>
@@ -1626,8 +1627,6 @@ function ReviewForm({ reviewId, detail, rpc, refetch, onJump, onSubmitted }: {
   const run = async (fn: () => Promise<unknown>) => {
     try { await fn(); refetch(); } catch (cause) { toast.error(describeError(cause)); }
   };
-  const ok = (check: Review["checks"][number]) => ["success", "skipped", "neutral"].includes((check.conclusion ?? "").toLowerCase());
-  const passed = review.checks.filter(ok).length;
   const activeNotes = notes.filter((note) => note.state === "open" || note.state === "stale");
   const cannotSubmit = busy || (event === "COMMENT" && body.trim() === "" && pending.every((comment) => comment.stale)) || (event === "REQUEST_CHANGES" && body.trim() === "");
   return <div className="h-full space-y-6 overflow-y-auto p-4 text-sm">
@@ -1668,12 +1667,7 @@ function ReviewForm({ reviewId, detail, rpc, refetch, onJump, onSubmitted }: {
         <NoteCard note={note} actions={{ promoteNote: async (id) => { await rpc.call("note_promote", { id }); refetch(); }, deleteNote: async (id) => { await rpc.call("note_delete", { id }); refetch(); } }} />
       </div>)}</div>
     </details> : null}
-    {review.checks.length > 0 ? <details className="border-t border-border pt-4"><summary className="cursor-pointer font-medium">Checks ({passed}/{review.checks.length})</summary>
-      <ul className="mt-3 space-y-2">{review.checks.map((check, index) => <li key={index} className="flex items-start gap-3 text-xs">
-        {check.url ? <UrlLink href={check.url} className="min-w-0 flex-1 break-words hover:underline">{check.name}</UrlLink> : <span className="min-w-0 flex-1 break-words">{check.name}</span>}
-        <span className={cn("shrink-0", ok(check) ? "text-muted-foreground" : "text-foreground")}>{(check.conclusion ?? check.status).toLowerCase().replace(/_/g, " ")}</span>
-      </li>)}</ul>
-    </details> : null}
+    <Checks review={review} />
     {review.reviewers.length > 0 ? <details className="border-t border-border pt-4"><summary className="cursor-pointer font-medium">Reviewers</summary>
       <ul className="mt-3 space-y-2">{review.reviewers.map((reviewer) => <li key={reviewer.login} className="flex items-center justify-between gap-3 text-xs"><span>{reviewer.login}</span><span className="text-muted-foreground">{reviewer.state.replace(/_/g, " ").toLowerCase()}</span></li>)}</ul>
     </details> : null}
@@ -1809,6 +1803,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                                   </span>
                                   <span className="shrink-0 text-xs text-muted-foreground">{timeAgo(r.updatedAt)}</span>
                                 </button>
+                                <PrActions pr={r} />
                                 <RemoveReviewButton label="Remove review" onClick={() => void drop(r)} />
                               </div>
                             </li>
@@ -1850,6 +1845,7 @@ function ReviewsPage({ subPath }: { subPath: string }) {
                                         <PrMark state={r.state} reviewDecision={r.reviewDecision} isDraft={r.isDraft} />
                                         <CountBadge count={r.pendingCount} title={`${r.pendingCount} pending`} />
                                       </button>
+                                      <div className="mr-1"><PrActions pr={r} /></div>
                                     </div>
                                   </li>
                                 ))}

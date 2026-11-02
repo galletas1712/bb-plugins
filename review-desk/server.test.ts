@@ -35,6 +35,8 @@ async function fixture() {
       case "gh_merge_options": return { methods: ["squash"], defaultMethod: "squash", reason: null, headSha: `head-${args.number}`, baseRefName: "main", prs: [{ number: args.number, headSha: `head-${args.number}` }] };
       case "gh_description": return { body: remotePrs.get(args.number)?.body ?? "Body", canEdit: true };
       case "gh_merge": case "gh_merge_result": return mergeResult;
+      case "gh_close": remotePrs.set(args.number, { ...remotePrs.get(args.number), state: "CLOSED" }); return { ok: true };
+      case "gh_set_draft": remotePrs.set(args.number, { ...remotePrs.get(args.number), isDraft: args.draft }); return { isDraft: args.draft };
       case "gh_own_prs": onOwn?.(); if (ownError) throw new Error(ownError); return own;
       case "gh_pr_statuses": {
         const prs = args.prs.map((ref: { owner: string; repo: string; number: number }) => ({ ...pr(ref.number), ...remotePrs.get(ref.number), owner: ref.owner, repo: ref.repo }));
@@ -66,6 +68,72 @@ async function fixture() {
   const list = async () => (await rpc("reviews_list", null) as { reviews: ReviewSummary[] }).reviews;
   return { get bb() { return bb; }, get harness() { return harness; }, reload: async () => { ({ bb, harness } = await harness.lifecycle.reload(plugin)); }, rpc, open, list, calls, onRead: (fn: typeof onRead) => { onRead = fn; }, setMergeResult: (result: MergeResult) => { mergeResult = result; }, setPr: (number: number, values: Partial<GhPr>) => remotePrs.set(number, values), setFiles: (next: ChangedFile[]) => { files = next; }, setStack: (next: PrStack | null) => { snapshot = next; }, onStack: (fn: typeof onStack) => { onStack = fn; }, onDetails: (fn: typeof onDetails) => { onDetails = fn; }, onStatus: (fn: typeof onStatus) => { onStatus = fn; }, setOwn: (next: OwnPrs) => { own = next; }, setOwnError: (error: string | null) => { ownError = error; }, onOwn: (fn: typeof onOwn) => { onOwn = fn; }, onBatch: (fn: typeof onBatch) => { onBatch = fn; }, setBatchError: (error: string | null) => { batchError = error; }, onPrepare: (fn: typeof onPrepare) => { onPrepare = fn; }, onThreads: (fn: typeof onThreads) => { onThreads = fn; }, onConversation: (fn: typeof onConversation) => { onConversation = fn; } };
 }
+
+test("front-page actions update unopened authored PRs without preparing a checkout and persist across reloads", async () => {
+  const f = await fixture();
+  const ref = { owner: "o", repo: "r", number: 4 };
+  try {
+    f.setStack(null);
+    f.setOwn({ login: "viewer", prs: [{ ...ref, title: "Draft", state: "OPEN", isDraft: true, headSha: "head-4", additions: 0, deletions: 0, reviewDecision: null, updatedAt: pr(4).updatedAt }] });
+    f.setPr(4, { isDraft: true });
+    assert.equal((await f.list())[0].id, null);
+    await f.rpc("pr_action", { ...ref, action: "ready" });
+    assert.equal((await f.list())[0].isDraft, false);
+    await f.reload();
+    assert.equal((await f.list())[0].isDraft, false);
+    await f.rpc("pr_action", { ...ref, action: "close" });
+    assert.equal((await f.list()).length, 0);
+    await f.reload();
+    assert.equal((await f.list()).length, 0);
+    assert.equal(f.calls.some((call) => call.method.startsWith("repo_")), false);
+    assert.deepEqual(f.calls.find((call) => call.method === "gh_close")?.input, ref);
+    await assert.rejects(f.rpc("pr_action", { ...ref, action: "ready" }), /Only an open/);
+    await assert.rejects(f.rpc("pr_action", { ...ref, action: "merge" }));
+  } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("PR actions preserve stack layers, notes and pending comments and keep failed mutations visible", async () => {
+  const f = await fixture();
+  const ref = { owner: "o", repo: "r", number: 1 };
+  try {
+    const review = await f.open(1);
+    await f.rpc("pending_add", { reviewId: review.id, path: "a.ts", line: 1, side: "RIGHT", body: "Pending review" });
+    await f.rpc("note_add", { reviewId: review.id, path: "a.ts", line: 1, side: "RIGHT", body: "Private note" });
+    f.onRead((method) => method === "gh_close" || method === "gh_set_draft" ? Promise.reject(new Error("Permission denied")) : undefined);
+    await assert.rejects(f.rpc("pr_action", { ...ref, action: "close" }), /Permission denied/);
+    await assert.rejects(f.rpc("pr_action", { ...ref, action: "ready" }), /Permission denied/);
+    assert.equal((await f.list()).length, 3);
+    f.onRead(undefined);
+    await f.rpc("review_set_draft", { reviewId: review.id, draft: true });
+    assert.equal((await f.list()).find((pr) => pr.number === 1)?.isDraft, true);
+    // Layer 2 has no local review row.
+    await f.rpc("pr_action", { owner: "o", repo: "r", number: 2, action: "close" });
+    assert.deepEqual((await f.list()).map((pr) => pr.number).sort(), [1, 3]);
+    await f.rpc("pr_action", { ...ref, action: "close" });
+    assert.deepEqual((await f.list()).map((pr) => pr.number), [3]);
+    const db = f.bb.storage.database();
+    for (const table of ["pending", "notes"]) assert.equal(db.prepare<[string], { n: number }>(`SELECT COUNT(*) AS n FROM ${table} WHERE review_id = ?`).get(review.id)?.n, 1);
+    assert.equal(f.harness.realtimeSignals.some((signal) => (signal.payload as any)?.reviewId === review.id && (signal.payload as any)?.what === "closed"), true);
+  } finally { await f.harness.lifecycle.dispose(); }
+});
+
+test("a late discovery snapshot cannot undo marking an unopened PR ready", async () => {
+  const f = await fixture(); const now = Date.now; let clock = now(); Date.now = () => clock;
+  let release!: (value: unknown) => void;
+  const ref = { owner: "o", repo: "r", number: 4 };
+  const own: OwnPrs = { login: "viewer", prs: [{ ...ref, title: "Draft", state: "OPEN", isDraft: true, headSha: "head-4", additions: 0, deletions: 0, reviewDecision: null, updatedAt: pr(4).updatedAt }] };
+  try {
+    f.setOwn(own); f.setPr(4, { isDraft: true }); await f.list();
+    clock += 61_000;
+    f.onRead((method) => method === "gh_own_prs" ? new Promise((resolve) => { release = resolve; }) : undefined);
+    await f.list();
+    await f.rpc("pr_action", { ...ref, action: "ready" });
+    release(own); await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await f.list())[0].isDraft, false);
+    f.onRead(undefined); await f.reload();
+    assert.equal((await f.list())[0].isDraft, false);
+  } finally { release?.(own); Date.now = now; await f.harness.lifecycle.dispose(); }
+});
 
 test("merge RPCs use the saved PR identity and only hide a review after confirmed GitHub success", async () => {
   const f = await fixture();
