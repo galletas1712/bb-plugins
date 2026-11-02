@@ -1,9 +1,9 @@
 # Knowledge
 
 A file library for agent context and evidence, with a thread **Explainers** panel
-for readers. The panel lists short titles. Select one to read it, then go Back to
-the list. Agents manage preservation and reuse. The existing Knowledge page is
-available for record maintenance.
+for readers. A dropdown switches between short titles and resumes the last
+selected explainer for each thread. Agents manage preservation and reuse. The
+existing Knowledge page is available for record maintenance.
 
 ## Install
 
@@ -107,7 +107,11 @@ Thread plugin metadata stores only references, short titles and the time added.
 There is no historical-thread migration or implicit inheritance by forks and
 side chats. Agents explicitly present relevant saved files in each thread.
 The panel destination is always available and does not open automatically.
-Targets are session-only, so a page reload starts at the list.
+The selected explainer is remembered locally in this browser. Opened readers stay
+alive while switching explainers, closing the panel, or visiting another thread,
+preserving their chapters, scroll positions, controls, and JavaScript state.
+Each thread has independent reader state. Reloading the page or plugin releases
+these live readers, so the selected document reopens with fresh document state.
 
 The reader accepts current HTML up to 5 MiB, verifies its hash and UTF-8 encoding,
 and renders it in a sandbox without same-origin access. Scripts and external-link

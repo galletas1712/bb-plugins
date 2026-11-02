@@ -1,8 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { ExplainersPanel, ExplainerOpener } from "./explainer-ui";
+import { disposeExplainerFrames } from "./explainer-frames";
 
 const app = await loadPluginApp(() => import("./app"));
 const first = {
@@ -25,6 +32,14 @@ const ref = { recordId: first.recordId, name: first.name };
 const target = { ...ref, title: first.title };
 
 beforeEach(() => {
+  localStorage.clear();
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
   window.matchMedia = vi.fn(
     () =>
       ({
@@ -42,6 +57,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  disposeExplainerFrames("test-plugin");
+  vi.unstubAllGlobals();
   document.documentElement.removeAttribute("style");
   vi.restoreAllMocks();
 });
@@ -61,15 +78,15 @@ it("registers only a thread destination and compact opener", () => {
   expect(app.navPanels).toHaveLength(1);
 });
 
-it("shows just short titles, reads in the panel and returns to the list", async () => {
+it("switches short titles with a dropdown and keeps opened readers connected", async () => {
   const slot = renderSlot({ component: ExplainersPanel }, props, {
     rpc: {
       listThreadExplainers: () => [first, second],
       readExplainer: () => saved,
     },
   });
-  fireEvent.click(await slot.findByRole("button", { name: first.title }));
-  const frame = (await slot.findByTitle(first.title)) as HTMLIFrameElement;
+  await slot.findByRole("combobox", { name: "Explainer" });
+  const frame = (await screen.findByTitle(first.title)) as HTMLIFrameElement;
   expect(frame.srcdoc).toContain("--foreground:rgb(230, 230, 230)");
   expect(frame.srcdoc).toContain("--brand:cyan");
   expect(frame.srcdoc).toContain("--chart-2:#0d9488");
@@ -82,8 +99,12 @@ it("shows just short titles, reads in the panel and returns to the list", async 
     "allow-scripts allow-popups allow-popups-to-escape-sandbox",
   );
   expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
-  fireEvent.click(slot.getByRole("button", { name: "← Back" }));
-  expect(await slot.findByRole("button", { name: second.title })).toBeTruthy();
+  fireEvent.change(slot.getByRole("combobox"), {
+    target: { value: JSON.stringify([second.recordId, second.name]) },
+  });
+  await screen.findByTitle(second.title);
+  expect(frame.isConnected).toBe(true);
+  expect(frame.style.display).toBe("none");
   expect(slot.queryByRole("textbox")).toBeNull();
   expect(
     slot.queryByText(/Add from Knowledge|Remove|Saved|overview.html/),
@@ -99,8 +120,8 @@ it("leaves the reader intact on unrelated refreshes and loads new saved bytes", 
       readExplainer: () => savedDocument,
     },
   });
-  fireEvent.click(await slot.findByRole("button", { name: first.title }));
-  const frame = (await slot.findByTitle(first.title)) as HTMLIFrameElement;
+  await slot.findByRole("combobox", { name: "Explainer" });
+  const frame = (await screen.findByTitle(first.title)) as HTMLIFrameElement;
   const original = frame.srcdoc;
   const parses = parse.mock.calls.length;
   await act(async () => {
@@ -109,7 +130,7 @@ it("leaves the reader intact on unrelated refreshes and loads new saved bytes", 
   });
   expect(parse).toHaveBeenCalledTimes(parses);
   await slot.behavior.emitRealtime("changed", {});
-  expect(slot.getByTitle(first.title)).toBe(frame);
+  expect(screen.getByTitle(first.title)).toBe(frame);
   expect(frame.srcdoc).toBe(original);
   expect(parse).toHaveBeenCalledTimes(parses);
   savedDocument = {
@@ -132,8 +153,8 @@ it("keeps BB's chosen scheme when saved HTML declares automatic colors", async (
       }),
     },
   });
-  fireEvent.click(await slot.findByRole("button", { name: first.title }));
-  const frame = (await slot.findByTitle(first.title)) as HTMLIFrameElement;
+  await slot.findByRole("combobox", { name: "Explainer" });
+  const frame = (await screen.findByTitle(first.title)) as HTMLIFrameElement;
   const content = frame.contentDocument!;
   content.open();
   content.write(frame.srcdoc);
@@ -143,24 +164,28 @@ it("keeps BB's chosen scheme when saved HTML declares automatic colors", async (
   ).toBe("dark");
 });
 
-it("opens a fixed-tab target and clears it on Back", async () => {
+it("opens a fixed-tab target and clears it when selecting another explainer", async () => {
   const slot = renderSlot({ component: ExplainersPanel }, props, {
     rpc: {
-      listThreadExplainers: () => [first],
+      listThreadExplainers: () => [first, second],
       readExplainer: () => saved,
       attachThreadExplainer: () => first,
     },
     experimental_fixedTabTarget: { tabId: "explainers", target },
   });
-  await slot.findByTitle(first.title);
+  await screen.findByTitle(first.title);
   expect(slot.inspection.rpcCalls).toContainEqual({
     method: "attachThreadExplainer",
     input: { threadId: "thread-one", ...target },
   });
-  fireEvent.click(slot.getByRole("button", { name: "← Back" }));
-  await slot.findByRole("button", { name: first.title });
+  fireEvent.change(slot.getByRole("combobox"), {
+    target: { value: JSON.stringify([second.recordId, second.name]) },
+  });
+  await screen.findByTitle(second.title);
   await slot.behavior.emitRealtime("changed", {});
-  expect(slot.queryByTitle(first.title)).toBeNull();
+  expect((slot.getByRole("combobox") as HTMLSelectElement).value).toBe(
+    JSON.stringify([second.recordId, second.name]),
+  );
 });
 
 it("shows an empty state and retries local failures", async () => {
@@ -241,5 +266,64 @@ it("retries failed panel attachment without opening an unlisted document", async
   expect(slot.inspection.navigateCalls).toEqual([]);
   fail = false;
   fireEvent.click(slot.getByRole("button", { name: "Retry" }));
-  await slot.findByTitle(first.title);
+  await screen.findByTitle(first.title);
+});
+
+it("resumes each thread's selected document after its panel is remounted", async () => {
+  const options = {
+    rpc: {
+      listThreadExplainers: () => [first, second],
+      readExplainer: () => saved,
+    },
+  };
+  let slot = renderSlot({ component: ExplainersPanel }, props, options);
+  const select = await slot.findByRole("combobox");
+  fireEvent.change(select, {
+    target: { value: JSON.stringify([second.recordId, second.name]) },
+  });
+  const frame = await screen.findByTitle(second.title);
+  slot.lifecycle.unmount();
+  expect(frame.isConnected).toBe(true);
+  const other = renderSlot(
+    { component: ExplainersPanel },
+    { ...props, threadId: "thread-two" },
+    options,
+  );
+  expect(
+    ((await other.findByRole("combobox")) as HTMLSelectElement).value,
+  ).toBe(JSON.stringify([first.recordId, first.name]));
+  other.lifecycle.unmount();
+  slot = renderSlot({ component: ExplainersPanel }, props, options);
+  expect(((await slot.findByRole("combobox")) as HTMLSelectElement).value).toBe(
+    JSON.stringify([second.recordId, second.name]),
+  );
+  await waitFor(() => expect(screen.getByTitle(second.title)).toBe(frame));
+});
+
+it("ignores remembered selections for removed explainers", async () => {
+  localStorage.setItem(
+    "test-plugin:explainer:thread-one",
+    JSON.stringify({ recordId: "deleted", name: "gone.html" }),
+  );
+  const slot = renderSlot({ component: ExplainersPanel }, props, {
+    rpc: { listThreadExplainers: () => [first], readExplainer: () => saved },
+  });
+  expect(((await slot.findByRole("combobox")) as HTMLSelectElement).value).toBe(
+    JSON.stringify([first.recordId, first.name]),
+  );
+  await screen.findByTitle(first.title);
+});
+
+it("does not display a reader while its BB panel tab is hidden", async () => {
+  const slot = renderSlot({ component: ExplainersPanel }, props, {
+    tabVisible: false,
+    rpc: { listThreadExplainers: () => [first], readExplainer: () => saved },
+  });
+  await slot.findByRole("combobox");
+  await waitFor(() =>
+    expect(
+      slot.inspection.rpcCalls.some((call) => call.method === "readExplainer"),
+    ).toBe(true),
+  );
+  expect(document.querySelector("iframe")).toBeNull();
 });

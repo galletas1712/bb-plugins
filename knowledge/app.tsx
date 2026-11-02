@@ -16,6 +16,7 @@ import {
   useSdk,
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
+import { disposeExplainerFrames } from "./explainer-frames";
 import type { rpcContract } from "./contract";
 import type { KnowledgeRecord, RecordSummary } from "./schema";
 import { Button } from "./components/ui/button";
@@ -407,6 +408,10 @@ function KnowledgePage({ subPath }: PluginNavPanelProps) {
 }
 
 export default definePluginApp((app) => {
+  app.contentScripts.register({
+    id: "explainer-readers",
+    mount: ({ pluginId }) => () => disposeExplainerFrames(pluginId),
+  });
   app.slots.experimental_tab({
     ...explainersTab,
     title: "Explainers",

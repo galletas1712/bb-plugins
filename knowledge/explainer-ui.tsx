@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   experimental_useAppPanel,
+  experimental_usePluginId,
+  experimental_useTabVisible,
   experimental_useFixedTabTarget,
   useBbNavigate,
   useRealtime,
@@ -12,11 +14,13 @@ import {
 import type { rpcContract } from "./contract";
 import {
   explainerTargetSchema,
+  explainerRefSchema,
   type ExplainerRef,
   type ExplainerTarget,
   type ThreadExplainer,
 } from "./schema";
 import { Button } from "./components/ui/button";
+import { showExplainerFrame } from "./explainer-frames";
 
 export const explainersTab = {
   id: "explainers",
@@ -128,10 +132,15 @@ function themedHtml(html: string, css: string, colorScheme: string) {
 
 function ExplainerReader({
   selected,
+  threadId,
 }: {
+  threadId: string;
   selected: ExplainerRef & { title: string };
 }) {
   const rpc = useRpc<typeof rpcContract>();
+  const pluginId = experimental_usePluginId();
+  const visible = experimental_useTabVisible();
+  const host = useRef<HTMLDivElement>(null);
   const connection = useRealtimeConnectionState();
   const theme = useThemeCss();
   const [document, setDocument] = useState<{
@@ -170,6 +179,25 @@ function ExplainerReader({
     };
   }, [refresh, connection]);
   useRealtime("changed", refresh);
+  useEffect(() => {
+    if (!visible || !host.current || !srcDoc || !theme || error) return;
+    return showExplainerFrame(
+      pluginId,
+      JSON.stringify([threadId, selected.recordId, selected.name]),
+      host.current,
+      { html: srcDoc, title: selected.title, colorScheme: theme.colorScheme },
+    );
+  }, [
+    pluginId,
+    visible,
+    threadId,
+    selected.recordId,
+    selected.name,
+    selected.title,
+    srcDoc,
+    theme?.colorScheme,
+    error,
+  ]);
   if (error) return <LoadError error={error} retry={() => void refresh()} />;
   if (!srcDoc || !theme)
     return (
@@ -177,24 +205,24 @@ function ExplainerReader({
         Loading…
       </p>
     );
-  return (
-    <iframe
-      title={selected.title}
-      className="min-h-0 w-full flex-1 border-0 bg-background"
-      style={{ colorScheme: theme.colorScheme }}
-      sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
-      srcDoc={srcDoc}
-    />
-  );
+  return <div ref={host} className="min-h-0 w-full flex-1" />;
 }
 
 function ThreadExplainers({ threadId }: { threadId: string }) {
   const rpc = useRpc<typeof rpcContract>();
   const connection = useRealtimeConnectionState();
   const target = experimental_useFixedTabTarget(explainersTab);
-  const [selected, setSelected] = useState<
-    (ExplainerRef & { title: string }) | null
-  >(null);
+  const pluginId = experimental_usePluginId();
+  const storageKey = `${pluginId}:explainer:${threadId}`;
+  const [selected, setSelected] = useState<ExplainerRef | null>(() => {
+    try {
+      return explainerRefSchema.parse(
+        JSON.parse(localStorage.getItem(storageKey) ?? "null"),
+      );
+    } catch {
+      return null;
+    }
+  });
   const [targetResult, setTargetResult] = useState<{
     sequence: number;
     entry?: ThreadExplainer;
@@ -244,29 +272,74 @@ function ThreadExplainers({ threadId }: { threadId: string }) {
   const resolvedTarget =
     targetResult?.sequence === target?.sequence ? targetResult : null;
   const requested = target ? resolvedTarget?.entry : selected;
-  const current =
-    requested &&
-    (items.find(
+  const current = target
+    ? resolvedTarget?.entry
+    : (items.find(
+        (item) =>
+          item.recordId === requested?.recordId &&
+          item.name === requested?.name,
+      ) ?? items[0]);
+  useEffect(() => {
+    if (!current) return;
+    setSelected((previous) =>
+      previous?.recordId === current.recordId && previous.name === current.name
+        ? previous
+        : { recordId: current.recordId, name: current.name },
+    );
+    try {
+      localStorage.setItem(
+        storageKey,
+        JSON.stringify({ recordId: current.recordId, name: current.name }),
+      );
+    } catch {
+      // Reading remains usable when browser storage is unavailable.
+    }
+  }, [storageKey, current?.recordId, current?.name]);
+  const choices =
+    current &&
+    !items.some(
       (item) =>
-        item.recordId === requested.recordId && item.name === requested.name,
-    ) ??
-      requested);
-  const title = current?.title ?? target?.target.title;
+        item.recordId === current.recordId && item.name === current.name,
+    )
+      ? [current, ...items]
+      : items;
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {title && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-border p-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              target?.clear();
-              setSelected(null);
+      {!!choices.length && (
+        <div className="shrink-0 border-b border-border p-2">
+          <select
+            aria-label="Explainer"
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            value={
+              current ? JSON.stringify([current.recordId, current.name]) : ""
+            }
+            onChange={(event) => {
+              const item = choices.find(
+                (entry) =>
+                  JSON.stringify([entry.recordId, entry.name]) ===
+                  event.target.value,
+              );
+              if (item) {
+                target?.clear();
+                setSelected(item);
+              }
             }}
           >
-            ← Back
-          </Button>
-          <span className="truncate text-sm font-medium">{title}</span>
+            {!current && (
+              <option value="" disabled>
+                Select an explainer
+              </option>
+            )}
+            {choices.map((item) => (
+              <option
+                key={JSON.stringify([item.recordId, item.name])}
+                value={JSON.stringify([item.recordId, item.name])}
+              >
+                {item.title}
+              </option>
+            ))}
+          </select>
         </div>
       )}
       {target && !current ? (
@@ -284,6 +357,7 @@ function ThreadExplainers({ threadId }: { threadId: string }) {
         <ExplainerReader
           key={`${current.recordId}/${current.name}`}
           selected={current}
+          threadId={threadId}
         />
       ) : error ? (
         <LoadError error={error} retry={() => void refresh()} />
@@ -291,21 +365,8 @@ function ThreadExplainers({ threadId }: { threadId: string }) {
         <p role="status" className="p-4 text-sm text-muted-foreground">
           Loading…
         </p>
-      ) : !items.length ? (
-        <p className="p-4 text-sm text-muted-foreground">No explainers yet</p>
       ) : (
-        <ul className="overflow-y-auto p-2">
-          {items.map((item) => (
-            <li key={`${item.recordId}/${item.name}`}>
-              <button
-                className="w-full rounded-md px-3 py-3 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                onClick={() => setSelected(item)}
-              >
-                {item.title}
-              </button>
-            </li>
-          ))}
-        </ul>
+        <p className="p-4 text-sm text-muted-foreground">No explainers yet</p>
       )}
     </div>
   );
