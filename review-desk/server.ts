@@ -63,7 +63,6 @@ const reviewSchema = z.object({
   assignees: z.array(z.string()),
   commits: z.array(z.object({ sha: z.string(), title: z.string(), author: z.string(), date: z.string() })),
   createdAt: z.string(),
-  worktree: z.string(),
   environmentId: z.string().nullable(),
   hostId: z.string(),
   syncedAt: z.number(),
@@ -406,13 +405,14 @@ function createStore(db: Database.Database) {
     setOwnPrsCache: db.prepare<[string, number]>(`INSERT INTO own_prs_cache (id, json, fetched_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at`),
     review: db.prepare<[string], ReviewRow>(`SELECT * FROM reviews WHERE id = ?`),
     reviewByKey: db.prepare<[string, string, number], ReviewRow>(`SELECT * FROM reviews WHERE owner = ? AND repo = ? AND number = ?`),
-    insertReview: db.prepare<[string, string, string, number, string, string, string, string, string, string | null, number, number, number]>(
+    insertReview: db.prepare<[string, string, string, number, string, string, string, string, string | null, number, number, number]>(
       `INSERT INTO reviews (id, owner, repo, number, title, state, url, base_ref, head_ref, head_sha, base_sha, worktree, host_id, repo_path, project_id, synced_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'OPEN', ?, '', '', '', '', ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, 'OPEN', ?, '', '', '', '', '', ?, ?, ?, ?, ?, ?)`,
     ),
-    updateReviewMeta: db.prepare<[string, string, string, number, string | null, string, string, string, string, number, number, number, string | null, string | null, string, string, string, string, string, string, string, string, number, number, string]>(
-      `UPDATE reviews SET title = ?, body = ?, state = ?, is_draft = ?, author = ?, base_ref = ?, head_ref = ?, head_sha = ?, base_sha = ?, additions = ?, deletions = ?, changed_files = ?, review_decision = ?, mergeable = ?, labels_json = ?, checks_json = ?, reviewers_json = ?, assignees_json = ?, commits_json = ?, gh_created_at = ?, worktree = ?, gh_updated_at = ?, synced_at = ?, updated_at = ? WHERE id = ?`,
+    updateReviewMeta: db.prepare<[string, string, string, number, string | null, string, string, string, string, number, number, number, string | null, string | null, string, string, string, string, string, string, string, number, number, string]>(
+      `UPDATE reviews SET title = ?, body = ?, state = ?, is_draft = ?, author = ?, base_ref = ?, head_ref = ?, head_sha = ?, base_sha = ?, additions = ?, deletions = ?, changed_files = ?, review_decision = ?, mergeable = ?, labels_json = ?, checks_json = ?, reviewers_json = ?, assignees_json = ?, commits_json = ?, gh_created_at = ?, gh_updated_at = ?, synced_at = ?, updated_at = ? WHERE id = ?`,
     ),
+    clearWorktree: db.prepare<[string]>(`UPDATE reviews SET worktree = '' WHERE id = ?`),
     setSyncedAt: db.prepare<[number, string]>(`UPDATE reviews SET synced_at = ? WHERE id = ?`),
     setBaseRefSha: db.prepare<[string, string]>(`UPDATE reviews SET base_ref_sha = ? WHERE id = ?`),
     setDraft: db.prepare<[number, number, string]>(`UPDATE reviews SET is_draft = ?, updated_at = ? WHERE id = ?`),
@@ -537,7 +537,6 @@ function toReview(row: ReviewRow): Review {
     assignees: parseJson<string[]>(row.assignees_json, []),
     commits: parseJson<Review["commits"]>(row.commits_json, []),
     createdAt: row.gh_created_at,
-    worktree: row.worktree,
     environmentId: row.environment_id,
     hostId: row.host_id,
     syncedAt: row.synced_at,
@@ -626,7 +625,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.storage.migrate(db, MIGRATIONS);
   const { q }: Store = createStore(db);
   const stacks = createStackStore(db);
-  // Import previously opened stacks once, without preparing any extra worktrees.
+  // Import previously opened stacks once, without preparing any extra PRs.
   for (const row of q.reviews.all()) {
     const cache = q.stackCache.get(row.owner, row.repo, row.number);
     const stack = prStackSchema.safeParse(parseJson(cache?.json ?? "null", null));
@@ -659,6 +658,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   const hostOptions = (row: ReviewRow) => ({ hostId: row.host_id });
+  // Cloning or fetching a large repository can take minutes, past the 30 s default.
+  const REPO_SETUP_TIMEOUT_MS = 10 * 60_000;
 
   /** Take a review out of Review Desk. Does not close the pull request on GitHub. */
   function forgetReview(row: ReviewRow, dismiss: boolean): void {
@@ -675,11 +676,21 @@ export default async function plugin(bb: BbPluginApi) {
     q.deleteReview.run(row.id);
   }
 
+  // Reviews read Git objects directly. Earlier versions also kept a worktree per review.
+  async function removeLegacyWorktree(row: ReviewRow): Promise<void> {
+    if (row.worktree === "") return;
+    try {
+      await host.call("repo_release", { repoPath: row.repo_path, worktree: row.worktree }, hostOptions(row));
+      q.clearWorktree.run(row.id);
+    } catch (cause) {
+      bb.log.warn(`remove worktree for ${row.owner}/${row.repo}#${row.number}: ${errorMessage(cause)}`);
+    }
+  }
+  void (async () => { for (const row of q.reviews.all()) await removeLegacyWorktree(row); })();
+
   function releaseReview(row: ReviewRow, reason: string): void {
     publish(row.id, reason);
-    void host.call("repo_release", { repoPath: row.repo_path, worktree: row.worktree }, hostOptions(row)).catch((cause: unknown) => {
-      bb.log.warn(`release worktree for ${row.owner}/${row.repo}#${row.number}: ${errorMessage(cause)}`);
-    });
+    void removeLegacyWorktree(row);
   }
 
   function dropReview(row: ReviewRow, opts?: { dismiss?: boolean; reason?: string }): void {
@@ -1014,14 +1025,14 @@ export default async function plugin(bb: BbPluginApi) {
       if (source) return { repoPath: source.path, hostId: source.hostId, projectId: project.id };
     }
     const hostId = await primaryHostId();
-    const cloned = await host.call("repo_clone", { owner, repo, dest: "" }, { hostId });
+    const cloned = await host.call("repo_clone", { owner, repo, dest: "" }, { hostId, timeoutMs: REPO_SETUP_TIMEOUT_MS });
     return { repoPath: cloned.repoPath, hostId, projectId: null };
   }
 
   // -- open and sync ---------------------------------------------------------
 
   async function refreshFiles(row: ReviewRow): Promise<ChangedFile[]> {
-    const result = await host.call("git_files", { worktree: row.worktree, baseSha: row.base_sha, headSha: row.head_sha }, hostOptions(row));
+    const result = await host.call("git_files", { repoPath: row.repo_path, baseSha: row.base_sha, headSha: row.head_sha }, hostOptions(row));
     q.setFilesCache.run(row.id, row.head_sha, row.base_sha, JSON.stringify(result.files));
     return result.files;
   }
@@ -1047,13 +1058,13 @@ export default async function plugin(bb: BbPluginApi) {
       ? reviewStats(local) : { additions: entry.additions, deletions: entry.deletions };
   }
 
-  function applyPr(row: ReviewRow, pr: GhPr, prepared: { worktree: string; headSha: string; baseSha: string }): void {
+  function applyPr(row: ReviewRow, pr: GhPr, prepared: { headSha: string; baseSha: string }): void {
     const now = Date.now();
     q.updateReviewMeta.run(
       pr.title, pr.body, pr.state, pr.isDraft ? 1 : 0, pr.author?.login ?? null, pr.baseRefName, pr.headRefName, prepared.headSha, prepared.baseSha,
       pr.additions, pr.deletions, pr.changedFiles, pr.reviewDecision, pr.mergeable, JSON.stringify(pr.labels), JSON.stringify(pr.checks),
       JSON.stringify(pr.reviewers), JSON.stringify(pr.assignees), JSON.stringify(pr.commits), pr.createdAt,
-      prepared.worktree, pr.updatedAt, now, now, row.id,
+      pr.updatedAt, now, now, row.id,
     );
     q.setBaseRefSha.run(pr.baseRefOid, row.id);
   }
@@ -1083,19 +1094,15 @@ export default async function plugin(bb: BbPluginApi) {
     const located = await locateRepo(owner, repo);
     const pr = await readPrStatus(owner, repo, number, located.hostId);
     if (!prIsOpen(pr.state)) throw new Error(`PR #${number} is already merged or closed`);
-    const key = `${owner}__${repo}__${number}`;
     const prepared = await host.call(
       "repo_prepare",
-      { repoPath: located.repoPath, number, headSha: pr.headRefOid, baseRefName: pr.baseRefName, worktreesDir: "", key },
-      { hostId: located.hostId },
+      { repoPath: located.repoPath, number, headSha: pr.headRefOid, baseRefName: pr.baseRefName },
+      { hostId: located.hostId, timeoutMs: REPO_SETUP_TIMEOUT_MS },
     );
-    if (q.dismissed.get(owner, repo, number)) {
-      await host.call("repo_release", { repoPath: located.repoPath, worktree: prepared.worktree }, { hostId: located.hostId });
-      throw new Error("Review was removed");
-    }
+    if (q.dismissed.get(owner, repo, number)) throw new Error("Review was removed");
     const id = newId();
     const now = Date.now();
-    q.insertReview.run(id, owner, repo, number, pr.title, pr.url, prepared.worktree, located.hostId, located.repoPath, located.projectId, now, now, now);
+    q.insertReview.run(id, owner, repo, number, pr.title, pr.url, located.hostId, located.repoPath, located.projectId, now, now, now);
     applyPr(requireReview(id), { ...pr, checks: [], labels: [], reviewers: [], assignees: [], commits: [] }, prepared);
     const latest = prStatuses.get(prKey({ owner, repo, number }))?.pr;
     if (latest) reconcileStatus(owner, repo, latest);
@@ -1191,14 +1198,13 @@ export default async function plugin(bb: BbPluginApi) {
       await refreshStack(row);
       return { review: toReview(requireReview(reviewId)), headChanged: false };
     }
-    const key = `${row.owner}__${row.repo}__${row.number}`;
-    const prepared = force || headChanged || baseMoved || row.worktree === ""
+    const prepared = force || headChanged || baseMoved
       ? await host.call(
           "repo_prepare",
-          { repoPath: row.repo_path, number: row.number, headSha: pr.headRefOid, baseRefName: pr.baseRefName, worktreesDir: "", key },
-          hostOptions(row),
+          { repoPath: row.repo_path, number: row.number, headSha: pr.headRefOid, baseRefName: pr.baseRefName },
+          { ...hostOptions(row), timeoutMs: REPO_SETUP_TIMEOUT_MS },
         )
-      : { worktree: row.worktree, headSha: pr.headRefOid, baseSha: row.base_sha };
+      : { headSha: pr.headRefOid, baseSha: row.base_sha };
     if (prStatuses.get(prKey(row))?.pr !== pr) return { review: toReview(requireReview(reviewId)), headChanged: false };
     const retainedDetails = {
       labels: parseJson<Review["labels"]>(row.labels_json, []),
@@ -1301,11 +1307,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   const patchKey = (base: string, head: string, path: string, oldPath: string | null) => JSON.stringify(["patch", base, head, path, oldPath]);
   function patchFor(row: ReviewRow, base: string, head: string, path: string, oldPath: string | null) {
-    return reads.read(row.id, patchKey(base, head, path, oldPath), () => host.call("git_patch", { worktree: row.worktree, baseSha: base, headSha: head, path, oldPath }, hostOptions(row)), Infinity);
+    return reads.read(row.id, patchKey(base, head, path, oldPath), () => host.call("git_patch", { repoPath: row.repo_path, baseSha: base, headSha: head, path, oldPath }, hostOptions(row)), Infinity);
   }
 
   function fileAt(row: ReviewRow, sha: string, path: string) {
-    return reads.read(row.id, JSON.stringify(["file", sha, path]), () => host.call("git_show", { worktree: row.worktree, sha, path }, hostOptions(row)), Infinity);
+    return reads.read(row.id, JSON.stringify(["file", sha, path]), () => host.call("git_show", { repoPath: row.repo_path, sha, path }, hostOptions(row)), Infinity);
   }
 
   async function warmReview(row: ReviewRow) {
@@ -1424,7 +1430,7 @@ export default async function plugin(bb: BbPluginApi) {
     const key = `${row.id}:${sha}`;
     const cached = commitCache.get(key);
     if (cached !== undefined) return cached;
-    const info = await host.call("git_commit", { worktree: row.worktree, sha }, hostOptions(row));
+    const info = await host.call("git_commit", { repoPath: row.repo_path, sha }, hostOptions(row));
     commitCache.set(key, info);
     return info;
   }
@@ -1435,7 +1441,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (from === undefined) base = info.parents[0] ?? row.base_sha;
     else if (inclusive) base = (await commitInfo(row, from)).parents[0] ?? row.base_sha;
     else base = from;
-    const files = await host.call("git_files", { worktree: row.worktree, baseSha: base, headSha: info.sha }, hostOptions(row));
+    const files = await host.call("git_files", { repoPath: row.repo_path, baseSha: base, headSha: info.sha }, hostOptions(row));
     // The PR's commit list, oldest first, tells which commits the range covers.
     const list = parseJson<Review["commits"]>(row.commits_json, []);
     const toIndex = list.findIndex((c) => c.sha === info.sha || c.sha.startsWith(to) || info.sha.startsWith(c.sha));
@@ -1456,7 +1462,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (!cache.has(key)) {
       const file = fileForPath(await filesFor(row), path);
       const targetPath = side === "LEFT" ? file?.oldPath ?? path : file?.path ?? path;
-      const shown = await host.call("git_show", { worktree: row.worktree, sha: side === "LEFT" ? row.base_sha : row.head_sha, path: targetPath }, hostOptions(row));
+      const shown = await host.call("git_show", { repoPath: row.repo_path, sha: side === "LEFT" ? row.base_sha : row.head_sha, path: targetPath }, hostOptions(row));
       cache.set(key, shown.content === null ? null : shown.content.split("\n"));
     }
     return cache.get(key) ?? null;
@@ -1787,7 +1793,7 @@ export default async function plugin(bb: BbPluginApi) {
         switch (command) {
           case "open": {
             const review = await openReview(rest.join(" "));
-            return ok(review, `Opened ${review.owner}/${review.repo}#${review.number} "${review.title}" as ${review.id} (${review.changedFiles} files, worktree ${review.worktree})`);
+            return ok(review, `Opened ${review.owner}/${review.repo}#${review.number} "${review.title}" as ${review.id} (${review.changedFiles} files)`);
           }
           case "list": {
             const rows = q.reviews.all().filter(reviewIsActive);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { experimental_createHostEntryHarness } from "@get-bb/plugin-sdk/testing/host";
@@ -24,7 +24,7 @@ test("rename-aware git totals exclude pure moves and count edits to renamed file
     renameSync(join(repo, "edited.txt"), join(repo, "new/edited.txt"));
     writeFileSync(join(repo, "new/edited.txt"), lines + "after\nextra\n");
     git("add", "."); git("-c", "commit.gpgsign=false", "commit", "-qm", "Moves and edits");
-    const { files } = await harness.experimental_call("git_files", { worktree: repo, baseSha: base, headSha: git("rev-parse", "HEAD") });
+    const { files } = await harness.experimental_call("git_files", { repoPath: repo, baseSha: base, headSha: git("rev-parse", "HEAD") });
     assert.equal(files.length, 2);
     assert.ok(files.every((file) => file.status === "renamed" && file.oldPath !== null));
     assert.deepEqual(diffStats(files), { additions: 2, deletions: 1 });
@@ -32,7 +32,7 @@ test("rename-aware git totals exclude pure moves and count edits to renamed file
   } finally { await harness.experimental_dispose(); rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("parallel preparations share a repository safely and never prune unrelated worktrees", async () => {
+test("parallel preparations share a repository, read PR revisions without a checkout, and never prune unrelated worktrees", async () => {
   const root = mkdtempSync(join(tmpdir(), "review-desk-prefetch-"));
   const repo = join(root, "repo"); const origin = join(root, "origin");
   mkdirSync(repo); mkdirSync(origin);
@@ -55,14 +55,51 @@ test("parallel preparations share a repository safely and never prune unrelated 
     writeFileSync(join(repo, "file.txt"), "second\n");
     git(repo, "add", "."); git(repo, "-c", "commit.gpgsign=false", "commit", "-qm", "Second PR");
     const second = git(repo, "rev-parse", "HEAD"); git(repo, "push", "origin", "HEAD:refs/pull/2/head");
-    const prepare = (number: number, headSha: string) => harness.experimental_call("repo_prepare", { repoPath: repo, number, headSha, baseRefName: "main", worktreesDir: join(root, "reviews"), key: `pr-${number}` });
+    git(repo, "reset", "-q", "--hard", base);
+    const prepare = (number: number, headSha: string) => harness.experimental_call("repo_prepare", { repoPath: repo, number, headSha, baseRefName: "main" });
     const results = await Promise.all([prepare(1, first), prepare(2, second)]);
-    assert.ok(results.every((result) => result.baseSha === base));
-    assert.equal(readFileSync(join(results[0].worktree, "file.txt"), "utf8"), "first\n");
-    assert.equal(readFileSync(join(results[1].worktree, "file.txt"), "utf8"), "second\n");
+    assert.deepEqual(results, [{ headSha: first, baseSha: base }, { headSha: second, baseSha: base }]);
+    const show = (sha: string) => harness.experimental_call("git_show", { repoPath: repo, sha, path: "file.txt" });
+    assert.deepEqual(await show(first), { content: "first\n", binary: false });
+    assert.deepEqual(await show(second), { content: "second\n", binary: false });
+    assert.equal(readFileSync(join(repo, "file.txt"), "utf8"), "base\n", "the checkout is never touched");
     assert.ok(git(repo, "worktree", "list", "--porcelain").includes(`worktree ${unrelated}\n`));
-    await harness.experimental_call("repo_release", { repoPath: repo, worktree: results[0].worktree });
-    assert.ok(git(repo, "worktree", "list", "--porcelain").includes(`worktree ${unrelated}\n`));
-    assert.equal(readFileSync(join(results[1].worktree, "file.txt"), "utf8"), "second\n");
+  } finally { await harness.experimental_dispose(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("plugin-owned clones with a checkout become bare in place and keep their objects", async () => {
+  const root = mkdtempSync(join(tmpdir(), "review-desk-bare-"));
+  const data = join(root, "data"); const origin = join(root, "origin"); const seed = join(root, "seed");
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const harness = experimental_createHostEntryHarness(host, { experimental_paths: { dataDir: data, tempDir: join(root, "tmp") } });
+  try {
+    mkdirSync(origin); mkdirSync(seed); mkdirSync(join(data, "repos"), { recursive: true });
+    git(origin, "init", "--bare", "-q");
+    git(seed, "init", "-q", "-b", "main");
+    git(seed, "config", "user.name", "Test"); git(seed, "config", "user.email", "test@example.com");
+    writeFileSync(join(seed, "file.txt"), "base\n");
+    git(seed, "add", "."); git(seed, "-c", "commit.gpgsign=false", "commit", "-qm", "Base");
+    const base = git(seed, "rev-parse", "HEAD");
+    writeFileSync(join(seed, "file.txt"), "head\n");
+    git(seed, "-c", "commit.gpgsign=false", "commit", "-qam", "PR");
+    const head = git(seed, "rev-parse", "HEAD");
+    git(seed, "push", "-q", origin, `${base}:refs/heads/main`, "HEAD:refs/pull/1/head");
+    const clone = join(data, "repos", "o__r");
+    git(root, "clone", "-q", origin, clone);
+    const worktree = join(data, "worktrees", "o__r__1");
+    git(clone, "worktree", "add", "-q", "--detach", worktree, base);
+
+    await harness.experimental_call("repo_release", { repoPath: clone, worktree });
+    assert.equal(git(clone, "rev-parse", "--is-bare-repository"), "true");
+    assert.ok(!existsSync(worktree) && !existsSync(join(clone, ".git")) && !existsSync(join(clone, "file.txt")));
+    assert.deepEqual(await harness.experimental_call("repo_clone", { owner: "o", repo: "r", dest: "" }), { repoPath: clone });
+    assert.deepEqual(await harness.experimental_call("repo_prepare", { repoPath: clone, number: 1, headSha: head, baseRefName: "main" }), { headSha: head, baseSha: base });
+
+    const interrupted = join(data, "repos", "o__s");
+    git(root, "clone", "-q", origin, interrupted);
+    renameSync(join(interrupted, ".git"), join(data, "repos", ".o__s.bare"));
+    assert.deepEqual(await harness.experimental_call("repo_clone", { owner: "o", repo: "s", dest: "" }), { repoPath: interrupted });
+    assert.equal(git(interrupted, "rev-parse", "--is-bare-repository"), "true");
+    assert.ok(!existsSync(join(data, "repos", ".o__s.bare")) && !existsSync(join(interrupted, "file.txt")));
   } finally { await harness.experimental_dispose(); rmSync(root, { recursive: true, force: true }); }
 });

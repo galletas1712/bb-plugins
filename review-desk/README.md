@@ -29,7 +29,7 @@ The plugin ID and CLI command remain `review-desk`, preserving saved reviews, se
 
 Changes, Conversation, and Commits use a single main workspace, one view at a time. Submit review opens a dialog with pending comments and review controls, with checks and metadata in expandable sections. Reviews and tracked stacks refresh from GitHub in the background. Visible panels also poll every 15 seconds and refresh on focus or reconnect. Head and base-branch pushes refresh cached diffs. Manual refresh fetches Git again. Fetch errors are shown with a retry action.
 
-Requires an authenticated `gh` CLI on the machine holding the repository. The GitHub plugin finds a local checkout or clones one, then creates a detached worktree for reading the diff.
+Requires an authenticated `gh` CLI on the machine holding the repository. The GitHub plugin uses the checkout of a bb project whose remote matches the PR's repository. Otherwise it keeps its own bare, blob-less clone. Diffs read Git objects by commit, so no per-PR checkout is created.
 
 Manually opened PRs are saved and remain listed while open, including your own PRs missing from the authored discovery snapshot. They share the regular status scans, diff prefetch and persistent component caches. Closed or merged PRs are hidden after their status updates, and closed PRs can reappear when reopened. Explicit removal is remembered.
 

@@ -15,7 +15,7 @@ bb review-desk list [--json]
 bb review-desk stack <reviewId> [--json]
 ```
 
-The repository host needs an authenticated `gh` CLI. Opening a PR creates a detached worktree for its diff. Stack navigation lists open layers; other open layers load when selected. Comments and review submission belong to the selected PR.
+The repository host needs an authenticated `gh` CLI. Opening a PR fetches its head and base into the repository's bb project checkout, or into a bare, blob-less clone the plugin keeps when no project matches. Diffs read Git objects by commit, so no per-PR checkout is created. The file header links to the file on GitHub. Stack navigation lists open layers; other open layers load when selected. Comments and review submission belong to the selected PR.
 
 The GitHub page automatically lists the authenticated account's authored open PRs and open PRs personally requested for review across repositories, including drafts. Team-only review requests do not add PRs. Authored and personally requested discovery and stack membership poll every minute. Discovered PRs share the persistent cache, background prefetch and status scans. Stack checkmarks mean every open layer is ready according to GitHub's merge status, including required reviews, drafts, conflicts and blocking checks. Unknown readiness keeps the normal open/draft icon. Readiness shares the existing 15-second status scan and persists across reloads. Closed and merged PRs are hidden from the front page and stack navigation, and stacks with no open layers are hidden. Counts, positions, and totals include only open layers. Completed PRs and stacks cannot be opened. Hidden PRs retain saved drafts and notes. Explicitly removed PRs stay hidden until reopened.
 

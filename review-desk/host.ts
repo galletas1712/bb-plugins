@@ -1,7 +1,7 @@
 // bb-plugin-review-desk — host entry. Runs on the machine that holds the
-// repository: git for worktrees and diffs, gh for GitHub. No plugin storage here.
+// repository: git for refs and diffs, gh for GitHub. No plugin storage here.
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
@@ -46,6 +46,21 @@ async function inRepository<T>(repoPath: string, work: () => Promise<T>): Promis
   finally { if (repositoryWork.get(repoPath) === next) repositoryWork.delete(repoPath); }
 }
 
+// Clones under dataDir/repos belong to this plugin. They are bare and blob-less because
+// reviews read Git objects by commit, so a checkout would only cost disk and time.
+async function openRepository(repoPath: string, dataDir: string): Promise<void> {
+  if (path.dirname(repoPath) !== path.join(dataDir, "repos")) return;
+  // A clone with a checkout keeps only its .git directory. Staging it beside the clone
+  // lets an interrupted conversion resume without losing objects.
+  const staged = path.join(path.dirname(repoPath), `.${path.basename(repoPath)}.bare`);
+  if (existsSync(path.join(repoPath, ".git"))) renameSync(path.join(repoPath, ".git"), staged);
+  if (!existsSync(staged)) return;
+  rmSync(repoPath, { recursive: true, force: true });
+  for (const entry of ["index", "lfs", "worktrees"]) rmSync(path.join(staged, entry), { recursive: true, force: true });
+  await run("git", ["--git-dir", staged, "config", "core.bare", "true"]);
+  renameSync(staged, repoPath);
+}
+
 function ghJson<T>(text: string): T {
   return JSON.parse(text) as T;
 }
@@ -66,10 +81,10 @@ function statusFromLetter(letter: string): ChangedFile["status"] {
   }
 }
 
-async function listFiles(worktree: string, baseSha: string, headSha: string): Promise<ChangedFile[]> {
+async function listFiles(repoPath: string, baseSha: string, headSha: string): Promise<ChangedFile[]> {
   const [status, numstat] = await Promise.all([
-    git(worktree, ["diff", "--name-status", "-M", "-z", baseSha, headSha]),
-    git(worktree, ["diff", "--numstat", "-M", "-z", baseSha, headSha]),
+    git(repoPath, ["diff", "--name-status", "-M", "-z", baseSha, headSha]),
+    git(repoPath, ["diff", "--numstat", "-M", "-z", baseSha, headSha]),
   ]);
   const files = new Map<string, ChangedFile>();
   const parts = status.stdout.split("\0").filter((p) => p !== "");
@@ -108,8 +123,8 @@ async function listFiles(worktree: string, baseSha: string, headSha: string): Pr
   return [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
-async function showFile(worktree: string, sha: string, filePath: string): Promise<{ content: string | null; binary: boolean }> {
-  const result = await run("git", ["show", `${sha}:${filePath}`], { cwd: worktree, allowFailure: true });
+async function showFile(repoPath: string, sha: string, filePath: string): Promise<{ content: string | null; binary: boolean }> {
+  const result = await run("git", ["show", `${sha}:${filePath}`], { cwd: repoPath, allowFailure: true });
   if (result.code !== 0) return { content: null, binary: false };
   if (result.stdout.includes("\0")) return { content: null, binary: true };
   return { content: result.stdout, binary: false };
@@ -182,55 +197,43 @@ export default experimental_defineHostEntry({
     async repo_clone({ owner, repo, dest }, context) {
       const target = dest === "" ? path.join(context.experimental_paths.dataDir, "repos", `${owner}__${repo}`) : dest;
       return inRepository(target, async () => {
+        await openRepository(target, context.experimental_paths.dataDir);
         mkdirSync(path.dirname(target), { recursive: true });
-        if (!existsSync(path.join(target, ".git"))) {
-          await run("gh", ["repo", "clone", `${owner}/${repo}`, target, "--", "--filter=blob:none"]);
+        if (!existsSync(target)) {
+          await run("gh", ["repo", "clone", `${owner}/${repo}`, target, "--", "--bare", "--filter=blob:none"]);
         }
         return { repoPath: target };
       });
     },
-    async repo_prepare({ repoPath, number, headSha, baseRefName, worktreesDir, key }, context) {
+    async repo_prepare({ repoPath, number, headSha, baseRefName }, context) {
       return inRepository(repoPath, async () => {
+        await openRepository(repoPath, context.experimental_paths.dataDir);
         await git(repoPath, ["fetch", "--quiet", "origin", `+refs/pull/${number}/head:refs/review-desk/pr-${number}`, `+refs/heads/${baseRefName}:refs/remotes/origin/${baseRefName}`]);
-        const dir = worktreesDir === "" ? path.join(context.experimental_paths.dataDir, "worktrees") : worktreesDir;
-        mkdirSync(dir, { recursive: true });
-        const worktree = path.join(dir, key);
-        const registered = (await git(repoPath, ["worktree", "list", "--porcelain"])).stdout.includes(`worktree ${worktree}\n`);
-        if (existsSync(worktree) && !registered) rmSync(worktree, { recursive: true, force: true });
-        if (!registered) {
-          await git(repoPath, ["worktree", "add", "--detach", worktree, headSha]);
-        } else {
-          const current = (await git(worktree, ["rev-parse", "HEAD"])).stdout.trim();
-          if (current !== headSha) {
-            const dirty = (await git(worktree, ["status", "--porcelain"])).stdout.trim() !== "";
-            if (!dirty) await git(worktree, ["checkout", "--quiet", "--detach", headSha]);
-          }
-        }
-        const baseSha = (await git(worktree, ["merge-base", headSha, `refs/remotes/origin/${baseRefName}`])).stdout.trim();
-        return { worktree, headSha, baseSha };
+        const baseSha = (await git(repoPath, ["merge-base", headSha, `refs/remotes/origin/${baseRefName}`])).stdout.trim();
+        return { headSha, baseSha };
       });
     },
-    async repo_release({ repoPath, worktree }) {
+    async repo_release({ repoPath, worktree }, context) {
       return inRepository(repoPath, async () => {
-        if (worktree === "") return { ok: true as const };
+        await openRepository(repoPath, context.experimental_paths.dataDir);
         await git(repoPath, ["worktree", "remove", "--force", worktree], true);
-        if (existsSync(worktree)) rmSync(worktree, { recursive: true, force: true });
+        rmSync(worktree, { recursive: true, force: true });
         return { ok: true as const };
       });
     },
-    async git_files({ worktree, baseSha, headSha }) {
-      return { files: await listFiles(worktree, baseSha, headSha) };
+    async git_files({ repoPath, baseSha, headSha }) {
+      return { files: await listFiles(repoPath, baseSha, headSha) };
     },
-    async git_patch({ worktree, baseSha, headSha, path: filePath, oldPath }) {
+    async git_patch({ repoPath, baseSha, headSha, path: filePath, oldPath }) {
       const targets = [...new Set([oldPath, filePath].filter((value): value is string => value !== null && value !== ""))];
-      const result = await git(worktree, ["diff", "-M", "--no-color", "--no-ext-diff", baseSha, headSha, "--", ...targets]);
+      const result = await git(repoPath, ["diff", "-M", "--no-color", "--no-ext-diff", baseSha, headSha, "--", ...targets]);
       return { patch: result.stdout };
     },
-    async git_show({ worktree, sha, path: filePath }) {
-      return showFile(worktree, sha, filePath);
+    async git_show({ repoPath, sha, path: filePath }) {
+      return showFile(repoPath, sha, filePath);
     },
-    async git_commit({ worktree, sha }) {
-      const result = await git(worktree, ["show", "-s", "--format=%H%n%P%n%an%n%aI%n%s%n%b", sha]);
+    async git_commit({ repoPath, sha }) {
+      const result = await git(repoPath, ["show", "-s", "--format=%H%n%P%n%an%n%aI%n%s%n%b", sha]);
       const [full = sha, parents = "", author = "", date = "", title = "", ...body] = result.stdout.split("\n");
       return { sha: full.trim(), parents: parents.trim() === "" ? [] : parents.trim().split(/\s+/), author, date, title, body: body.join("\n").trim() };
     },

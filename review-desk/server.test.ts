@@ -49,7 +49,7 @@ async function fixture() {
       }
       case "gh_pr_details": await onDetails?.(); return { commits: [], labels: [], checks: [], reviewers: [], assignees: [] };
       case "repo_clone": return { repoPath: "/repo" };
-      case "repo_prepare": await onPrepare?.(args.number); return { worktree: `/repo/${args.number}`, headSha: args.headSha, baseSha: remotePrs.get(args.number)?.baseRefOid ?? "base" };
+      case "repo_prepare": await onPrepare?.(args.number); return { headSha: args.headSha, baseSha: remotePrs.get(args.number)?.baseRefOid ?? "base" };
       case "repo_release": return { ok: true };
       case "git_files": return { files };
       case "git_patch": return { patch: `patch ${args.baseSha}..${args.headSha}:${args.path}` };
@@ -128,6 +128,22 @@ test("cached merge actions survive reload, return while GitHub is slow, and refr
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(await f.rpc("review_merge_options", { reviewId: review.id }), next, "failed refresh retains last good data");
   } finally { release?.(null); Date.now = now; await f.harness.lifecycle.dispose(); }
+});
+
+test("startup removes worktrees that earlier versions kept for each review", async () => {
+  const f = await fixture();
+  try {
+    f.setStack(null);
+    const review = await f.open(1);
+    f.bb.storage.database().prepare<[string]>("UPDATE reviews SET worktree = '/old/worktrees/o__r__1' WHERE id = ?").run(review.id);
+    let released!: () => void; const release = new Promise<void>((resolve) => { released = resolve; });
+    f.onRead((method) => { if (method === "repo_release") released(); return undefined; });
+    await f.reload();
+    await release; await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(f.calls.filter((call) => call.method === "repo_release").map((call) => call.input), [{ repoPath: "/repo", worktree: "/old/worktrees/o__r__1" }]);
+    assert.equal(f.bb.storage.database().prepare<[string], { worktree: string }>("SELECT worktree FROM reviews WHERE id = ?").get(review.id)?.worktree, "");
+    assert.equal((await f.list()).length, 1);
+  } finally { await f.harness.lifecycle.dispose(); }
 });
 
 test("patches use immutable revisions, hydrate the selected file, persist, and disappear with a removed review", async () => {
@@ -215,11 +231,9 @@ test("stack removal is atomic, includes every opened layer, and also applies thr
     db.exec("CREATE TRIGGER fail_removal BEFORE DELETE ON reviews WHEN OLD.number = 2 BEGIN SELECT RAISE(ABORT, 'test failure'); END");
     await assert.rejects(f.rpc("stacks_remove", { key: "gh:o/r#7" }), /test failure/);
     assert.equal((await f.list()).length, 3);
-    assert.equal(f.calls.filter((call) => call.method === "repo_release").length, 0);
     db.exec("DROP TRIGGER fail_removal");
     await f.rpc("reviews_remove", { reviewId: first.id });
     assert.deepEqual(await f.list(), []);
-    assert.equal(f.calls.filter((call) => call.method === "repo_release").length, 2);
     await f.reload();
     assert.deepEqual(await f.list(), []);
   } finally { await f.harness.lifecycle.dispose(); }
@@ -527,7 +541,7 @@ test("personally requested PRs are cached and prefetched without opening them, a
     f.setPr(4, { author: { login: "someone-else" } });
     f.setOwn({ login: "viewer", prs: [ownPr(4)] });
     f.setFiles([{ path: "a.md", oldPath: null, status: "modified", additions: 1, deletions: 1, binary: false }]);
-    assert.equal((await f.list())[0].id, null, "discovery lists the PR before preparing its worktree");
+    assert.equal((await f.list())[0].id, null, "discovery lists the PR before preparing it");
     assert.equal(f.calls.some((call) => call.method === "repo_prepare"), false);
     f.onRead((method) => { if (method === "git_patch") prefetch!.controller.abort(); return undefined; });
     prefetch = f.harness.behavior.runService("sync-open-reviews"); await prefetch.done; f.onRead(undefined);
@@ -874,7 +888,6 @@ test("removing an unopened PR during prefetch cannot recreate it", async () => {
     await f.rpc("reviews_remove", { owner: "o", repo: "r", number: 1 });
     service.controller.abort(); release(); await service.done;
     assert.deepEqual(await f.list(), []);
-    assert.equal(f.calls.filter((c) => c.method === "repo_release").length, 1);
     assert.equal(f.bb.storage.database().prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM reviews").get()?.n, 0);
   } finally { service?.controller.abort(); release?.(); await f.harness.lifecycle.dispose(); }
 });

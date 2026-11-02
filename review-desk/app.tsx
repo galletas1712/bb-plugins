@@ -12,7 +12,6 @@ import {
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
-  experimental_FileLink as FileLink,
   experimental_useCodeTheme as useCodeTheme,
 } from "@get-bb/plugin-sdk/app";
 import type { FileDiffMetadata, SelectedLineRange } from "@pierre/diffs";
@@ -1525,7 +1524,7 @@ function DiffPane({ detail, rpc, refetch, commit, jump, display, onOpenPrDiff }:
             >
               <Icon name="PanelLeft" className="size-3.5" />
             </Button>
-            <span className="min-w-0 flex-1 truncate font-mono" title={selectedPath ?? undefined}>{file ? <FileLink target={{ kind: "host", hostId: review.hostId, path: review.worktree + "/" + file.path }} className="block truncate hover:underline">{file.path}<span className="sr-only"> · Open file</span></FileLink> : "No files"}</span>
+            <span className="min-w-0 flex-1 truncate font-mono" title={selectedPath ?? undefined}>{file ? <UrlLink href={`${review.url.replace(/\/pull\/\d+$/, "")}/blob/${file.status === "deleted" ? review.baseSha : review.headSha}/${file.path.split("/").map(encodeURIComponent).join("/")}`} className="block truncate hover:underline">{file.path}<span className="sr-only"> · Open file on GitHub</span></UrlLink> : "No files"}</span>
           </div>
           {file ? <div className="ml-auto flex shrink-0 items-center gap-2">
             {!narrowViewer ? <DiffStat additions={file.additions} deletions={file.deletions} /> : null}

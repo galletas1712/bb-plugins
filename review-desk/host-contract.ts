@@ -171,21 +171,19 @@ export const hostContract = defineRpcContract({
   gh_merge_result: { input: prRefSchema.extend({ requestId: z.string().uuid() }), output: mergeResultSchema },
   gh_own_prs: { input: z.null(), output: ownPrsSchema },
   gh_pr_statuses: { input: z.object({ prs: z.array(prRefSchema).max(50) }), output: prStatusesSchema },
-  /** Fetch the PR head and base, and keep a detached worktree at the head. */
+  /** Fetch the PR head and base and find their merge base. Reviews read Git objects, never a checkout. */
   repo_prepare: {
     input: z.object({
       repoPath: z.string(),
       number: z.number(),
       headSha: z.string(),
       baseRefName: z.string(),
-      worktreesDir: z.string(),
-      key: z.string(),
     }),
-    output: z.object({ worktree: z.string(), headSha: z.string(), baseSha: z.string() }),
+    output: z.object({ headSha: z.string(), baseSha: z.string() }),
   },
-  /** Drop a PR worktree after the review is removed. */
+  /** Remove a per-PR worktree that an earlier plugin version created. */
   repo_release: {
-    input: z.object({ repoPath: z.string(), worktree: z.string() }),
+    input: z.object({ repoPath: z.string(), worktree: z.string().min(1) }),
     output: z.object({ ok: z.literal(true) }),
   },
   repo_clone: {
@@ -193,20 +191,20 @@ export const hostContract = defineRpcContract({
     output: z.object({ repoPath: z.string() }),
   },
   git_files: {
-    input: z.object({ worktree: z.string(), baseSha: z.string(), headSha: z.string() }),
+    input: z.object({ repoPath: z.string(), baseSha: z.string(), headSha: z.string() }),
     output: z.object({ files: z.array(changedFileSchema) }),
   },
   git_patch: {
-    input: z.object({ worktree: z.string(), baseSha: z.string(), headSha: z.string(), path: z.string(), oldPath: z.string().nullable() }),
+    input: z.object({ repoPath: z.string(), baseSha: z.string(), headSha: z.string(), path: z.string(), oldPath: z.string().nullable() }),
     output: z.object({ patch: z.string() }),
   },
   git_show: {
-    input: z.object({ worktree: z.string(), sha: z.string(), path: z.string() }),
+    input: z.object({ repoPath: z.string(), sha: z.string(), path: z.string() }),
     output: z.object({ content: z.string().nullable(), binary: z.boolean() }),
   },
   /** Message, author, date, and parents of one commit. */
   git_commit: {
-    input: z.object({ worktree: z.string(), sha: z.string() }),
+    input: z.object({ repoPath: z.string(), sha: z.string() }),
     output: z.object({ sha: z.string(), parents: z.array(z.string()), author: z.string(), date: z.string(), title: z.string(), body: z.string() }),
   },
   gh_pr: {
