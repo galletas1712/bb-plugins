@@ -1,13 +1,4 @@
-// bb-plugin-roundtable — frontend entry.
-//
-// One nav panel ("Roundtable") with a room list, the shared transcript, and a
-// composer with a single knob, Turns. Send with one seat tagged and Turns is
-// how many times the agents may relay to each other before you get the floor
-// back. Tag two or more and press Discuss and Turns is the cap on a scheduled
-// back-and-forth that ends once everyone agrees. Fixed side tabs render bb's
-// own ThreadChat for a participant thread and the room's pinned document. A
-// thread panel action opens (or creates) the room bound to the current
-// thread's workspace.
+// Roundtable shares a transcript across participant threads.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, ReactNode } from "react";
 import {
@@ -18,24 +9,19 @@ import {
   useRealtime,
   useRpc,
   experimental_FileLink as FileLink,
-  experimental_SourceCode as SourceCode,
   experimental_useAppPanel as useAppPanel,
   experimental_useFixedTabTarget as useFixedTabTarget,
   type ExperimentalPluginFixedTabReference,
   type JsonValue,
 } from "@get-bb/plugin-sdk/app";
 import type {
-  Brief,
-  ChangedFile,
   ContextOptions,
-  DocRead,
   Job,
   Message,
   Participant,
   ParticipantInput,
   RoomDetail,
   RoomSummary,
-  Stance,
   rpcContract,
 } from "./server";
 import { Button } from "@/components/ui/button";
@@ -54,10 +40,6 @@ interface AgentTabTarget {
   threadId: string;
   [key: string]: JsonValue;
 }
-interface DocTabTarget {
-  roomId: string;
-  [key: string]: JsonValue;
-}
 function hasStringField(value: JsonValue, field: string): boolean {
   return (
     typeof value === "object" &&
@@ -71,12 +53,6 @@ const AGENT_TAB: ExperimentalPluginFixedTabReference<AgentTabTarget> = {
   id: "agent-thread",
   experimental_target: { validate: (value): value is AgentTabTarget => hasStringField(value, "threadId") },
 };
-const DOC_TAB: ExperimentalPluginFixedTabReference<DocTabTarget> = {
-  panelId: PANEL_ID,
-  id: "document",
-  experimental_target: { validate: (value): value is DocTabTarget => hasStringField(value, "roomId") },
-};
-
 // ---------------------------------------------------------------------------
 // Data hooks
 // ---------------------------------------------------------------------------
@@ -135,7 +111,7 @@ function useRoom(roomId: string | null) {
   // Status changes inside a participant thread are not all published; poll
   // slowly while anything is running so the busy dots stay honest.
   const busy =
-    detail?.participants.some((p) => !p.removed && (p.status === "active" || p.status === "starting")) ||
+    detail?.participants.some((p) => !p.removed && isRunning(p.status)) ||
     (detail?.job !== null && detail?.job !== undefined);
   useEffect(() => {
     if (!busy) return;
@@ -143,55 +119,6 @@ function useRoom(roomId: string | null) {
     return () => clearInterval(timer);
   }, [busy, refetch]);
   return { rpc, detail, error, refetch };
-}
-
-function useChanges(roomId: string, enabled: boolean) {
-  const rpc = useRpc<Contract>();
-  const [files, setFiles] = useState<ChangedFile[]>([]);
-  const [note, setNote] = useState<string | null>(null);
-  const refetch = useCallback(() => {
-    if (!enabled) return;
-    rpc.call("rooms_changes", { roomId }).then(
-      (result) => {
-        setFiles(result.files);
-        setNote(result.note);
-      },
-      (cause: unknown) => setNote(describeError(cause)),
-    );
-  }, [rpc, roomId, enabled]);
-  useEffect(() => {
-    refetch();
-    if (!enabled) return;
-    const timer = setInterval(refetch, 10_000);
-    return () => clearInterval(timer);
-  }, [refetch, enabled]);
-  useRealtime(ROOM_CHANGED, (payload) => {
-    const changed = roomIdOf(payload);
-    if (changed === null || changed === roomId) refetch();
-  });
-  return { files, note };
-}
-
-function useDoc(roomId: string | null) {
-  const rpc = useRpc<Contract>();
-  const [doc, setDoc] = useState<DocRead | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const refetch = useCallback(() => {
-    if (roomId === null) return;
-    rpc.call("rooms_doc_read", { roomId }).then(
-      (result) => {
-        setDoc(result);
-        setError(null);
-      },
-      (cause: unknown) => setError(describeError(cause)),
-    );
-  }, [rpc, roomId]);
-  useEffect(refetch, [refetch]);
-  useRealtime(ROOM_CHANGED, (payload) => {
-    const changed = roomIdOf(payload);
-    if (changed === null || changed === roomId) refetch();
-  });
-  return { rpc, doc, error, refetch };
 }
 
 // ---------------------------------------------------------------------------
@@ -223,76 +150,8 @@ function StatusDot({ status }: { status: string | null }) {
   );
 }
 
-/** Re-renders once a second while `enabled`, for elapsed timers. */
-function useTicker(enabled: boolean): number {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (!enabled) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [enabled]);
-  return now;
-}
-
-function WorkingRow({ participant, now }: { participant: Participant; now: number }) {
-  const elapsed = participant.activeSince === null ? null : durationLabel(Math.max(0, now - participant.activeSince));
-  return (
-    <li className="flex flex-col gap-1 py-3" aria-live="polite">
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <Icon name="Loading" className="size-3.5 animate-spin text-primary" />
-        <span className="font-medium text-foreground">@{participant.handle}</span>
-        <span className="text-muted-foreground">{participant.providerId}</span>
-        <span className="text-muted-foreground">is working{elapsed ? ` · ${elapsed}` : ""}</span>
-        {participant.contextPct !== null ? <span className="text-muted-foreground">· context {participant.contextPct}%</span> : null}
-      </div>
-      <div className="max-w-[85%] rounded-lg border border-dashed border-border px-3.5 py-2 text-xs text-muted-foreground">
-        {participant.activity ?? "Starting up…"}
-      </div>
-    </li>
-  );
-}
-
-const STANCE_STYLE: Record<Stance, string> = {
-  agree: "border-foreground/30 text-foreground",
-  disagree: "border-destructive/50 text-destructive",
-  "need-info": "border-foreground/40 bg-foreground/10 text-foreground",
-  pass: "border-border text-muted-foreground",
-};
-const STANCE_ICON: Record<Stance, "Check" | "CircleX" | "CircleQuestion" | "ArrowRight"> = {
-  agree: "Check",
-  disagree: "CircleX",
-  "need-info": "CircleQuestion",
-  pass: "ArrowRight",
-};
-
-function StanceBadge({ stance, small }: { stance: Stance; small?: boolean }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded-full border font-medium",
-        small ? "px-1.5 py-0 text-[10px]" : "px-2 py-0.5 text-[11px]",
-        STANCE_STYLE[stance],
-      )}
-      title={`Stance: ${stance}`}
-    >
-      <Icon name={STANCE_ICON[stance]} className={small ? "size-2.5" : "size-3"} />
-      {stance}
-    </span>
-  );
-}
-
-function formatChars(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n);
-}
-
 function timeLabel(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function durationLabel(ms: number): string {
-  if (ms < 1000) return "<1s";
-  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
-  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
 }
 
 function clampTurns(value: number): number {
@@ -303,139 +162,133 @@ interface ParticipantChipProps {
   participant: Participant;
   selected: boolean;
   isDocOwner: boolean;
-  canSummarize: boolean;
   onToggle: () => void;
   onOpen: () => void;
   onToggleEdit: () => void;
   onCompact: () => void;
-  onReset: (brief: Brief) => void;
+  onReset: () => void;
   onRemove: () => void;
 }
 
-function ParticipantChip({ participant, selected, isDocOwner, canSummarize, onToggle, onOpen, onToggleEdit, onCompact, onReset, onRemove }: ParticipantChipProps) {
-  const [menu, setMenu] = useState(false);
-  const stats = `${participant.turns} turn${participant.turns === 1 ? "" : "s"} · ~${formatChars(participant.relayedChars)} chars relayed`;
+function ParticipantChip({ participant, selected, isDocOwner, onToggle, onOpen, onToggleEdit, onCompact, onReset, onRemove }: ParticipantChipProps) {
+  const menuRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const close = (event: PointerEvent | globalThis.KeyboardEvent) => {
+      const menu = menuRef.current;
+      if (!menu?.open) return;
+      if (event instanceof globalThis.KeyboardEvent) {
+        if (event.key === "Escape") {
+          menu.open = false;
+          menu.querySelector("summary")?.focus();
+        }
+      } else if (!menu.contains(event.target as Node)) menu.open = false;
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, []);
+  const action = (fn: () => void) => () => {
+    if (menuRef.current) menuRef.current.open = false;
+    fn();
+  };
   return (
-    <span className="relative inline-flex items-stretch overflow-visible rounded-full border border-border text-xs">
-      <button
-        type="button"
-        aria-pressed={selected}
-        onClick={onToggle}
-        title={`${selected ? "Untag" : "Tag in next message"} · ${stats}`}
-        className={cn(
-          "inline-flex items-center gap-1.5 rounded-l-full px-2.5 py-1 hover:bg-state-hover",
-          selected && "bg-foreground text-background hover:bg-foreground/90",
-        )}
-      >
+    <div className="relative inline-flex items-center rounded-full border border-border text-xs">
+      <button type="button" aria-pressed={selected} onClick={onToggle}
+        className={cn("inline-flex items-center gap-2 rounded-l-full px-3 py-1.5 hover:bg-state-hover", selected && "bg-foreground text-background hover:bg-foreground/90")}>
         <StatusDot status={participant.status} />
-        <span className="font-medium">@{participant.handle}</span>
-        <span className={cn("text-muted-foreground", selected && "text-background/70")}>{participant.providerId}</span>
-        {participant.canEdit ? <Icon name="Edit" className={cn("size-3 text-muted-foreground", selected && "text-background/70")} aria-label="May edit files" /> : null}
-        {isDocOwner ? <Icon name="FileText" className={cn("size-3 text-muted-foreground", selected && "text-background/70")} aria-label="Document owner" /> : null}
-        {participant.lastStance ? <StanceBadge stance={participant.lastStance} small /> : null}
+        @{participant.handle}
       </button>
-      <button
-        type="button"
-        onClick={onOpen}
-        disabled={participant.threadId === null}
-        title={participant.threadId === null ? "No thread yet (tag them first)" : "Open agent thread"}
-        aria-label={`Open @${participant.handle} thread`}
-        className="inline-flex items-center border-l border-border px-1.5 text-muted-foreground hover:bg-state-hover hover:text-foreground disabled:opacity-40"
-      >
-        <Icon name="PanelRight" className="size-3.5" />
-      </button>
-      <button
-        type="button"
-        onClick={() => setMenu((open) => !open)}
-        aria-label={`More actions for @${participant.handle}`}
-        aria-expanded={menu}
-        className="inline-flex items-center rounded-r-full border-l border-border px-1.5 text-muted-foreground hover:bg-state-hover hover:text-foreground"
-      >
-        <Icon name="MoreHorizontal" className="size-3.5" />
-      </button>
-      {menu ? (
-        <div className="absolute right-0 top-full z-20 mt-1 w-60 rounded-md border border-border bg-card p-1 text-xs shadow-md">
-          <p className="px-2 py-1 text-muted-foreground">{stats}</p>
-          <p className="px-2 pb-1 text-muted-foreground">
-            {participant.providerId}
-            {participant.model ? ` · ${participant.model}` : ""}
-            {participant.reasoningLevel ? ` · ${participant.reasoningLevel}` : ""}
-          </p>
-          <MenuItem icon="Edit" label={participant.canEdit ? "Make read-only" : "Allow editing files"} onClick={() => { setMenu(false); onToggleEdit(); }} />
-          <MenuItem icon="Layers" label="Compact context" disabled={participant.threadId === null} onClick={() => { setMenu(false); onCompact(); }} />
-          <MenuItem icon="RotateCcw" label="Reset with summary" disabled={!canSummarize} onClick={() => { setMenu(false); onReset("summary"); }} />
-          <MenuItem icon="RotateCcw" label="Reset with full history" onClick={() => { setMenu(false); onReset("full"); }} />
-          <MenuItem icon="Trash2" label="Remove from room" destructive onClick={() => { setMenu(false); onRemove(); }} />
+      <details ref={menuRef} className="relative">
+        <summary aria-label={"Actions for @" + participant.handle} className="flex cursor-pointer list-none rounded-r-full p-1.5 text-muted-foreground hover:bg-state-hover [&::-webkit-details-marker]:hidden">
+          <Icon name="MoreHorizontal" className="size-4" />
+        </summary>
+        <div className="absolute right-0 top-full z-20 mt-2 w-56 rounded-md border border-border bg-card p-1 shadow-md">
+          <div className="space-y-1 px-2 py-2 text-muted-foreground">
+            <p>{participant.providerId}</p>
+            {participant.model ? <p>{participant.model}</p> : null}
+            <p>{participant.canEdit ? "Can edit files" : isDocOwner ? "Can edit the pinned document" : "Read-only"}</p>
+          </div>
+          <MenuItem label="Open thread" disabled={participant.threadId === null} onClick={action(onOpen)} />
+          <MenuItem label={participant.canEdit ? "Make read-only" : "Allow file edits"} onClick={action(onToggleEdit)} />
+          <MenuItem label="Compact context" disabled={participant.threadId === null} onClick={action(onCompact)} />
+          <MenuItem label="Restart with room history" disabled={participant.threadId === null} onClick={action(onReset)} />
+          <MenuItem label="Remove" destructive onClick={action(onRemove)} />
         </div>
-      ) : null}
-    </span>
+      </details>
+    </div>
   );
 }
 
-function MenuItem({ icon, label, onClick, disabled, destructive }: { icon: "Edit" | "Layers" | "RotateCcw" | "Trash2"; label: string; onClick: () => void; disabled?: boolean; destructive?: boolean }) {
+function MenuItem({ label, onClick, disabled, destructive }: { label: string; onClick: () => void; disabled?: boolean; destructive?: boolean }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={cn(
-        "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-state-hover disabled:opacity-40",
-        destructive && "text-destructive",
-      )}
-    >
-      <Icon name={icon} className="size-3.5" />
+    <button type="button" onClick={onClick} disabled={disabled}
+      className={cn("block w-full rounded px-2 py-1.5 text-left hover:bg-state-hover disabled:opacity-40", destructive && "text-destructive")}>
       {label}
     </button>
   );
 }
 
-function MessageRow({ message, providerOf }: { message: Message; providerOf: (handle: string) => string | null }) {
+function CopyMessage({ text }: { text: string }) {
+  const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
+  useEffect(() => {
+    if (status === "idle") return;
+    const timer = setTimeout(() => setStatus("idle"), 2000);
+    return () => clearTimeout(timer);
+  }, [status]);
+  return <>
+    <button type="button" aria-label={status === "copied" ? "Copied" : "Copy message"}
+      title={status === "copied" ? "Copied" : "Copy message"}
+      className="rounded p-1.5 text-muted-foreground hover:bg-state-hover hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setStatus("copied");
+        } catch {
+          setStatus("error");
+        }
+      }}>
+      <Icon name={status === "copied" ? "Check" : "Copy"} className="size-3.5" />
+    </button>
+    <span role="status" className={status === "error" ? "text-destructive" : "sr-only"}>
+      {status === "copied" ? "Message copied" : status === "error" ? "Couldn't copy. Try again." : ""}
+    </span>
+  </>;
+}
+
+function MessageRow({ message }: { message: Message }) {
   const isUser = message.author === "user";
   if (message.author === "system") {
-    return <li className="py-1.5 text-center text-xs text-muted-foreground">{message.text}</li>;
+    return <li className="py-2 text-center text-xs text-muted-foreground">{message.text}</li>;
   }
-  const provider = providerOf(message.author);
   return (
-    <li className={cn("flex flex-col gap-1 py-3", isUser && "items-end")} id={`msg-${message.seq}`}>
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className="font-medium text-foreground">{isUser ? "you" : `@${message.author}`}</span>
-        {provider ? <span className="text-muted-foreground">{provider}</span> : null}
-        {message.tags.length > 0 ? (
-          <span className="text-muted-foreground">to {message.tags.map((t) => `@${t}`).join(", ")}</span>
-        ) : null}
-        {message.stance ? <StanceBadge stance={message.stance} /> : null}
-        {message.turnsLeft > 0 ? (
-          <span className="text-muted-foreground" title="Relays this message may still trigger between agents">
-            {message.turnsLeft} turn{message.turnsLeft === 1 ? "" : "s"} left
-          </span>
-        ) : null}
-        <span className="text-muted-foreground">
-          #{message.seq} · {timeLabel(message.createdAt)}
-          {message.durationMs !== null ? ` · ${durationLabel(message.durationMs)}` : ""}
-        </span>
+    <li className={cn("flex flex-col gap-2 py-4", isUser && "items-end")} id={"msg-" + message.seq}>
+      <div className="flex items-center gap-3 text-xs">
+        <span className="font-medium">{isUser ? "You" : "@" + message.author}</span>
+        <time dateTime={new Date(message.createdAt).toISOString()} className="text-muted-foreground">{timeLabel(message.createdAt)}</time>
+        {!isUser ? <CopyMessage text={message.body + (message.openPoints.length ? "\n\nOpen points\n" + message.openPoints.map((point, index) => `${index + 1}. ${point}`).join("\n") : "")} /> : null}
       </div>
-      <div className={cn("max-w-[85%] rounded-lg border border-border px-3.5 py-2.5 text-sm", isUser ? "bg-foreground/5" : "bg-card")}>
+      <div className={cn("max-w-full text-sm sm:max-w-[90%]", isUser && "rounded-lg bg-foreground/5 px-3 py-2")}>
         <Markdown content={message.body} />
         {message.openPoints.length > 0 ? (
-          <div className="mt-2 border-t border-border pt-2 text-xs">
-            <span className="font-medium text-muted-foreground">Open</span>
-            <ol className="mt-1 list-decimal space-y-0.5 pl-5">
-              {message.openPoints.map((point, index) => (
-                <li key={index}>{point}</li>
-              ))}
+          <details open={message.stance === "need-info"} className="mt-2 text-xs">
+            <summary className="cursor-pointer text-muted-foreground">Open points ({message.openPoints.length})</summary>
+            <ol className="mt-2 list-decimal space-y-1 pl-5">
+              {message.openPoints.map((point, index) => <li key={index}>{point}</li>)}
             </ol>
-          </div>
+          </details>
         ) : null}
       </div>
     </li>
   );
 }
 
-function JobBanner({ job, onCancel, onResume, disabled }: { job: NonNullable<Job>; onCancel: () => void; onResume: () => void; disabled: boolean }) {
-  const roster = job.participants.map((h) => `@${h}`).join(", ");
+function JobBanner({ job, onStop, onResume, disabled }: { job: NonNullable<Job>; onStop: () => void; onResume: () => void; disabled: boolean }) {
   const text = job.paused
     ? `Paused. @${job.paused.handle} needs input: ${job.paused.question}`
-    : `Discussion · turn ${job.turn}/${job.totalTurns} · ${roster}${job.current ? ` · @${job.current} is responding` : ""}`;
+    : `Turn ${job.turn} of ${job.totalTurns}${job.current ? `: @${job.current} is responding` : ""}`;
   return (
     <div className="flex flex-wrap items-center gap-3 border-t border-border bg-card px-4 py-2 text-xs">
       {job.paused ? (
@@ -450,94 +303,27 @@ function JobBanner({ job, onCancel, onResume, disabled }: { job: NonNullable<Job
           Resume
         </Button>
       ) : null}
-      <Button variant="outline" size="sm" onClick={onCancel} disabled={disabled}>
+      <Button variant="outline" size="sm" onClick={onStop} disabled={disabled}>
         <Icon name="Square" className="size-3.5" />
-        Cancel
+        Stop
       </Button>
     </div>
   );
 }
 
-function ChangesBar({ roomId, environmentId }: { roomId: string; environmentId: string | null }) {
-  const { files, note } = useChanges(roomId, environmentId !== null);
-  const [open, setOpen] = useState(false);
-  if (environmentId === null) return null;
-  const total = files.reduce((sum, f) => sum + f.additions + f.deletions, 0);
-  return (
-    <div className="border-b border-border px-4 py-1.5 text-xs">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
-        aria-expanded={open}
-      >
-        <Icon name="FileDiff" className="size-3.5" />
-        {files.length === 0
-          ? note ?? "Workspace clean: no uncommitted changes"
-          : `${files.length} file${files.length === 1 ? "" : "s"} changed in the workspace (${total} lines)`}
-        {files.length > 0 ? <Icon name={open ? "ChevronUp" : "ChevronDown"} className="size-3" /> : null}
-      </button>
-      {open && files.length > 0 ? (
-        <ul className="mt-1.5 max-h-40 space-y-0.5 overflow-y-auto">
-          {files.map((file) => (
-            <li key={file.path} className="flex items-center gap-2 font-mono">
-              <FileLink target={{ kind: "workspace", environmentId, path: file.path }} className="truncate hover:underline">
-                {file.path}
-              </FileLink>
-              <span className="text-muted-foreground">
-                {file.changeKind} +{file.additions} -{file.deletions}
-              </span>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------
-// Room settings, intro preview, and add-participant forms
+// Room settings and participant forms
 // ---------------------------------------------------------------------------
 
 const selectClass =
   "h-8 rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
-
-function IntroPreview({ roomId, handles }: { roomId: string; handles: string[] }) {
-  const rpc = useRpc<Contract>();
-  const [handle, setHandle] = useState(handles[0] ?? "");
-  const [text, setText] = useState<string | null>(null);
-  useEffect(() => {
-    if (handle === "") return;
-    rpc.call("rooms_intro_preview", { roomId, handle }).then(
-      (result) => setText(result.text),
-      (cause: unknown) => setText(describeError(cause)),
-    );
-  }, [rpc, roomId, handle]);
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center gap-2 text-muted-foreground">
-        <span>What a seat is told on first contact</span>
-        <select value={handle} onChange={(e) => setHandle(e.target.value)} className={selectClass} aria-label="Seat">
-          {handles.map((h) => (
-            <option key={h} value={h}>@{h}</option>
-          ))}
-        </select>
-        <span className="text-[11px]">Later turns get only the new messages plus one instruction line. Everything else about behavior comes from your messages.</span>
-      </div>
-      <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-background p-2 font-mono text-[11px] leading-relaxed">
-        {text ?? "Loading…"}
-      </pre>
-    </div>
-  );
-}
 
 function RoomSettings({ detail, onDone }: { detail: RoomDetail; onDone: () => void }) {
   const rpc = useRpc<Contract>();
   const [title, setTitle] = useState(detail.room.title);
   const [docPath, setDocPath] = useState(detail.room.docPath ?? "");
   const [docOwner, setDocOwner] = useState(detail.room.docOwner ?? "");
-  const [turns, setTurns] = useState(detail.room.defaultTurns);
-  const [showIntro, setShowIntro] = useState(false);
+  const [turns, setTurns] = useState(Math.max(2, detail.room.defaultTurns));
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const handles = detail.participants.filter((p) => !p.removed).map((p) => p.handle);
@@ -581,18 +367,13 @@ function RoomSettings({ detail, onDone }: { detail: RoomDetail; onDone: () => vo
           </select>
         </label>
         <label className="flex flex-col gap-1 text-muted-foreground">
-          Default turns
-          <Input type="number" min={0} max={MAX_TURNS} value={turns} onChange={(e) => setTurns(clampTurns(Number(e.target.value)))} className="h-8 w-16 text-xs" />
+          Discussion turn limit
+          <Input type="number" min={2} max={MAX_TURNS} value={turns} onChange={(e) => setTurns(Math.max(2, clampTurns(Number(e.target.value))))} className="h-8 w-16 text-xs" />
         </label>
         <Button type="submit" size="sm" disabled={pending || title.trim() === ""}>Save</Button>
         <Button type="button" size="sm" variant="ghost" onClick={onDone}>Cancel</Button>
-        <Button type="button" size="sm" variant="ghost" onClick={() => setShowIntro((v) => !v)} aria-pressed={showIntro}>
-          <Icon name="Eye" className="size-3.5" />
-          {showIntro ? "Hide agent instructions" : "Show what agents are told"}
-        </Button>
         {error ? <span role="alert" className="text-destructive">{error}</span> : null}
       </div>
-      {showIntro && handles.length > 0 ? <IntroPreview roomId={detail.room.id} handles={handles} /> : null}
     </form>
   );
 }
@@ -637,22 +418,21 @@ function SeatEditor({ seat, options, onChange, onRemove }: { seat: SeatDraft; op
           </option>
         ))}
       </select>
-      <select value={seat.model} onChange={(e) => onChange({ model: e.target.value })} className={selectClass} aria-label="Model">
-        <option value="">default model</option>
-        {(provider?.models ?? []).map((m) => (
-          <option key={m.model} value={m.model}>{m.displayName}{m.isDefault ? " (default)" : ""}</option>
-        ))}
-      </select>
-      {(provider?.reasoningLevels.length ?? 0) > 0 ? (
-        <select value={seat.reasoningLevel} onChange={(e) => onChange({ reasoningLevel: e.target.value })} className={selectClass} aria-label="Reasoning">
-          <option value="">default reasoning</option>
-          {(provider?.reasoningLevels ?? [])
-            .filter((level) => ["low", "medium", "high", "xhigh", "max"].includes(level))
-            .map((level) => (
-              <option key={level} value={level}>{level}</option>
-            ))}
-        </select>
-      ) : null}
+      <details>
+        <summary className="cursor-pointer text-xs text-muted-foreground">Model options</summary>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <select value={seat.model} onChange={(e) => onChange({ model: e.target.value })} className={selectClass} aria-label="Model">
+            <option value="">Default model</option>
+            {(provider?.models ?? []).map((m) => <option key={m.model} value={m.model}>{m.displayName}</option>)}
+          </select>
+          {(provider?.reasoningLevels.length ?? 0) > 0 ? (
+            <select value={seat.reasoningLevel} onChange={(e) => onChange({ reasoningLevel: e.target.value })} className={selectClass} aria-label="Reasoning">
+              <option value="">Default reasoning</option>
+              {(provider?.reasoningLevels ?? []).filter((level) => ["low", "medium", "high", "xhigh", "max"].includes(level)).map((level) => <option key={level} value={level}>{level}</option>)}
+            </select>
+          ) : null}
+        </div>
+      </details>
       <label className="inline-flex items-center gap-1.5 text-xs text-muted-foreground" title="Read-only seats may inspect the workspace but not change it">
         <input type="checkbox" checked={seat.canEdit} onChange={(e) => onChange({ canEdit: e.target.checked })} className="size-3.5" />
         may edit files
@@ -670,9 +450,6 @@ function AddParticipantForm({ detail, options, onDone }: { detail: RoomDetail; o
   const rpc = useRpc<Contract>();
   const first = options.providers.find((p) => p.available) ?? options.providers[0];
   const [seat, setSeat] = useState<SeatDraft>({ handle: "", providerId: first?.id ?? "", model: "", reasoningLevel: "", canEdit: false });
-  const speakers = detail.participants.filter((p) => !p.removed && p.threadId !== null);
-  const [brief, setBrief] = useState<Brief>(speakers.length > 0 ? "summary" : "full");
-  const [summarizer, setSummarizer] = useState(speakers[0]?.handle ?? "");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -683,8 +460,6 @@ function AddParticipantForm({ detail, options, onDone }: { detail: RoomDetail; o
       await rpc.call("rooms_add_participant", {
         roomId: detail.room.id,
         participant: toParticipantInput(seat),
-        brief,
-        summarizer: brief === "summary" ? summarizer || null : null,
       });
       onDone();
     } catch (cause) {
@@ -697,21 +472,6 @@ function AddParticipantForm({ detail, options, onDone }: { detail: RoomDetail; o
     <form onSubmit={submit} className="space-y-2 border-b border-border bg-card px-4 py-2 text-xs">
       <SeatEditor seat={seat} options={options} onChange={(patch) => setSeat((s) => ({ ...s, ...patch }))} />
       <div className="flex flex-wrap items-center gap-2">
-        <label className="flex items-center gap-1.5 text-muted-foreground">
-          Briefing
-          <select value={brief} onChange={(e) => setBrief(e.target.value as Brief)} className={selectClass}>
-            <option value="summary" disabled={speakers.length === 0}>summary written by a participant</option>
-            <option value="full">full transcript</option>
-            <option value="none">none, start from now</option>
-          </select>
-        </label>
-        {brief === "summary" ? (
-          <select value={summarizer} onChange={(e) => setSummarizer(e.target.value)} className={selectClass} aria-label="Summarizer">
-            {speakers.map((p) => (
-              <option key={p.handle} value={p.handle}>@{p.handle}</option>
-            ))}
-          </select>
-        ) : null}
         <Button type="submit" size="sm" disabled={pending || seat.handle.trim() === ""}>
           <Icon name="UserRoundPlus" className="size-3.5" />
           Add
@@ -722,82 +482,6 @@ function AddParticipantForm({ detail, options, onDone }: { detail: RoomDetail; o
     </form>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Templates: prompts you can edit, not hidden behavior
-// ---------------------------------------------------------------------------
-
-interface Template {
-  id: string;
-  label: string;
-  /** Which button the template expects you to press afterwards. */
-  mode: "send" | "discuss";
-  turns: number;
-  build(seats: Participant[], docPath: string | null): { text: string; tags: string[] } | null;
-}
-
-const TEMPLATES: Template[] = [
-  {
-    id: "discuss",
-    label: "Discuss an idea",
-    mode: "discuss",
-    turns: 6,
-    build(seats, docPath) {
-      const [a, b] = seats;
-      if (!a || !b) return null;
-      const doc = docPath ?? "the pinned document";
-      return {
-        tags: [a.handle, b.handle],
-        text: [
-          "Debate and converge on: <topic>",
-          "",
-          `@${a.handle} drafts the proposal into ${doc} as numbered decisions, each with a one-line rationale, and answers every finding by number: accept (and apply), reject (with the reason), or defer (with what would settle it).`,
-          `@${b.handle} reviews critically with numbered findings: severity (blocker, major, minor, nit), the exact target, why it is wrong, and a concrete fix. Verify claims against the workspace. Do not restate the proposal.`,
-        ].join("\n"),
-      };
-    },
-  },
-  {
-    id: "implement",
-    label: "Implement the plan",
-    mode: "send",
-    turns: 2,
-    build(seats, docPath) {
-      const editor = seats.find((s) => s.canEdit) ?? seats[seats.length - 1];
-      const other = seats.find((s) => s.handle !== editor?.handle);
-      if (!editor) return null;
-      const doc = docPath ?? "the pinned document";
-      return {
-        tags: [editor.handle],
-        text: [
-          `@${editor.handle} implement the decisions in ${doc}.`,
-          "Before editing, list the files you will touch. Afterwards report what changed, how you verified it (commands and results), and what you did not do.",
-          other ? `If a decision is ambiguous, ask @${other.handle} instead of guessing.` : "",
-        ].filter(Boolean).join(" "),
-      };
-    },
-  },
-  {
-    id: "review",
-    label: "Review the changes",
-    mode: "discuss",
-    turns: 6,
-    build(seats, docPath) {
-      const editor = seats.find((s) => s.canEdit) ?? seats[seats.length - 1];
-      const reviewer = seats.find((s) => s.handle !== editor?.handle);
-      if (!editor || !reviewer) return null;
-      const doc = docPath ?? "the pinned document";
-      return {
-        tags: [reviewer.handle, editor.handle],
-        text: [
-          `Review the uncommitted changes in this workspace against ${doc}.`,
-          `@${reviewer.handle}: numbered findings with severity, file:line, why, and a concrete fix. Run the tests or commands needed to check a claim.`,
-          `@${editor.handle}: fix the accepted findings, answer each by number, and report how you verified the fix.`,
-        ].join("\n"),
-      };
-    },
-  },
-];
 
 // ---------------------------------------------------------------------------
 // Room view
@@ -812,7 +496,7 @@ function parseMentions(text: string, handles: readonly string[]): string[] {
   return [...found];
 }
 
-type PendingAction = "send" | "discuss" | "cancel" | "resume" | "halt" | "archive" | "participant" | null;
+type PendingAction = "send" | "discuss" | "resume" | "halt" | "archive" | "participant" | null;
 
 function RoomView({ roomId, compact = false }: { roomId: string; compact?: boolean }) {
   const { rpc, detail, error, refetch } = useRoom(roomId);
@@ -820,10 +504,10 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
   const panel = useAppPanel();
   const [text, setText] = useState("");
   const [tagged, setTagged] = useState<string[]>([]);
+  const [mode, setMode] = useState<"reply" | "discuss">("reply");
   const [turns, setTurns] = useState<number | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [hint, setHint] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [options, setOptions] = useState<ContextOptions | null>(null);
@@ -832,13 +516,8 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
 
   const active = useMemo(() => detail?.participants.filter((p) => !p.removed) ?? [], [detail]);
   const handles = useMemo(() => active.map((p) => p.handle), [active]);
-  const now = useTicker(active.some((p) => isRunning(p.status)));
   const mentioned = useMemo(() => parseMentions(text, handles), [text, handles]);
   const tags = useMemo(() => [...new Set([...tagged, ...mentioned])], [tagged, mentioned]);
-  const providerOf = useCallback(
-    (handle: string) => detail?.participants.find((p) => p.handle === handle)?.providerId ?? null,
-    [detail],
-  );
   const effectiveTurns = turns ?? detail?.room.defaultTurns ?? 4;
 
   useEffect(() => {
@@ -876,7 +555,6 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
   const afterSend = () => {
     setText("");
     setTagged([]);
-    setHint(null);
     stickToBottom.current = true;
     refetch();
   };
@@ -885,7 +563,7 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
     run("send", async () => {
       const body = text.trim();
       if (body === "") return;
-      await rpc.call("rooms_post", { roomId, text: body, tags, turns: effectiveTurns });
+      await rpc.call("rooms_post", { roomId, text: body, tags, turns: 0 });
       afterSend();
     });
 
@@ -897,11 +575,9 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
       afterSend();
     });
 
-  const cancelJob = () => run("cancel", () => rpc.call("rooms_cancel_job", { roomId }));
   const resumeJob = () => run("resume", () => rpc.call("rooms_resume_job", { roomId }));
   const halt = () =>
     run("halt", async () => {
-      if (!window.confirm("Stop every running seat mid-turn and drop pending relays? Their partial work stays in their threads.")) return;
       await rpc.call("rooms_halt", { roomId });
       refetch();
     });
@@ -915,24 +591,15 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
 
   const participantAction = (fn: () => Promise<unknown>) => run("participant", async () => { await fn(); refetch(); });
 
-  const applyTemplate = (id: string) => {
-    const template = TEMPLATES.find((t) => t.id === id);
-    if (!template || detail === null) return;
-    const built = template.build(active, detail.room.docPath);
-    if (built === null) {
-      setActionError("This template needs more seats in the room.");
-      return;
-    }
-    setText(built.text);
-    setTagged(built.tags);
-    setTurns(template.turns);
-    setHint(template.mode === "discuss" ? "Edit the prompt, then press Discuss." : "Edit the prompt, then press Send.");
+  const submitMessage = () => {
+    if (mode === "discuss" && detail?.job === null) void discuss();
+    else void send();
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
-      void send();
+      submitMessage();
     }
   };
 
@@ -942,11 +609,6 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
       ? false
       : panel.openFixedTab({ surface: { kind: "current" }, tab: AGENT_TAB, target: { threadId: participant.threadId } });
     if (!accepted) navigate.toThread(participant.threadId);
-  };
-
-  const openDoc = () => {
-    if (compact) return;
-    panel.openFixedTab({ surface: { kind: "current" }, tab: DOC_TAB, target: { roomId } });
   };
 
   if (error !== null) {
@@ -966,19 +628,19 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
 
   const job = detail.job;
   const canSend = text.trim() !== "" && pendingAction === null;
-  const speakers = active.filter((p) => p.threadId !== null);
   const working = active.filter((p) => isRunning(p.status));
   const anyRunning = job !== null || working.length > 0;
   const docTarget = detail.room.docPath !== null && detail.room.environmentId !== null
     ? { kind: "workspace" as const, environmentId: detail.room.environmentId, path: detail.room.docPath }
     : null;
-  const turnsHelp = tags.length >= 2
-    ? "With Discuss: the turn cap. With Send: how many relays each answer may trigger."
-    : "How many times the tagged agent may relay to others before you get the floor back.";
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
+        {!compact ? (
+          <Button variant="ghost" size="sm" className="md:hidden" onClick={() => navigate.toPluginPanel(PANEL_PATH)}>
+            Rooms
+          </Button>
+        ) : null}
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-sm font-semibold">{detail.room.title}</h2>
           {!compact ? (
@@ -987,21 +649,13 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
             </p>
           ) : null}
         </div>
-        {detail.room.docPath ? (
-          compact && docTarget ? (
-            <FileLink target={docTarget} className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs hover:bg-state-hover">
-              <Icon name="FileText" className="size-3.5" />
-              {detail.room.docPath}
-            </FileLink>
-          ) : (
-            <button type="button" onClick={openDoc} className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs hover:bg-state-hover" title="Open the pinned document">
-              <Icon name="FileText" className="size-3.5" />
-              {detail.room.docPath}
-              <span className="text-muted-foreground">{detail.room.docOwner ? `@${detail.room.docOwner}` : "you"}</span>
-            </button>
-          )
+        {docTarget ? (
+          <FileLink target={docTarget} className="inline-flex max-w-56 items-center gap-1.5 rounded px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
+            <Icon name="FileText" className="size-3.5 shrink-0" />
+            <span className="truncate">{detail.room.docPath?.split("/").pop()}</span>
+          </FileLink>
         ) : null}
-        {anyRunning ? (
+        {anyRunning && job === null ? (
           <Button variant="outline" size="sm" onClick={halt} disabled={pendingAction !== null} aria-label="Stop all running seats and drop pending relays">
             <Icon name="Square" className="size-3.5" />
             Stop
@@ -1030,7 +684,6 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
             participant={participant}
             selected={tags.includes(participant.handle)}
             isDocOwner={detail.room.docOwner === participant.handle}
-            canSummarize={speakers.some((p) => p.handle !== participant.handle)}
             onToggle={() =>
               setTagged((current) =>
                 current.includes(participant.handle) ? current.filter((h) => h !== participant.handle) : [...current, participant.handle],
@@ -1039,16 +692,10 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
             onOpen={() => openThread(participant)}
             onToggleEdit={() => participantAction(() => rpc.call("rooms_participant_update", { roomId, handle: participant.handle, canEdit: !participant.canEdit }))}
             onCompact={() => participantAction(() => rpc.call("rooms_participant_compact", { roomId, handle: participant.handle }))}
-            onReset={(brief) =>
-              participantAction(() =>
-                rpc.call("rooms_participant_reset", {
-                  roomId,
-                  handle: participant.handle,
-                  brief,
-                  summarizer: brief === "summary" ? speakers.find((p) => p.handle !== participant.handle)?.handle ?? null : null,
-                }),
-              )
-            }
+            onReset={() => {
+              if (!window.confirm("Restart @" + participant.handle + " with the room history?")) return;
+              void participantAction(() => rpc.call("rooms_participant_reset", { roomId, handle: participant.handle }));
+            }}
             onRemove={() => {
               if (!window.confirm(`Remove @${participant.handle} from the room and stop its thread?`)) return;
               void participantAction(() => rpc.call("rooms_participant_remove", { roomId, handle: participant.handle }));
@@ -1064,103 +711,71 @@ function RoomView({ roomId, compact = false }: { roomId: string; compact?: boole
           <Icon name="UserRoundPlus" className="size-3.5" />
           Add
         </button>
-        {!compact ? <span className="ml-auto text-xs text-muted-foreground">Click a name to tag it. Type @handle to tag inline.</span> : null}
       </div>
 
       {showAdd && options !== null ? <AddParticipantForm detail={detail} options={options} onDone={() => { setShowAdd(false); refetch(); }} /> : null}
 
-      <ChangesBar roomId={roomId} environmentId={detail.room.environmentId} />
 
       <div ref={listRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4">
         {detail.messages.length === 0 ? (
           <div className="py-6">
             <EmptyState>
-              Empty room. Tag a seat and say something, or pick a template below.
+              Choose a participant or type @name to start.
             </EmptyState>
           </div>
         ) : (
           <ul className="mx-auto w-full max-w-3xl divide-y divide-border/60">
             {detail.messages.map((message) => (
-              <MessageRow key={message.seq} message={message} providerOf={providerOf} />
+              <MessageRow key={message.seq} message={message} />
             ))}
-            {working.map((participant) => (
-              <WorkingRow key={`working-${participant.handle}`} participant={participant} now={now} />
-            ))}
+            {working.length > 0 ? (
+              <li role="status" className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+                <Icon name="Loading" className="size-3.5 animate-spin" />
+                {working.map((p) => "@" + p.handle).join(", ")} responding…
+              </li>
+            ) : null}
           </ul>
         )}
       </div>
 
-      {job !== null ? <JobBanner job={job} onCancel={cancelJob} onResume={resumeJob} disabled={pendingAction !== null} /> : null}
+      {job !== null ? <JobBanner job={job} onStop={halt} onResume={resumeJob} disabled={pendingAction !== null} /> : null}
 
       <form
         className="border-t border-border px-4 py-3"
         onSubmit={(event: FormEvent<HTMLFormElement>) => {
           event.preventDefault();
-          void send();
+          submitMessage();
         }}
       >
         <textarea
           value={text}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={onKeyDown}
-          rows={4}
-          placeholder={
-            job?.paused
-              ? `Answer @${job.paused.handle}; sending resumes the discussion…`
-              : tags.length === 0
-                ? "Post a note to the room, or tag someone with @handle to get a reply…"
-                : tags.length === 1
-                  ? `Message to @${tags[0]}…`
-                  : `Message to ${tags.map((t) => `@${t}`).join(", ")}. Send asks each in parallel; Discuss makes them take turns…`
-          }
+          rows={3}
+          placeholder={job?.paused ? "Answer @" + job.paused.handle + "…" : "Message the room…"}
           aria-label="Message"
           className="w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         />
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <span className="text-xs text-muted-foreground">
-            {hint ?? (tags.length === 0 ? "No one tagged: posts a note only." : `Tagged: ${tags.map((t) => `@${t}`).join(", ")}`)}
-          </span>
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <select
-              value=""
-              onChange={(event) => applyTemplate(event.target.value)}
-              className={selectClass}
-              aria-label="Templates"
-              title="Fill the composer with an editable prompt"
-            >
-              <option value="">Templates…</option>
-              {TEMPLATES.map((t) => (
-                <option key={t.id} value={t.id}>{t.label}</option>
-              ))}
+          {job === null ? (
+            <select value={mode} onChange={(event) => setMode(event.target.value as "reply" | "discuss")} className={selectClass} aria-label="Conversation mode">
+              <option value="reply">Ask for replies</option>
+              <option value="discuss">Discuss together</option>
             </select>
-            <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title={turnsHelp}>
-              Turns
-              <Input
-                type="number"
-                min={0}
-                max={MAX_TURNS}
-                value={effectiveTurns}
-                onChange={(event) => setTurns(clampTurns(Number(event.target.value)))}
-                className="h-8 w-14 text-xs"
-                aria-label="Turns"
-              />
+          ) : null}
+          {mode === "discuss" && job === null ? (
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              Turn limit
+              <Input type="number" min={2} max={MAX_TURNS} value={Math.max(2, effectiveTurns)}
+                onChange={(event) => setTurns(Math.max(2, clampTurns(Number(event.target.value))))} className="h-8 w-16 text-xs" />
             </label>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={discuss}
-              disabled={!canSend || tags.length < 2 || job !== null}
-              aria-label={tags.length < 2 ? "Tag at least two seats to start a discussion" : "Let the tagged seats take turns until they agree or the turn cap"}
-            >
-              <Icon name="Repeat" className="size-3.5" />
-              Discuss
-            </Button>
-            <Button type="submit" size="sm" disabled={!canSend}>
-              <Icon name="Sent" className="size-3.5" />
-              Send
-            </Button>
-          </div>
+          ) : null}
+          <span className="text-xs text-muted-foreground">
+            {job?.paused ? "Your reply resumes the discussion." : mode === "discuss" && job === null && tags.length < 2 ? "Choose at least two participants." : tags.length === 0 ? "A note for the room." : ""}
+          </span>
+          <Button type="submit" size="sm" className="ml-auto" disabled={!canSend || (mode === "discuss" && job === null && tags.length < 2)}>
+            {mode === "discuss" && job === null ? "Start discussion" : "Send"}
+          </Button>
         </div>
         {actionError !== null ? <p role="alert" className="mt-2 text-xs text-destructive">{actionError}</p> : null}
       </form>
@@ -1198,7 +813,7 @@ function CreateRoomForm({ preset, onCreated }: { preset?: CreatePreset; onCreate
   const [title, setTitle] = useState(preset?.title ?? "");
   const [projectId, setProjectId] = useState(preset?.projectId ?? "");
   const [seats, setSeats] = useState<SeatDraft[]>([]);
-  const [docPath, setDocPath] = useState(".roundtable/plan.md");
+  const [docPath, setDocPath] = useState("");
   const [docOwner, setDocOwner] = useState("");
   const [turns, setTurns] = useState(4);
   const [error, setError] = useState<string | null>(null);
@@ -1259,12 +874,7 @@ function CreateRoomForm({ preset, onCreated }: { preset?: CreatePreset; onCreate
       <form onSubmit={submit} className="mx-auto w-full max-w-3xl space-y-4">
         <div>
           <h2 className="text-sm font-semibold">New room</h2>
-          <p className="text-xs text-muted-foreground">
-            {preset?.environmentId
-              ? "The room shares this thread's workspace. Participant threads are created the first time each is tagged."
-              : "Every seat gets its own thread in one shared workspace. Threads are created the first time each seat is tagged."}
-            {" "}What each agent should do goes in your messages; the room only tells them how the relay, the footer, and file access work.
-          </p>
+          <p className="text-xs text-muted-foreground">Choose who joins the conversation.</p>
         </div>
         <label className="block space-y-1 text-xs text-muted-foreground">
           Title
@@ -1285,7 +895,7 @@ function CreateRoomForm({ preset, onCreated }: { preset?: CreatePreset; onCreate
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">Seats</span>
+            <span className="text-xs text-muted-foreground">Participants</span>
             <Button
               type="button"
               variant="ghost"
@@ -1297,7 +907,7 @@ function CreateRoomForm({ preset, onCreated }: { preset?: CreatePreset; onCreate
               }}
             >
               <Icon name="Plus" className="size-4" />
-              Add seat
+              Add participant
             </Button>
           </div>
           <div className="space-y-2">
@@ -1307,7 +917,9 @@ function CreateRoomForm({ preset, onCreated }: { preset?: CreatePreset; onCreate
           </div>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-3">
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground">Room options</summary>
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
           <label className="block space-y-1 text-xs text-muted-foreground sm:col-span-2">
             Pinned document (workspace path, optional)
             <Input value={docPath} onChange={(event) => setDocPath(event.target.value)} placeholder=".roundtable/plan.md" />
@@ -1321,12 +933,12 @@ function CreateRoomForm({ preset, onCreated }: { preset?: CreatePreset; onCreate
               ))}
             </select>
           </label>
-        </div>
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-          Default turns
-          <Input type="number" min={0} max={MAX_TURNS} value={turns} onChange={(event) => setTurns(clampTurns(Number(event.target.value)))} className="h-8 w-16 text-xs" />
-          <span>how long the agents may keep talking among themselves before you get the floor back</span>
-        </label>
+          </div>
+          <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+            Discussion turn limit
+            <Input type="number" min={2} max={MAX_TURNS} value={turns} onChange={(event) => setTurns(Math.max(2, clampTurns(Number(event.target.value))))} className="h-8 w-16 text-xs" />
+          </label>
+        </details>
 
         {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
         <div className="flex items-center gap-2">
@@ -1363,8 +975,7 @@ function RoomListItem({ room, active, onSelect }: { room: RoomSummary; active: b
           {room.title}
         </div>
         <div className="truncate text-xs text-muted-foreground">
-          {room.handles.map((h) => `@${h}`).join(" ")} · {room.messageCount} msg
-          {room.lastAuthor ? ` · last ${room.lastAuthor === "user" ? "you" : `@${room.lastAuthor}`}` : ""}
+          {room.handles.map((h) => `@${h}`).join(", ")}
         </div>
       </button>
     </li>
@@ -1380,7 +991,7 @@ function RoundtablePage({ subPath }: { subPath: string }) {
 
   return (
     <div className="flex h-full min-h-0">
-      <aside className="flex w-60 shrink-0 flex-col border-r border-border">
+      <aside className={cn("flex w-52 shrink-0 flex-col border-r border-border", (roomId !== null || creating) && "hidden md:flex")}>
         <div className="flex items-center justify-between px-3 py-2.5">
           <span className="text-xs font-medium text-muted-foreground">Rooms</span>
           <Button variant="ghost" size="sm" onClick={() => navigate.toPluginPanel(PANEL_PATH, { subPath: "new" })}>
@@ -1412,7 +1023,7 @@ function RoundtablePage({ subPath }: { subPath: string }) {
         ) : (
           <div className="p-6">
             <EmptyState>
-              Pick a room or create one. Tag one seat and Send to ask it something. Tag two or more and Discuss to let them take turns until they agree. Turns bounds how long they keep talking before you get the floor back.
+              Choose a room to continue, or start a new conversation.
             </EmptyState>
           </div>
         )}
@@ -1431,79 +1042,6 @@ function AgentThreadTab() {
     );
   }
   return <ThreadChat key={target.target.threadId} threadId={target.target.threadId} variant="compact" layout="contained" className="h-full" />;
-}
-
-function DocumentTab() {
-  const target = useFixedTabTarget(DOC_TAB);
-  const roomId = target?.target.roomId ?? null;
-  const { rpc, doc, error, refetch } = useDoc(roomId);
-  const { detail } = useRoom(roomId);
-  const [pending, setPending] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  if (roomId === null) {
-    return (
-      <div className="p-4">
-        <EmptyState>Open a room and click its pinned document to view it here.</EmptyState>
-      </div>
-    );
-  }
-  const create = async () => {
-    setPending(true);
-    setCreateError(null);
-    try {
-      await rpc.call("rooms_doc_create", { roomId });
-      refetch();
-    } catch (cause) {
-      setCreateError(describeError(cause));
-    } finally {
-      setPending(false);
-    }
-  };
-  const environmentId = detail?.room.environmentId ?? null;
-  const isMarkdown = doc?.path?.toLowerCase().endsWith(".md") ?? false;
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2 text-xs">
-        <Icon name="FileText" className="size-3.5 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate font-mono">{doc?.path ?? "no pinned document"}</span>
-        {doc?.path && environmentId ? (
-          <FileLink target={{ kind: "workspace", environmentId, path: doc.path }} className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground">
-            <Icon name="ExternalLink" className="size-3.5" />
-            Open
-          </FileLink>
-        ) : null}
-        <Button variant="ghost" size="sm" onClick={refetch} aria-label="Refresh document">
-          <Icon name="ArrowReloadHorizontal" className="size-3.5" />
-        </Button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        {error ? (
-          <p role="alert" className="text-sm text-destructive">{error}</p>
-        ) : doc === null ? (
-          <EmptyState>Loading…</EmptyState>
-        ) : !doc.exists ? (
-          <div className="space-y-3">
-            <EmptyState>{doc.note ?? "The document does not exist yet."}</EmptyState>
-            {doc.path && environmentId ? (
-              <div className="flex items-center gap-2">
-                <Button size="sm" onClick={create} disabled={pending}>
-                  <Icon name="Plus" className="size-3.5" />
-                  Create from template
-                </Button>
-                {createError ? <span className="text-xs text-destructive">{createError}</span> : null}
-              </div>
-            ) : null}
-          </div>
-        ) : isMarkdown ? (
-          <div className="mx-auto w-full max-w-3xl text-sm">
-            <Markdown content={doc.content} />
-          </div>
-        ) : (
-          <SourceCode content={doc.content} path={doc.path ?? "document.txt"} overflow="wrap" />
-        )}
-      </div>
-    </div>
-  );
 }
 
 function ThreadRoomPanel({ threadId }: { threadId: string }) {
@@ -1549,7 +1087,6 @@ export default definePluginApp((app) => {
     component: RoundtablePage,
     fixedTabs: [
       { ...AGENT_TAB, title: "Agent thread", icon: "Bot", layout: "flush", component: AgentThreadTab },
-      { ...DOC_TAB, title: "Document", icon: "FileText", layout: "flush", component: DocumentTab },
     ],
   });
   app.slots.threadPanelAction({

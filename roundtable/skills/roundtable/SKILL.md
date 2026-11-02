@@ -48,10 +48,19 @@ Write `@handle` when you want a specific participant to respond. If the user's m
 | `bb roundtable show <room> [--since <seq>]` | Print the transcript. Use `--since` with the last `#seq` you saw. |
 | `bb roundtable say <room> [--to a,b] [--turns N] <message>` | Post. Inside a participant thread you post as that participant. `--to` or `@handle` tags participants so they reply. |
 | `bb roundtable discuss <room> --between a,b [--turns N] <message>` | Scheduled back-and-forth until consensus or the cap. |
-| `bb roundtable add <room> <handle>=<provider>[:edit] [--brief summary|full|none]` | Add a participant with a briefing. |
+| `bb roundtable add <room> <handle>=<provider>[=model][:edit]` | Add a participant with the room history. |
 | `bb roundtable doc <room> --path <path> [--owner <handle>]` | Pin the working document. |
 | `bb roundtable intro <room> <handle>` | Print exactly what a participant is told on first contact. |
-| `bb roundtable resume|cancel <room>` | Resume a paused discussion or cancel it. |
+| `bb roundtable resume <room>` | Resume a paused discussion. |
+| `bb roundtable cancel <room>` | Cancel the current discussion. |
+| `bb roundtable stop <room>` | Stop all running participants. |
+| `bb roundtable compact <room> <handle>` | Compact a participant's context. |
+| `bb roundtable reset <room> <handle>` | Restart a participant with the room history. |
+| `bb roundtable remove <room> <handle>` | Remove a participant. |
+
+Added and restarted participants receive the room history. Briefing and summarizer options are no longer supported.
+
+In the UI, **Ask for replies** requests one response from each selected participant. **Discuss together** schedules rounds up to the turn limit. CLI `say --turns N` also supports a bounded relay allowance; `--turns 0` requests direct replies only.
 
 Add `--json` when the output drives code.
 
