@@ -161,11 +161,12 @@ request. Also honor explicit visual requests. Save and present it before the fin
 reply instead of merely offering to make one. Keep mundane queries, routine tasks
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
-An explainer teaches, it does not list. Organize it around the problem: what was
-being attempted, why the obvious approach fails, how the solution removes that
-obstacle, what evidence shows it works, and which pitfalls were hit, each with its
-cause and fix. Split a substantial subject into chapters along that arc, with a
-chapter navigator, rather than one long page.
+Optimize human explainers for understanding, not brevity. Open each section with
+plain explanatory paragraphs: what happens, how it works, and why it matters.
+Where relevant, explain what would fail without the mechanism and what evidence
+supports it. Several paragraphs are fine. Split substantial subjects into chapters
+with a navigator. This guidance is for human HTML, not the comprehensive agent
+record body.
 
 Explain with many diagrams, not one. Give each mechanism, failure, and fix its own
 drawn diagram in inline SVG or CSS, and make most of them interactive: stepping
@@ -175,17 +176,17 @@ input. Show the failing case next to the fixed one wherever possible.
 Diagrams must be visual. Never put sentences or strings of phrases inside one,
 such as "Cache warm. Two retries left. Lock held by worker 3." A label names one
 component, value, or state in a few words. Show conditions with shape, color,
-position, and arrows, for example an idle worker drawn greyed out. Give each
-diagram at most a one-sentence caption. Do not use vague terms to shrink a
-diagram. Split it into more diagrams when there is more to show. Draw the actual
-components, state, or data rather than boxes in an outline, and use arrows only
-for real relationships.
+position, and arrows, for example an idle worker drawn greyed out. Accompany each
+diagram with a paragraph explaining what to look at and what it means. Keep that
+prose outside the drawing. Do not use vague terms to shrink a diagram. Split it
+into more diagrams when there is more to show. Draw the actual components, state,
+or data rather than boxes in an outline, and use arrows only for real relationships.
 
 Keep each chapter's essential ideas, reasoning, results, and qualifications visible,
-with diagrams and short prose. Give a substantial idea its own section or chapter.
-Reserve expanders for optional minutiae that readers can skip without losing the
-explanation. Use visuals within optional detail when they clarify a mechanism or
-relationship. Hiding and revealing text alone is not an interactive explanation.
+with diagrams and explanatory prose, readable top to bottom without opening
+expanders. Give a substantial idea its own section or chapter. Reserve expanders
+for optional minutiae, explained with the same care as the main text. Use visuals
+within optional detail when they clarify a mechanism or relationship. Hiding and revealing text alone is not an interactive explanation.
 
 The explainer is complete: every result, limit, caveat, and open question that
 matters in the source records is covered, and optional detail agrees with the main
@@ -196,11 +197,18 @@ check coverage against the records and check that no diagram holds a sentence. U
 tables only for compact reference data in optional detail.
 
 Write simply and precisely for someone who may know the ideas but not the
-codebase. Use plain role names in diagrams. Explain roles before code names, and
-define terms and symbols where first used. Leave commit SHAs, thread references,
-and check dates to the record, since readers of an explainer do not need them.
-Where exact implementation matters, add a brief annotated snippet alongside the
-explanation. Use pseudocode for architecture.
+codebase. Use full sentences with explicit subjects and verbs, one idea at a time,
+instead of compressed phrases or noun stacks. Explain roles before code names,
+and define technical terms and symbols on first use with a concrete example where
+helpful. Carry a running example through related sections. Use plain role names in
+diagrams. Leave commit SHAs, thread references, and check dates to the record.
+
+For code or algorithms, use annotated code or pseudocode instead of dense bullet
+lists. Explain what the code does first, retain relevant real function names, and
+use inline comments to explain each meaningful step. Follow it with a paragraph
+explaining what matters most. Use pseudocode for architecture, without adding code
+where it does not help. Reserve bullets for genuinely parallel or reference items,
+written as plain sentences.
 
 Recall reusable HTML first, and check it against the current record before
 presenting it again. Author new visuals as self-contained UTF-8 HTML under 5 MiB
