@@ -167,7 +167,9 @@ plain paragraphs: what happens, how it works, and why it matters, including fail
 and evidence where relevant. Place its diagram right there, then explain what to
 look at, which toggle or step to try, and what changes. Add annotated pseudocode
 where code matters before building on the concept. Do not group diagrams at the
-top and follow them with fact lists. Several paragraphs are fine. Split substantial
+top and follow them with fact lists. Interleave diagrams or code blocks with a
+handful of explanatory paragraphs, often two to five, without making that a quota
+or limit. Break up long walls of text at concept boundaries. Split substantial
 subjects into chapters with a navigator. This guidance is for human HTML, not the
 comprehensive agent record body.
 
@@ -199,12 +201,13 @@ finding to the record first. Mark inferred causes as inferred. Before saving,
 check coverage against the records and check that no diagram holds a sentence.
 
 Write simply and precisely for someone who may know the ideas but not the
-codebase. Use full sentences with explicit subjects and verbs, one idea at a time,
-instead of compressed phrases or noun stacks. Explain roles before code names,
+codebase. Never compress prose to meet a length target. Use complete sentences
+that say who does what, to what, and why, rather than clipped fragments or noun
+stacks. Elaborate with an example or consequence when an idea is not obvious.
+Every paragraph should explain something. Explain roles before code names,
 and define technical terms and symbols on first use with a concrete example where
 helpful. Carry one running example through the tutorial and refer back to it.
-Use plain role names in
-diagrams. Leave commit SHAs, thread references, and check dates to the record.
+Use plain role names in diagrams. Leave commit SHAs, thread references, and check dates to the record.
 
 When explaining a change, first teach the relevant system with a pseudocode
 walkthrough of its phases and flows before explaining what changes.
