@@ -33,13 +33,6 @@ const target = { ...ref, title: first.title };
 
 beforeEach(() => {
   localStorage.clear();
-  vi.stubGlobal(
-    "ResizeObserver",
-    class {
-      observe() {}
-      disconnect() {}
-    },
-  );
   window.matchMedia = vi.fn(
     () =>
       ({
@@ -326,4 +319,22 @@ it("does not display a reader while its BB panel tab is hidden", async () => {
     ).toBe(true),
   );
   expect(document.querySelector("iframe")).toBeNull();
+});
+
+it("keeps the reader above a stacked panel shelf and follows it as it slides", async () => {
+  let left = 400;
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+    () => new DOMRect(left, 50, 360, 600),
+  );
+  const slot = renderSlot({ component: ExplainersPanel }, props, {
+    rpc: { listThreadExplainers: () => [first], readExplainer: () => saved },
+  });
+  // BB shows the mobile panel as a fixed shelf portaled above the thread.
+  Object.assign(slot.container.style, { position: "fixed", zIndex: "45" });
+  const frame = (await screen.findByTitle(first.title)) as HTMLIFrameElement;
+  await waitFor(() => expect(frame.style.display).toBe("block"));
+  expect(frame.style.zIndex).toBe("46");
+  expect(frame.style.left).toBe("400px");
+  left = 0;
+  await waitFor(() => expect(frame.style.left).toBe("0px"));
 });
