@@ -182,11 +182,12 @@ prose outside the drawing. Do not use vague terms to shrink a diagram. Split it
 into more diagrams when there is more to show. Draw the actual components, state,
 or data rather than boxes in an outline, and use arrows only for real relationships.
 
-Keep each chapter's essential ideas, reasoning, results, and qualifications visible,
-with diagrams and explanatory prose, readable top to bottom without opening
-expanders. Give a substantial idea its own section or chapter. Reserve expanders
-for optional minutiae, explained with the same care as the main text. Use visuals
-within optional detail when they clarify a mechanism or relationship. Hiding and revealing text alone is not an interactive explanation.
+Keep all explanatory content visible by default. Do not use `<details>/<summary>`
+or other collapsed or expandable content sections. Organize depth with headings:
+`h1` for the title, `h2` for chapters, `h3` for topics, and `h4` for sub-points.
+Put the overview first and supporting detail in visible subsections below it.
+Use visuals within detailed sections when they clarify a mechanism or relationship.
+Hiding and revealing text alone is not an interactive explanation.
 
 The explainer is complete: every result, limit, caveat, and open question that
 matters in the source records is covered, and optional detail agrees with the main
@@ -215,8 +216,8 @@ presenting it again. Author new visuals as self-contained UTF-8 HTML under 5 MiB
 with inline CSS, JavaScript, and assets, and no companion files or relative
 imports. Reflow or split diagrams at narrow widths instead of shrinking their
 labels. Use BB variables such as `var(--background)` and `var(--foreground)`. With
-a browser, check rendering at 360px and in dark mode, every chapter, expander,
-and control, and console errors. Otherwise inspect the file and disclose
+a browser, check rendering at 360px and in dark mode, every chapter and control,
+and console errors. Otherwise inspect the file and disclose
 that rendering was not verified.
 
 Present visuals, charts, diagrams, mockups, and reports as self-contained HTML in
