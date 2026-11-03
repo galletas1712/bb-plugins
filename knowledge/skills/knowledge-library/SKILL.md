@@ -161,12 +161,15 @@ request. Also honor explicit visual requests. Save and present it before the fin
 reply instead of merely offering to make one. Keep mundane queries, routine tasks
 and updates, and simple answers in chat. Saving findings does not require HTML.
 
-Optimize human explainers for understanding, not brevity. Open each section with
-plain explanatory paragraphs: what happens, how it works, and why it matters.
-Where relevant, explain what would fail without the mechanism and what evidence
-supports it. Several paragraphs are fine. Split substantial subjects into chapters
-with a navigator. This guidance is for human HTML, not the comprehensive agent
-record body.
+Write each human explainer as a technical tutorial that builds understanding from
+top to bottom. Optimize for understanding, not brevity. Introduce each concept in
+plain paragraphs: what happens, how it works, and why it matters, including failures
+and evidence where relevant. Place its diagram right there, then explain what to
+look at, which toggle or step to try, and what changes. Add annotated pseudocode
+where code matters before building on the concept. Do not group diagrams at the
+top and follow them with fact lists. Several paragraphs are fine. Split substantial
+subjects into chapters with a navigator. This guidance is for human HTML, not the
+comprehensive agent record body.
 
 Explain with many diagrams, not one. Give each mechanism, failure, and fix its own
 drawn diagram in inline SVG or CSS, and make most of them interactive: stepping
@@ -176,8 +179,7 @@ input. Show the failing case next to the fixed one wherever possible.
 Diagrams must be visual. Never put sentences or strings of phrases inside one,
 such as "Cache warm. Two retries left. Lock held by worker 3." A label names one
 component, value, or state in a few words. Show conditions with shape, color,
-position, and arrows, for example an idle worker drawn greyed out. Accompany each
-diagram with a paragraph explaining what to look at and what it means. Keep that
+position, and arrows, for example an idle worker drawn greyed out. Keep explanatory
 prose outside the drawing. Do not use vague terms to shrink a diagram. Split it
 into more diagrams when there is more to show. Draw the actual components, state,
 or data rather than boxes in an outline, and use arrows only for real relationships.
@@ -194,22 +196,26 @@ matters in the source records is covered, and optional detail agrees with the ma
 explanation.
 Every fact an explainer shows must also be in a record body, so add any missing
 finding to the record first. Mark inferred causes as inferred. Before saving,
-check coverage against the records and check that no diagram holds a sentence. Use
-tables only for compact reference data in optional detail.
+check coverage against the records and check that no diagram holds a sentence.
 
 Write simply and precisely for someone who may know the ideas but not the
 codebase. Use full sentences with explicit subjects and verbs, one idea at a time,
 instead of compressed phrases or noun stacks. Explain roles before code names,
 and define technical terms and symbols on first use with a concrete example where
-helpful. Carry a running example through related sections. Use plain role names in
+helpful. Carry one running example through the tutorial and refer back to it.
+Use plain role names in
 diagrams. Leave commit SHAs, thread references, and check dates to the record.
 
+When explaining a change, first teach the relevant system with a pseudocode
+walkthrough of its phases and flows before explaining what changes.
 For code or algorithms, use annotated code or pseudocode instead of dense bullet
 lists. Explain what the code does first, retain relevant real function names, and
 use inline comments to explain each meaningful step. Follow it with a paragraph
 explaining what matters most. Use pseudocode for architecture, without adding code
-where it does not help. Reserve bullets for genuinely parallel or reference items,
-written as plain sentences.
+where it does not help. Turn fact lists into explanatory paragraphs or annotated
+pseudocode. Keep exact names, code locations, and numbers in those explanations.
+Reserve lists and tables for genuinely parallel reference items, such as a glossary
+or a small code-location table at the end of a section.
 
 Recall reusable HTML first, and check it against the current record before
 presenting it again. Author new visuals as self-contained UTF-8 HTML under 5 MiB
