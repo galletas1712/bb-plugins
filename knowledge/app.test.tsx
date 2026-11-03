@@ -88,6 +88,9 @@ it("switches short titles with a dropdown and keeps opened readers connected", a
   });
   await waitFor(() => expect(frame.srcdoc).toContain("--chart-2:#2dd4bf"));
   expect(frame.srcdoc).toContain("<script>window.count=1</script>");
+  // Fragment links must resolve inside the document, not against BB's page.
+  expect(frame.srcdoc).toContain('<head><base href="about:srcdoc">');
+  expect(frame.srcdoc).toContain('link.target = "_blank"');
   expect(frame.getAttribute("sandbox")).toBe(
     "allow-scripts allow-popups allow-popups-to-escape-sandbox",
   );

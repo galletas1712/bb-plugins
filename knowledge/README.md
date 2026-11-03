@@ -115,7 +115,8 @@ these live readers, so the selected document reopens with fresh document state.
 
 The reader accepts current HTML up to 5 MiB, verifies its hash and UTF-8 encoding,
 and renders it in a sandbox without same-origin access. Scripts and external-link
-popups work. BB theme variables and color scheme are injected. Theme changes may
+popups work. In-page `#section` links scroll within the document, and web links
+without a target open in a new tab so the reader keeps its state. BB theme variables and color scheme are injected. Theme changes may
 reload a document. Other refreshes keep the frame intact when its hash is unchanged.
 Use self-contained HTML with inline CSS, JavaScript and assets. Companion files are
 not served by the reader. Saving is preservation, not filesystem write protection.

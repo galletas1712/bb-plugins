@@ -121,12 +121,27 @@ function useThemeCss() {
   return theme;
 }
 
+// A srcdoc document resolves relative URLs against BB's page, so "#section"
+// would navigate the reader to BB itself. Resolving against about:srcdoc keeps
+// fragment links in the document.
+const linkBase = "about:srcdoc";
+// Web links open in a new tab, so the reader keeps its state and sites that
+// refuse framing still load.
+const linkScript = `addEventListener("click", (event) => {
+  const link = event.target instanceof Element && event.target.closest("a[href]");
+  if (link && !link.target && /^https?:$/.test(link.protocol)) link.target = "_blank";
+}, true);`;
+
 function themedHtml(html: string, css: string, colorScheme: string) {
   const doc = new DOMParser().parseFromString(html, "text/html");
   doc.documentElement.style.colorScheme = colorScheme;
+  const base = doc.createElement("base");
+  base.href = linkBase;
   const style = doc.createElement("style");
   style.textContent = css;
-  doc.head.prepend(style);
+  const script = doc.createElement("script");
+  script.textContent = linkScript;
+  doc.head.prepend(base, style, script);
   return "<!doctype html>" + doc.documentElement.outerHTML;
 }
 
